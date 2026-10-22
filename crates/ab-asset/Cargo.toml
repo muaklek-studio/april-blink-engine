@@ -1,0 +1,24 @@
+[package]
+name = "ab-asset"
+description = "Asset loading (glTF 2.0, PNG/JPEG) and caching for April Blink Engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-animation.workspace = true
+ab-audio.workspace = true
+ab-core.workspace = true
+ab-ecs.workspace = true
+ab-rendering.workspace = true
+ab-scene.workspace = true
+ab-vfs.workspace = true
+gltf = { workspace = true, default-features = false, features = ["utils", "names", "KHR_materials_emissive_strength", "KHR_materials_unlit"] }
+image.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "ab-editor"
+description = "April Blink Editor: scene editing, play-in-editor, assets and console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ab-editor"
+path = "src/main.rs"
+
+[dependencies]
+ab-engine.workspace = true
+ab-project.workspace = true
+anyhow.workspace = true
+# egui_dock and egui-phosphor support egui 0.36; eframe 0.36 uses the same wgpu as the engine.
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+egui_dock = "0.21"
+egui-phosphor = "0.14"
+image.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wgpu.workspace = true
+# Native folder pickers (New Project, Import).
+rfd = "0.17"
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+# Text files are stored with LF line endings (rustfmt and the scene files expect them).
+* text=auto eol=lf
+
+# Windows scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: never diffed or converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.glb binary
+*.bin binary
+*.ttf binary
+*.otf binary
+*.wav binary
+*.ogg binary
+*.mp3 binary
+*.flac binary
+*.abp binary

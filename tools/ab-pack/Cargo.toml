@@ -1,0 +1,16 @@
+[package]
+name = "ab-pack"
+description = "Creates, inspects and verifies April Blink asset packs (.abp)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-vfs.workspace = true
+anyhow.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+
+[lints]
+workspace = true

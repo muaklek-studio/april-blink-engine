@@ -1,0 +1,18 @@
+[package]
+name = "ab-app"
+description = "April Blink Engine bootstrap application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-demo-scripts.workspace = true
+ab-engine.workspace = true
+anyhow.workspace = true
+image = { workspace = true, default-features = false, features = ["png"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

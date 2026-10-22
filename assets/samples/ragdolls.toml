@@ -1,0 +1,739 @@
+[environment]
+ambient_color = "#b4c3dc"
+ambient_energy = 0.45
+background = "#14171d"
+
+[[node]]
+name = "Playground"
+type = "Node3D"
+
+[[node]]
+name = "Sun"
+parent = "."
+type = "DirectionalLight3D"
+rotation = [-50.0, 35.0, 0.0]
+light = { energy = 3.0, shadows = true }
+
+[[node]]
+name = "Camera"
+parent = "."
+type = "Camera3D"
+position = [5.5, 3.2, 6.5]
+rotation = [-18.0, 38.0, 0.0]
+camera = { current = true, fov = 60.0 }
+
+[[node]]
+name = "Step0"
+parent = "."
+type = "StaticBody3D"
+position = [0.0, -0.5, 0.0]
+
+[[node]]
+name = "Mesh"
+parent = "Step0"
+type = "MeshInstance3D"
+scale = [20.0, 1.0, 20.0]
+material = { color = "#5a5e66", roughness = 0.85 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Step0"
+type = "CollisionShape3D"
+shape = { box = [20.0, 1.0, 20.0] }
+
+[[node]]
+name = "Step1"
+parent = "."
+type = "StaticBody3D"
+position = [0.0, 0.25, -1.0]
+
+[[node]]
+name = "Mesh"
+parent = "Step1"
+type = "MeshInstance3D"
+scale = [3.0, 0.5, 2.0]
+material = { color = "#5a5e66", roughness = 0.85 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Step1"
+type = "CollisionShape3D"
+shape = { box = [3.0, 0.5, 2.0] }
+
+[[node]]
+name = "Step2"
+parent = "."
+type = "StaticBody3D"
+position = [0.0, 0.75, -2.0]
+
+[[node]]
+name = "Mesh"
+parent = "Step2"
+type = "MeshInstance3D"
+scale = [3.0, 0.5, 2.0]
+material = { color = "#5a5e66", roughness = 0.85 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Step2"
+type = "CollisionShape3D"
+shape = { box = [3.0, 0.5, 2.0] }
+
+[[node]]
+name = "Step3"
+parent = "."
+type = "StaticBody3D"
+position = [0.0, 1.25, -3.0]
+
+[[node]]
+name = "Mesh"
+parent = "Step3"
+type = "MeshInstance3D"
+scale = [3.0, 0.5, 2.0]
+material = { color = "#5a5e66", roughness = 0.85 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Step3"
+type = "CollisionShape3D"
+shape = { box = [3.0, 0.5, 2.0] }
+
+[[node]]
+name = "Falling"
+parent = "."
+type = "Ragdoll"
+position = [0.0, 3.2, -1.0]
+rotation = [70.0, 20.0, 0.0]
+ragdoll = { active = true }
+
+[[node]]
+name = "Pelvis"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.0, 0.95, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 11.931818 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/Pelvis"
+type = "MeshInstance3D"
+scale = [0.32, 0.2, 0.2]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/Pelvis"
+type = "CollisionShape3D"
+shape = { box = [0.32, 0.2, 0.2] }
+
+[[node]]
+name = "Chest"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.0, 1.3, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 19.886364 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/Chest"
+type = "MeshInstance3D"
+scale = [0.38, 0.45, 0.22]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/Chest"
+type = "CollisionShape3D"
+shape = { box = [0.38, 0.45, 0.22] }
+
+[[node]]
+name = "Head"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.0, 1.66, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 6.3636365 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/Head"
+type = "MeshInstance3D"
+material = { color = "#e8bea0", roughness = 0.7 }
+mesh = { primitive = "sphere", radius = 0.12, rings = 16, segments = 32 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/Head"
+type = "CollisionShape3D"
+shape = { sphere = 0.12 }
+
+[[node]]
+name = "UpperArmL"
+parent = "Falling"
+type = "RigidBody3D"
+position = [-0.25, 1.33, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 2.3863635 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/UpperArmL"
+type = "MeshInstance3D"
+scale = [0.1, 0.3, 0.1]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/UpperArmL"
+type = "CollisionShape3D"
+shape = { box = [0.1, 0.3, 0.1] }
+
+[[node]]
+name = "LowerArmL"
+parent = "Falling"
+type = "RigidBody3D"
+position = [-0.25, 1.03, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 1.5909091 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/LowerArmL"
+type = "MeshInstance3D"
+scale = [0.09, 0.3, 0.09]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/LowerArmL"
+type = "CollisionShape3D"
+shape = { box = [0.09, 0.3, 0.09] }
+
+[[node]]
+name = "ThighL"
+parent = "Falling"
+type = "RigidBody3D"
+position = [-0.1, 0.65, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 7.9545455 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/ThighL"
+type = "MeshInstance3D"
+scale = [0.14, 0.4, 0.14]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/ThighL"
+type = "CollisionShape3D"
+shape = { box = [0.14, 0.4, 0.14] }
+
+[[node]]
+name = "ShinL"
+parent = "Falling"
+type = "RigidBody3D"
+position = [-0.1, 0.24, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 3.9772727 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/ShinL"
+type = "MeshInstance3D"
+scale = [0.11, 0.42, 0.11]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/ShinL"
+type = "CollisionShape3D"
+shape = { box = [0.11, 0.42, 0.11] }
+
+[[node]]
+name = "UpperArmR"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.25, 1.33, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 2.3863635 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/UpperArmR"
+type = "MeshInstance3D"
+scale = [0.1, 0.3, 0.1]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/UpperArmR"
+type = "CollisionShape3D"
+shape = { box = [0.1, 0.3, 0.1] }
+
+[[node]]
+name = "LowerArmR"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.25, 1.03, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 1.5909091 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/LowerArmR"
+type = "MeshInstance3D"
+scale = [0.09, 0.3, 0.09]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/LowerArmR"
+type = "CollisionShape3D"
+shape = { box = [0.09, 0.3, 0.09] }
+
+[[node]]
+name = "ThighR"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.1, 0.65, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 7.9545455 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/ThighR"
+type = "MeshInstance3D"
+scale = [0.14, 0.4, 0.14]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/ThighR"
+type = "CollisionShape3D"
+shape = { box = [0.14, 0.4, 0.14] }
+
+[[node]]
+name = "ShinR"
+parent = "Falling"
+type = "RigidBody3D"
+position = [0.1, 0.24, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 3.9772727 }
+
+[[node]]
+name = "Mesh"
+parent = "Falling/ShinR"
+type = "MeshInstance3D"
+scale = [0.11, 0.42, 0.11]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Falling/ShinR"
+type = "CollisionShape3D"
+shape = { box = [0.11, 0.42, 0.11] }
+
+[[node]]
+name = "Spine"
+parent = "Falling"
+type = "Joint3D"
+position = [0.0, 1.065, 0.0]
+rotation = [0.0, 0.0, 90.0]
+joint = { body_a = "../Pelvis", body_b = "../Chest", kind = "cone", swing = 25.0, twist = 20.0 }
+
+[[node]]
+name = "Neck"
+parent = "Falling"
+type = "Joint3D"
+position = [0.0, 1.54, 0.0]
+rotation = [0.0, 0.0, 90.0]
+joint = { body_a = "../Chest", body_b = "../Head", kind = "cone", swing = 35.0, twist = 40.0 }
+
+[[node]]
+name = "ShoulderL"
+parent = "Falling"
+type = "Joint3D"
+position = [-0.25, 1.47, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Chest", body_b = "../UpperArmL", kind = "cone", swing = 80.0, twist = 45.0 }
+
+[[node]]
+name = "ElbowL"
+parent = "Falling"
+type = "Joint3D"
+position = [-0.25, 1.18, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../UpperArmL", body_b = "../LowerArmL", kind = "hinge", limits = [0.0, 145.0] }
+
+[[node]]
+name = "HipL"
+parent = "Falling"
+type = "Joint3D"
+position = [-0.1, 0.85, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Pelvis", body_b = "../ThighL", kind = "cone", swing = 60.0, twist = 20.0 }
+
+[[node]]
+name = "KneeL"
+parent = "Falling"
+type = "Joint3D"
+position = [-0.1, 0.45, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../ThighL", body_b = "../ShinL", kind = "hinge", limits = [-145.0, 0.0] }
+
+[[node]]
+name = "ShoulderR"
+parent = "Falling"
+type = "Joint3D"
+position = [0.25, 1.47, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Chest", body_b = "../UpperArmR", kind = "cone", swing = 80.0, twist = 45.0 }
+
+[[node]]
+name = "ElbowR"
+parent = "Falling"
+type = "Joint3D"
+position = [0.25, 1.18, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../UpperArmR", body_b = "../LowerArmR", kind = "hinge", limits = [0.0, 145.0] }
+
+[[node]]
+name = "HipR"
+parent = "Falling"
+type = "Joint3D"
+position = [0.1, 0.85, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Pelvis", body_b = "../ThighR", kind = "cone", swing = 60.0, twist = 20.0 }
+
+[[node]]
+name = "KneeR"
+parent = "Falling"
+type = "Joint3D"
+position = [0.1, 0.45, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../ThighR", body_b = "../ShinR", kind = "hinge", limits = [-145.0, 0.0] }
+
+[[node]]
+name = "Standing"
+parent = "."
+type = "Ragdoll"
+position = [3.0, 0.0, 1.0]
+rotation = [0.0, -30.0, 0.0]
+ragdoll = { active = false }
+
+[[node]]
+name = "Pelvis"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.0, 0.95, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 11.931818 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/Pelvis"
+type = "MeshInstance3D"
+scale = [0.32, 0.2, 0.2]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/Pelvis"
+type = "CollisionShape3D"
+shape = { box = [0.32, 0.2, 0.2] }
+
+[[node]]
+name = "Chest"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.0, 1.3, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 19.886364 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/Chest"
+type = "MeshInstance3D"
+scale = [0.38, 0.45, 0.22]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/Chest"
+type = "CollisionShape3D"
+shape = { box = [0.38, 0.45, 0.22] }
+
+[[node]]
+name = "Head"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.0, 1.66, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 6.3636365 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/Head"
+type = "MeshInstance3D"
+material = { color = "#e8bea0", roughness = 0.7 }
+mesh = { primitive = "sphere", radius = 0.12, rings = 16, segments = 32 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/Head"
+type = "CollisionShape3D"
+shape = { sphere = 0.12 }
+
+[[node]]
+name = "UpperArmL"
+parent = "Standing"
+type = "RigidBody3D"
+position = [-0.25, 1.33, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 2.3863635 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/UpperArmL"
+type = "MeshInstance3D"
+scale = [0.1, 0.3, 0.1]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/UpperArmL"
+type = "CollisionShape3D"
+shape = { box = [0.1, 0.3, 0.1] }
+
+[[node]]
+name = "LowerArmL"
+parent = "Standing"
+type = "RigidBody3D"
+position = [-0.25, 1.03, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 1.5909091 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/LowerArmL"
+type = "MeshInstance3D"
+scale = [0.09, 0.3, 0.09]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/LowerArmL"
+type = "CollisionShape3D"
+shape = { box = [0.09, 0.3, 0.09] }
+
+[[node]]
+name = "ThighL"
+parent = "Standing"
+type = "RigidBody3D"
+position = [-0.1, 0.65, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 7.9545455 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/ThighL"
+type = "MeshInstance3D"
+scale = [0.14, 0.4, 0.14]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/ThighL"
+type = "CollisionShape3D"
+shape = { box = [0.14, 0.4, 0.14] }
+
+[[node]]
+name = "ShinL"
+parent = "Standing"
+type = "RigidBody3D"
+position = [-0.1, 0.24, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 3.9772727 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/ShinL"
+type = "MeshInstance3D"
+scale = [0.11, 0.42, 0.11]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/ShinL"
+type = "CollisionShape3D"
+shape = { box = [0.11, 0.42, 0.11] }
+
+[[node]]
+name = "UpperArmR"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.25, 1.33, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 2.3863635 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/UpperArmR"
+type = "MeshInstance3D"
+scale = [0.1, 0.3, 0.1]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/UpperArmR"
+type = "CollisionShape3D"
+shape = { box = [0.1, 0.3, 0.1] }
+
+[[node]]
+name = "LowerArmR"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.25, 1.03, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 1.5909091 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/LowerArmR"
+type = "MeshInstance3D"
+scale = [0.09, 0.3, 0.09]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/LowerArmR"
+type = "CollisionShape3D"
+shape = { box = [0.09, 0.3, 0.09] }
+
+[[node]]
+name = "ThighR"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.1, 0.65, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 7.9545455 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/ThighR"
+type = "MeshInstance3D"
+scale = [0.14, 0.4, 0.14]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/ThighR"
+type = "CollisionShape3D"
+shape = { box = [0.14, 0.4, 0.14] }
+
+[[node]]
+name = "ShinR"
+parent = "Standing"
+type = "RigidBody3D"
+position = [0.1, 0.24, 0.0]
+body = { angular_damping = 0.5, friction = 0.8, mass = 3.9772727 }
+
+[[node]]
+name = "Mesh"
+parent = "Standing/ShinR"
+type = "MeshInstance3D"
+scale = [0.11, 0.42, 0.11]
+material = { color = "#c47848", roughness = 0.7 }
+mesh = { primitive = "cube", size = 1.0 }
+
+[[node]]
+name = "Shape"
+parent = "Standing/ShinR"
+type = "CollisionShape3D"
+shape = { box = [0.11, 0.42, 0.11] }
+
+[[node]]
+name = "Spine"
+parent = "Standing"
+type = "Joint3D"
+position = [0.0, 1.065, 0.0]
+rotation = [0.0, 0.0, 90.0]
+joint = { body_a = "../Pelvis", body_b = "../Chest", kind = "cone", swing = 25.0, twist = 20.0 }
+
+[[node]]
+name = "Neck"
+parent = "Standing"
+type = "Joint3D"
+position = [0.0, 1.54, 0.0]
+rotation = [0.0, 0.0, 90.0]
+joint = { body_a = "../Chest", body_b = "../Head", kind = "cone", swing = 35.0, twist = 40.0 }
+
+[[node]]
+name = "ShoulderL"
+parent = "Standing"
+type = "Joint3D"
+position = [-0.25, 1.47, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Chest", body_b = "../UpperArmL", kind = "cone", swing = 80.0, twist = 45.0 }
+
+[[node]]
+name = "ElbowL"
+parent = "Standing"
+type = "Joint3D"
+position = [-0.25, 1.18, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../UpperArmL", body_b = "../LowerArmL", kind = "hinge", limits = [0.0, 145.0] }
+
+[[node]]
+name = "HipL"
+parent = "Standing"
+type = "Joint3D"
+position = [-0.1, 0.85, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Pelvis", body_b = "../ThighL", kind = "cone", swing = 60.0, twist = 20.0 }
+
+[[node]]
+name = "KneeL"
+parent = "Standing"
+type = "Joint3D"
+position = [-0.1, 0.45, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../ThighL", body_b = "../ShinL", kind = "hinge", limits = [-145.0, 0.0] }
+
+[[node]]
+name = "ShoulderR"
+parent = "Standing"
+type = "Joint3D"
+position = [0.25, 1.47, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Chest", body_b = "../UpperArmR", kind = "cone", swing = 80.0, twist = 45.0 }
+
+[[node]]
+name = "ElbowR"
+parent = "Standing"
+type = "Joint3D"
+position = [0.25, 1.18, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../UpperArmR", body_b = "../LowerArmR", kind = "hinge", limits = [0.0, 145.0] }
+
+[[node]]
+name = "HipR"
+parent = "Standing"
+type = "Joint3D"
+position = [0.1, 0.85, 0.0]
+rotation = [0.0, 0.0, -90.0]
+joint = { body_a = "../Pelvis", body_b = "../ThighR", kind = "cone", swing = 60.0, twist = 20.0 }
+
+[[node]]
+name = "KneeR"
+parent = "Standing"
+type = "Joint3D"
+position = [0.1, 0.45, 0.0]
+rotation = [0.0, 0.0, 0.0]
+joint = { body_a = "../ThighR", body_b = "../ShinR", kind = "hinge", limits = [-145.0, 0.0] }

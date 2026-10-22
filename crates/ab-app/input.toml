@@ -1,0 +1,63 @@
+# Action bindings for the demo (loaded by crates/ab-app/src/demo.rs).
+# Binding syntax: key:<winit KeyCode>, mouse:<Left|Right|Middle|Back|Forward>, wheel:<Up|Down>,
+#                 pad:<GamepadButton>, pad_axis:<GamepadAxis><+|->   (+Y is up on sticks)
+
+# Radians of camera turn per pixel of mouse motion.
+mouse_sensitivity = 0.0025
+invert_y = false
+
+[actions.move_forward]
+bindings = ["key:KeyW", "key:ArrowUp", "pad_axis:LeftStickY+"]
+
+[actions.move_back]
+bindings = ["key:KeyS", "key:ArrowDown", "pad_axis:LeftStickY-"]
+
+[actions.move_left]
+bindings = ["key:KeyA", "key:ArrowLeft", "pad_axis:LeftStickX-"]
+
+[actions.move_right]
+bindings = ["key:KeyD", "key:ArrowRight", "pad_axis:LeftStickX+"]
+
+[actions.move_up]
+bindings = ["key:Space", "pad:RightBumper"]
+
+[actions.move_down]
+bindings = ["key:KeyQ", "key:ControlLeft", "pad:LeftBumper"]
+
+[actions.sprint]
+bindings = ["key:ShiftLeft", "pad:LeftStick"]
+
+# Gamepad look (the mouse uses mouse_sensitivity above).
+[actions.look_left]
+bindings = ["pad_axis:RightStickX-"]
+deadzone = 0.15
+
+[actions.look_right]
+bindings = ["pad_axis:RightStickX+"]
+deadzone = 0.15
+
+[actions.look_up]
+bindings = ["pad_axis:RightStickY+"]
+deadzone = 0.15
+
+[actions.look_down]
+bindings = ["pad_axis:RightStickY-"]
+deadzone = 0.15
+
+# Hold to look with the mouse without capturing it.
+[actions.free_look]
+bindings = ["mouse:Right"]
+
+[actions.toggle_mouse_capture]
+bindings = ["key:Tab"]
+
+[actions.quit]
+bindings = ["key:Escape", "pad:Select"]
+
+# Shove the crate or ball under the crosshair (raycast from the camera).
+[actions.push]
+bindings = ["mouse:Left", "key:KeyE", "pad:RightTrigger"]
+
+# Set off an explosion where the camera looks.
+[actions.explode]
+bindings = ["key:KeyX", "pad:East"]

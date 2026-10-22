@@ -1,0 +1,43 @@
+[environment]
+background = "#1a1d24"
+ambient_color = "#b4c3dc"
+ambient_energy = 0.35
+
+[[node]]
+name = "Scene"
+type = "Node3D"
+
+[[node]]
+name = "Sun"
+parent = "."
+type = "DirectionalLight3D"
+rotation = [-50.0, -35.0, 0.0]
+light = { color = "#fff4e0", energy = 3.0, shadows = true }
+
+[[node]]
+name = "Floor"
+parent = "."
+type = "StaticBody3D"
+position = [0.0, -0.25, 0.0]
+
+[[node]]
+name = "Mesh"
+parent = "Floor"
+type = "MeshInstance3D"
+scale = [20.0, 0.5, 20.0]
+mesh = { primitive = "cube" }
+material = { color = "#5a5e66", roughness = 0.85 }
+
+[[node]]
+name = "Shape"
+parent = "Floor"
+type = "CollisionShape3D"
+shape = { box = [20.0, 0.5, 20.0] }
+
+[[node]]
+name = "Camera"
+parent = "."
+type = "Camera3D"
+position = [0.0, 3.0, 8.0]
+rotation = [-15.0, 0.0, 0.0]
+camera = { fov = 70.0, current = true }

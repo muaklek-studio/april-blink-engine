@@ -1,0 +1,1336 @@
+//! The editor's model: the engine holding the open scene, selection, undo history, and the
+//! switch between editing and playing.
+//!
+//! The live scene tree is the document. Edits change it directly (transforms, names,
+//! hierarchy) or rebuild one node from its edited description; saving describes the tree
+//! with [`save_scene`]. Play mode snapshots the scene, rebuilds it with the game's real
+//! scripts, runs the engine, and restores the snapshot on stop.
+
+use crate::history::{History, Snapshot};
+use crate::project::AssetIndex;
+use crate::scripts::GameScripts;
+use ab_engine::audio::{audio_system, AudioOutput};
+use ab_engine::effects::effects_system;
+use ab_engine::input::{InputMap, InputState};
+use ab_engine::prelude::*;
+use ab_engine::scene_file::{
+    apply_environment, instantiate_scene, particle_emitter, save_scene, EnvironmentDesc, NodeDesc,
+    SceneOrigin,
+};
+use anyhow::Context as _;
+use std::path::{Path, PathBuf};
+use tracing::{error, info, warn};
+
+/// Stand-in for game scripts while editing: scenes keep their script names, nothing runs.
+#[derive(Default)]
+struct Inert;
+
+impl NodeScript for Inert {}
+
+fn inert() -> Box<dyn NodeScript> {
+    Box::new(Inert)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Edit,
+    Play { paused: bool },
+}
+
+/// What a frame of editing changed, for the status bar.
+#[derive(Debug, Clone)]
+pub struct Status {
+    pub text: String,
+    pub error: bool,
+}
+
+/// The input map of the project whose asset folder is `assets` (Night Relics' for the
+/// engine's own assets).
+fn input_map_of(assets: &Path) -> Option<PathBuf> {
+    let project = ab_project::Project::open(assets).ok().or_else(|| {
+        crate::scripts::game_crate(assets).and_then(|root| ab_project::Project::open(&root).ok())
+    })?;
+    Some(project.root.join(project.input?))
+}
+
+pub struct Editor {
+    pub engine: Engine,
+    pub assets: AssetIndex,
+    /// Scene file being edited, relative to the project.
+    pub scene_path: Option<String>,
+    pub scene_root: NodeHandle,
+    pub environment: EnvironmentDesc,
+    pub selection: Option<NodeHandle>,
+    pub modified: bool,
+    pub history: History,
+    pub mode: Mode,
+    /// Particles and other effects animate while editing.
+    pub preview_effects: bool,
+    pub status: Option<Status>,
+    /// The game's script library, for Play mode.
+    pub scripts_library: Option<PathBuf>,
+    /// The game's script files (`src/scripts`), when the project is a game crate.
+    pub scripts: Option<GameScripts>,
+    /// The game's input map (a project file, next to `game.toml`).
+    input_map: Option<PathBuf>,
+    edit_registry: ScriptRegistry,
+    play_registry: ScriptRegistry,
+    play_snapshot: Option<(Snapshot, Environment)>,
+    /// An edit gesture (a drag, a text field) is in progress: one undo step for all of it.
+    gesture: bool,
+}
+
+impl Editor {
+    pub fn new(project: PathBuf, scripts: Option<PathBuf>, audio: AudioOutput) -> Self {
+        let config = EngineConfig {
+            asset_root: project.clone(),
+            audio_output: audio,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(&config);
+        engine
+            .tree_mut()
+            .world_mut()
+            .resource_or_insert_with(ScriptRegistry::new);
+
+        let mut play_registry = ScriptRegistry::new();
+        if let Some(library) = &scripts {
+            match engine.enable_hot_reload(library) {
+                Ok(_) => {
+                    if let Some(registry) = engine.tree().world().resource::<ScriptRegistry>() {
+                        play_registry = registry.clone();
+                        info!(scripts = registry.len(), "game scripts loaded");
+                    }
+                }
+                Err(err) => error!("cannot load the game's scripts: {err:#}"),
+            }
+        }
+        // Unknown names still play (doing nothing) rather than refusing the scene.
+        play_registry.set_fallback(Some(std::sync::Arc::new(inert)));
+        let mut edit_registry = ScriptRegistry::new();
+        edit_registry.set_fallback(Some(std::sync::Arc::new(inert)));
+        engine
+            .tree_mut()
+            .world_mut()
+            .insert_resource(edit_registry.clone());
+
+        let scene_root = engine.tree().root();
+        let game_scripts = crate::scripts::game_crate(&project).map(GameScripts::new);
+        let input_map = input_map_of(&project);
+        let mut editor = Self {
+            engine,
+            assets: AssetIndex::new(project),
+            scene_path: None,
+            scene_root,
+            environment: EnvironmentDesc::default(),
+            selection: None,
+            modified: false,
+            history: History::default(),
+            mode: Mode::Edit,
+            preview_effects: true,
+            status: None,
+            scripts_library: scripts,
+            scripts: game_scripts,
+            input_map,
+            edit_registry,
+            play_registry,
+            play_snapshot: None,
+            gesture: false,
+        };
+        editor.new_scene();
+        editor
+    }
+
+    pub fn tree(&self) -> &SceneTree {
+        self.engine.tree()
+    }
+
+    pub fn tree_mut(&mut self) -> &mut SceneTree {
+        self.engine.tree_mut()
+    }
+
+    pub fn project(&self) -> &Path {
+        &self.assets.root
+    }
+
+    pub fn is_playing(&self) -> bool {
+        matches!(self.mode, Mode::Play { .. })
+    }
+
+    pub fn info(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        info!("{text}");
+        self.status = Some(Status { text, error: false });
+    }
+
+    pub fn fail(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        error!("{text}");
+        self.status = Some(Status { text, error: true });
+    }
+
+    /// Script names to offer: the game library's, the script files' (even before they are
+    /// built), plus any the scene already uses.
+    pub fn script_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.play_registry.names().map(str::to_owned).collect();
+        if let Some(scripts) = &self.scripts {
+            names.extend(scripts.all_types().map(|(name, _)| name.to_owned()));
+        }
+        let tree = self.tree();
+        names.extend(
+            tree.subtree(self.scene_root)
+                .into_iter()
+                .flat_map(|n| tree.script_names(n)),
+        );
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Script names the game registers itself (in `lib.rs`), which new scripts must not take.
+    pub fn registered_script_names(&self) -> Vec<String> {
+        self.play_registry.names().map(str::to_owned).collect()
+    }
+
+    /// Adds script `name` to `node`'s scripts (one undo step), like adding a component in
+    /// Unity. A script the node already has is not added twice.
+    pub fn attach_script(&mut self, node: NodeHandle, name: &str) {
+        if self.is_playing() {
+            self.fail("Stop the game to attach scripts");
+            return;
+        }
+        let Some(old) = self.describe_node(node) else {
+            return;
+        };
+        let mut list = old.script_list();
+        if list.iter().any(|s| s == name) {
+            self.info(format!("{} already has {name}", old.name));
+            return;
+        }
+        list.push(name.to_owned());
+        let mut new = old.clone();
+        new.set_script_list(list);
+        let node_name = new.name.clone();
+        self.apply_desc(node, &old, new);
+        self.selection = Some(node);
+        let built = self.play_registry.names().any(|n| n == name);
+        if built {
+            self.info(format!("Attached {name} to {node_name}"));
+        } else {
+            self.info(format!(
+                "Attached {name} to {node_name} (it runs in Play mode once the scripts are built)"
+            ));
+        }
+    }
+
+    /// Whether the game's script library is loaded.
+    pub fn has_game_scripts(&self) -> bool {
+        !self.play_registry.is_empty()
+    }
+
+    /// Title for the window: scene name, `*` when unsaved.
+    pub fn title(&self) -> String {
+        let scene = self.scene_path.as_deref().unwrap_or("Untitled");
+        let dirty = if self.modified { "*" } else { "" };
+        format!("{scene}{dirty} — April Blink Editor")
+    }
+
+    // =========================================================================================
+    // Documents
+    // =========================================================================================
+
+    /// A starter scene: a root, a sun, a floor and a camera.
+    pub fn new_scene(&mut self) {
+        let text = ab_project::NEW_SCENE;
+        let scene = SceneFile::from_toml(text).expect("the template parses");
+        if self.replace_scene(&scene).is_ok() {
+            self.scene_path = None;
+            self.modified = false;
+            self.history.clear();
+            self.selection = None;
+            self.info("New scene");
+        }
+    }
+
+    /// Opens a scene file (path relative to the project).
+    pub fn open_scene(&mut self, path: &str) {
+        let result = (|| -> anyhow::Result<()> {
+            let full = self.project().join(path);
+            let text = std::fs::read_to_string(&full)
+                .with_context(|| format!("cannot read {}", full.display()))?;
+            let scene = SceneFile::from_toml(&text).with_context(|| format!("invalid {path}"))?;
+            self.replace_scene(&scene)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.scene_path = Some(path.to_owned());
+                self.modified = false;
+                self.history.clear();
+                self.selection = None;
+                self.load_input_map();
+                self.info(format!("Opened {path}"));
+            }
+            Err(err) => self.fail(format!("{err:#}")),
+        }
+    }
+
+    /// Loads the game's input map, for Play mode.
+    fn load_input_map(&mut self) {
+        let Some(path) = &self.input_map else {
+            return;
+        };
+        let map = std::fs::read_to_string(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| Ok(InputMap::from_toml(&text)?));
+        match map {
+            Ok(map) => {
+                if let Some(mut actions) = self.tree().world().resource_mut::<Actions>() {
+                    actions.set_map(map);
+                }
+                info!(map = %path.display(), "input map loaded");
+            }
+            Err(err) => warn!("{}: {err}", path.display()),
+        }
+    }
+
+    pub fn save(&mut self) {
+        match self.scene_path.clone() {
+            Some(path) => self.save_as(&path),
+            None => self.fail("Choose a file name with Save As"),
+        }
+    }
+
+    pub fn save_as(&mut self, path: &str) {
+        let mut path = path.trim().replace('\\', "/");
+        if !path.ends_with(".toml") {
+            path.push_str(".toml");
+        }
+        let text = self.describe().to_toml();
+        let full = self.project().join(&path);
+        let result = full
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&full, text));
+        match result {
+            Ok(()) => {
+                self.scene_path = Some(path.clone());
+                self.modified = false;
+                self.assets.request_rescan();
+                self.info(format!("Saved {path}"));
+            }
+            Err(err) => self.fail(format!("cannot save {}: {err}", full.display())),
+        }
+    }
+
+    /// The open scene as a scene file.
+    pub fn describe(&self) -> SceneFile {
+        let mut scene = save_scene(self.tree(), self.scene_root);
+        if self.environment != EnvironmentDesc::default() {
+            scene.environment = Some(self.environment.clone());
+        }
+        scene
+    }
+
+    /// Builds `scene` in place of the current one. On error the current scene stays.
+    fn replace_scene(&mut self, scene: &SceneFile) -> anyhow::Result<()> {
+        let tree = self.engine.tree_mut();
+        let root = instantiate_scene(tree, scene, "scene")?;
+        for child in tree.children(tree.root()) {
+            let _ = tree.queue_free(child);
+        }
+        tree.flush_deletions();
+        let world = tree.world_mut();
+        world.insert_resource(PhysicsWorld::new());
+        world.insert_resource(Environment::default());
+        self.environment = scene.environment.clone().unwrap_or_default();
+        if let Err(err) = apply_environment(tree, &self.environment) {
+            warn!("environment: {err}");
+        }
+        tree.add_child(tree.root(), root)?;
+        tree.update_transforms();
+        self.scene_root = root;
+        Ok(())
+    }
+
+    // =========================================================================================
+    // Undo
+    // =========================================================================================
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            scene: self.describe(),
+            selection: self.selection.and_then(|n| self.relative_path(n)),
+        }
+    }
+
+    fn restore(&mut self, snapshot: &Snapshot) {
+        if let Err(err) = self.replace_scene(&snapshot.scene) {
+            self.fail(format!("cannot restore the scene: {err:#}"));
+            return;
+        }
+        self.selection = snapshot.selection.as_deref().and_then(|p| self.node_at(p));
+    }
+
+    /// Records the state before an edit. Within one gesture (a drag, a text field being
+    /// typed in) only the first call records. While playing, edits are live tweaks: not
+    /// recorded, discarded on stop.
+    pub fn begin_edit(&mut self) {
+        if self.is_playing() {
+            return;
+        }
+        if !self.gesture {
+            let snapshot = self.snapshot();
+            self.history.push(snapshot);
+            self.gesture = true;
+        }
+        self.modified = true;
+    }
+
+    /// Ends the current gesture (called every frame once the pointer is up and no text
+    /// field has focus).
+    pub fn end_gesture(&mut self) {
+        self.gesture = false;
+    }
+
+    pub fn undo(&mut self) {
+        if self.is_playing() {
+            return;
+        }
+        let current = self.snapshot();
+        if let Some(previous) = self.history.undo(current) {
+            self.restore(&previous);
+            self.modified = true;
+            self.info("Undo");
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if self.is_playing() {
+            return;
+        }
+        let current = self.snapshot();
+        if let Some(next) = self.history.redo(current) {
+            self.restore(&next);
+            self.modified = true;
+            self.info("Redo");
+        }
+    }
+
+    // =========================================================================================
+    // Paths
+    // =========================================================================================
+
+    /// Path from the scene root (`"."` for the root itself).
+    pub fn relative_path(&self, node: NodeHandle) -> Option<String> {
+        let tree = self.tree();
+        if node == self.scene_root {
+            return Some(".".into());
+        }
+        let mut names = Vec::new();
+        let mut current = node;
+        while current != self.scene_root {
+            names.push(tree.name(current)?.to_owned());
+            current = tree.parent(current)?;
+        }
+        names.reverse();
+        Some(names.join("/"))
+    }
+
+    pub fn node_at(&self, path: &str) -> Option<NodeHandle> {
+        self.tree().get_node(self.scene_root, path)
+    }
+
+    /// Whether `node` belongs to the edited scene (and not to the contents of an instanced
+    /// model, which are not saved).
+    pub fn is_editable(&self, node: NodeHandle) -> bool {
+        self.tree().is_valid(node) && self.instance_owner(node) == Some(node)
+    }
+
+    /// The scene node `node` belongs to: itself, or the instance root that contains it.
+    pub fn instance_owner(&self, node: NodeHandle) -> Option<NodeHandle> {
+        let tree = self.tree();
+        let mut owner = node;
+        let mut current = node;
+        loop {
+            if current == self.scene_root {
+                return Some(owner);
+            }
+            let parent = tree.parent(current)?;
+            if tree
+                .component::<ab_engine::scene_file::SceneInstance>(parent)
+                .is_some()
+            {
+                owner = parent;
+            }
+            current = parent;
+        }
+    }
+
+    pub fn is_instance(&self, node: NodeHandle) -> bool {
+        self.tree()
+            .component::<ab_engine::scene_file::SceneInstance>(node)
+            .is_some()
+    }
+
+    fn unique_name(&self, parent: NodeHandle, base: &str, except: Option<NodeHandle>) -> String {
+        let tree = self.tree();
+        let taken = |name: &str| {
+            tree.children(parent)
+                .into_iter()
+                .any(|c| Some(c) != except && tree.name(c).is_some_and(|n| &*n == name))
+        };
+        if !taken(base) {
+            return base.to_owned();
+        }
+        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit());
+        let stem = if stem.is_empty() { base } else { stem };
+        (2..)
+            .map(|i| format!("{stem}{i}"))
+            .find(|n| !taken(n))
+            .expect("some suffix is free")
+    }
+
+    // =========================================================================================
+    // Edits
+    // =========================================================================================
+
+    /// Where new nodes go: under the selection, unless it is an instance (whose contents are
+    /// not saved), then beside it.
+    fn insertion_parent(&self) -> NodeHandle {
+        match self.selection.filter(|&n| self.is_editable(n)) {
+            Some(node) if self.is_instance(node) => {
+                self.tree().parent(node).unwrap_or(self.scene_root)
+            }
+            Some(node) => node,
+            None => self.scene_root,
+        }
+    }
+
+    /// Adds `scene` (its first node is the root, e.g. a body with its mesh and shape) and
+    /// selects it. `at` is a global position for 3D nodes.
+    pub fn add_scene(&mut self, mut scene: SceneFile, at: Option<Vec3>) {
+        if self.is_playing() || scene.nodes.is_empty() {
+            return;
+        }
+        let parent = self.insertion_parent();
+        scene.nodes[0].name = self.unique_name(parent, &scene.nodes[0].name, None);
+        scene.nodes[0].parent = None;
+        scene.environment = None;
+        let before = self.snapshot();
+        let tree = self.engine.tree_mut();
+        let node = match instantiate_scene(tree, &scene, "new node") {
+            Ok(node) => node,
+            Err(err) => {
+                self.fail(format!("{err}"));
+                return;
+            }
+        };
+        if let Err(err) = tree.add_child(parent, node) {
+            let _ = tree.queue_free(node);
+            tree.flush_deletions();
+            self.fail(format!("{err}"));
+            return;
+        }
+        if let Some(at) = at.filter(|_| tree.is_node3d(node)) {
+            let _ = tree.set_global_position(node, at);
+        }
+        tree.update_transforms();
+        self.history.push(before);
+        self.modified = true;
+        self.selection = Some(node);
+        let name = self
+            .tree()
+            .name(node)
+            .map(|n| n.to_owned())
+            .unwrap_or_default();
+        self.info(format!("Added {name}"));
+    }
+
+    /// Adds a single node.
+    pub fn add_node(&mut self, desc: NodeDesc, at: Option<Vec3>) {
+        self.add_scene(
+            SceneFile {
+                environment: None,
+                nodes: vec![desc],
+            },
+            at,
+        );
+    }
+
+    pub fn delete(&mut self, node: NodeHandle) {
+        if self.is_playing() || node == self.scene_root || !self.is_editable(node) {
+            return;
+        }
+        let before = self.snapshot();
+        let tree = self.engine.tree_mut();
+        let name = tree.name(node).map(|n| n.to_owned()).unwrap_or_default();
+        let _ = tree.queue_free(node);
+        tree.flush_deletions();
+        self.history.push(before);
+        self.modified = true;
+        if self.selection.is_some_and(|s| !self.tree().is_valid(s)) {
+            self.selection = None;
+        }
+        self.info(format!("Deleted {name}"));
+    }
+
+    pub fn duplicate(&mut self, node: NodeHandle) {
+        if self.is_playing() || node == self.scene_root || !self.is_editable(node) {
+            return;
+        }
+        let Some(parent) = self.tree().parent(node) else {
+            return;
+        };
+        let mut scene = save_scene(self.tree(), node);
+        let base = scene.nodes[0].name.clone();
+        scene.nodes[0].name = self.unique_name(parent, &base, None);
+        let before = self.snapshot();
+        let tree = self.engine.tree_mut();
+        match instantiate_scene(tree, &scene, "duplicate") {
+            Ok(copy) => {
+                let index = tree.children(parent).iter().position(|&c| c == node);
+                let _ = tree.add_child(parent, copy);
+                if let Some(index) = index {
+                    let _ = tree.move_child(parent, copy, index + 1);
+                }
+                tree.update_transforms();
+                self.history.push(before);
+                self.modified = true;
+                self.selection = Some(copy);
+                self.info(format!("Duplicated {base}"));
+            }
+            Err(err) => self.fail(format!("{err}")),
+        }
+    }
+
+    pub fn rename(&mut self, node: NodeHandle, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || name.contains(['/', ':', '.']) {
+            return;
+        }
+        let Some(parent) = self.tree().parent(node) else {
+            return;
+        };
+        let name = self.unique_name(parent, name, Some(node));
+        if self.tree().name(node).is_some_and(|n| *n == name) {
+            return;
+        }
+        self.begin_edit();
+        let _ = self.tree_mut().set_name(node, &name);
+    }
+
+    /// Moves `node` under `new_parent` (keeping where it is in the world), at `index` among
+    /// the new siblings when given.
+    pub fn reparent(&mut self, node: NodeHandle, new_parent: NodeHandle, index: Option<usize>) {
+        if self.is_playing()
+            || node == self.scene_root
+            || !self.is_editable(node)
+            || !self.is_editable(new_parent)
+            || self.is_instance(new_parent)
+            || node == new_parent
+            || self.tree().is_ancestor_of(node, new_parent)
+        {
+            return;
+        }
+        let before = self.snapshot();
+        let same_parent = self.tree().parent(node) == Some(new_parent);
+        if !same_parent {
+            let base = self
+                .tree()
+                .name(node)
+                .map(|n| n.to_owned())
+                .unwrap_or_default();
+            let name = self.unique_name(new_parent, &base, Some(node));
+            let tree = self.tree_mut();
+            let _ = tree.set_name(node, &name);
+            if let Err(err) = tree.reparent(node, new_parent, true) {
+                self.fail(format!("{err}"));
+                return;
+            }
+        }
+        if let Some(index) = index {
+            let _ = self.tree_mut().move_child(new_parent, node, index);
+        }
+        self.tree_mut().update_transforms();
+        self.history.push(before);
+        self.modified = true;
+    }
+
+    /// Moves `node` one place up (`-1`) or down (`1`) among its siblings.
+    pub fn move_sibling(&mut self, node: NodeHandle, step: isize) {
+        let Some(parent) = self.tree().parent(node) else {
+            return;
+        };
+        let children = self.tree().children(parent);
+        let Some(index) = children.iter().position(|&c| c == node) else {
+            return;
+        };
+        let target = index as isize + step;
+        if target < 0 || target as usize >= children.len() || !self.is_editable(node) {
+            return;
+        }
+        let before = self.snapshot();
+        let _ = self.tree_mut().move_child(parent, node, target as usize);
+        self.history.push(before);
+        self.modified = true;
+    }
+
+    pub fn set_transform(&mut self, node: NodeHandle, transform: Transform3D) {
+        if self.tree().transform(node) == Some(transform) {
+            return;
+        }
+        if !self.is_playing() {
+            self.begin_edit();
+        }
+        let tree = self.tree_mut();
+        let _ = tree.set_transform(node, transform);
+        tree.update_transforms();
+    }
+
+    pub fn set_global_transform(&mut self, node: NodeHandle, global: ab_engine::core::Affine3A) {
+        if !self.is_playing() {
+            self.begin_edit();
+        }
+        let tree = self.tree_mut();
+        let _ = tree.set_global_transform(node, global);
+        tree.update_transforms();
+    }
+
+    /// The node's own description (without children).
+    pub fn describe_node(&self, node: NodeHandle) -> Option<NodeDesc> {
+        if !self.tree().is_valid(node) {
+            return None;
+        }
+        let mut desc = save_scene(self.tree(), node).nodes.into_iter().next()?;
+        desc.parent = None;
+        Some(desc)
+    }
+
+    /// Applies an edited description of `node`: cheap changes in place, the rest by
+    /// rebuilding the node (its children move to the rebuilt node).
+    pub fn apply_desc(&mut self, node: NodeHandle, old: &NodeDesc, new: NodeDesc) {
+        if *old == new || !self.is_editable(node) {
+            return;
+        }
+        self.begin_edit();
+        if new.name != old.name {
+            self.rename(node, &new.name);
+        }
+        let common = |d: &NodeDesc| NodeDesc {
+            name: String::new(),
+            position: None,
+            rotation: None,
+            scale: None,
+            visible: None,
+            groups: Vec::new(),
+            script: None,
+            scripts: Vec::new(),
+            particles: None,
+            ..d.clone()
+        };
+        let tree = self.engine.tree_mut();
+        if new.visible != old.visible {
+            let _ = tree.set_visible(node, new.visible.unwrap_or(true));
+        }
+        if new.groups != old.groups {
+            for group in &old.groups {
+                tree.remove_from_group(node, group);
+            }
+            for group in &new.groups {
+                let _ = tree.add_to_group(node, group);
+            }
+        }
+        let scripts = new.script_list();
+        if scripts != old.script_list() {
+            tree.remove_script(node);
+            for name in &scripts {
+                let _ = tree.add_script_named(node, name);
+            }
+        }
+        if new.particles != old.particles {
+            if let Some(p) = &new.particles {
+                match particle_emitter(p) {
+                    Ok(fresh) => {
+                        if let Some(mut emitter) = tree.component_mut::<ParticleEmitter>(node) {
+                            // Keep the particles alive: only settings and flags change.
+                            emitter.settings = fresh.settings;
+                            emitter.one_shot = fresh.one_shot;
+                            emitter.local_coords = fresh.local_coords;
+                            if emitter.emitting != fresh.emitting {
+                                emitter.emitting = fresh.emitting;
+                            }
+                        }
+                        if let Some(mut origin) = tree.component_mut::<SceneOrigin>(node) {
+                            origin.particles = Some(p.clone());
+                        }
+                    }
+                    Err(err) => {
+                        self.fail(err);
+                        return;
+                    }
+                }
+            }
+        }
+        if common(old) != common(&new) {
+            self.rebuild_node(node, new);
+        }
+    }
+
+    fn rebuild_node(&mut self, node: NodeHandle, mut desc: NodeDesc) {
+        let tree = self.engine.tree_mut();
+        let Some(parent) = tree.parent(node) else {
+            return;
+        };
+        desc.parent = None;
+        // Keep the current transform/name (possibly changed this frame).
+        desc.name = tree.name(node).map(|n| n.to_owned()).unwrap_or(desc.name);
+        let transform = tree.transform(node);
+        let scene = SceneFile {
+            environment: None,
+            nodes: vec![desc],
+        };
+        let fresh = match instantiate_scene(tree, &scene, "edit") {
+            Ok(fresh) => fresh,
+            Err(err) => {
+                self.fail(format!("{err}"));
+                return;
+            }
+        };
+        if let Some(transform) = transform {
+            let _ = tree.set_transform(fresh, transform);
+        }
+        let index = tree.children(parent).iter().position(|&c| c == node);
+        for child in tree.children(node) {
+            let _ = tree.reparent(child, fresh, false);
+        }
+        let _ = tree.queue_free(node);
+        tree.flush_deletions();
+        let _ = tree.add_child(parent, fresh);
+        if let Some(index) = index {
+            let _ = tree.move_child(parent, fresh, index);
+        }
+        tree.update_transforms();
+        if self.selection == Some(node) {
+            self.selection = Some(fresh);
+        }
+    }
+
+    pub fn set_environment(&mut self, desc: EnvironmentDesc) {
+        if desc == self.environment {
+            return;
+        }
+        self.begin_edit();
+        self.environment = desc;
+        let tree = self.engine.tree_mut();
+        tree.world_mut().insert_resource(Environment::default());
+        if let Err(err) = apply_environment(tree, &self.environment) {
+            self.fail(err);
+        }
+    }
+
+    // =========================================================================================
+    // Play mode
+    // =========================================================================================
+
+    pub fn play(&mut self) {
+        if self.is_playing() {
+            return;
+        }
+        let snapshot = self.snapshot();
+        let environment = self
+            .tree()
+            .world()
+            .resource::<Environment>()
+            .map(|e| e.clone())
+            .unwrap_or_default();
+        let missing: Vec<String> = snapshot
+            .scene
+            .nodes
+            .iter()
+            .flat_map(|n| n.script_list())
+            .filter(|name| !self.play_registry.contains(name))
+            .collect();
+        if !missing.is_empty() {
+            warn!(
+                "scripts not loaded (they will do nothing): {} — start the editor with \
+                 --scripts <game library>",
+                missing.join(", ")
+            );
+        }
+        let registry = self.play_registry.clone();
+        self.tree_mut().world_mut().insert_resource(registry);
+        if let Err(err) = self.replace_scene(&snapshot.scene) {
+            let registry = self.edit_registry.clone();
+            self.tree_mut().world_mut().insert_resource(registry);
+            self.fail(format!("cannot start: {err:#}"));
+            return;
+        }
+        self.selection = snapshot.selection.as_deref().and_then(|p| self.node_at(p));
+        if let Some(mut profiler) = self.tree().world().resource_mut::<Profiler>() {
+            profiler.reset();
+        }
+        self.play_snapshot = Some((snapshot, environment));
+        self.mode = Mode::Play { paused: false };
+        self.info("Playing — Shift+F5 to stop");
+    }
+
+    /// Advances a paused game by one 60 Hz frame.
+    pub fn step_frame(&mut self) {
+        if self.mode == (Mode::Play { paused: true }) {
+            self.engine.update(1.0 / 60.0);
+        }
+    }
+
+    pub fn toggle_pause(&mut self) {
+        if let Mode::Play { paused } = self.mode {
+            self.mode = Mode::Play { paused: !paused };
+        }
+    }
+
+    pub fn stop(&mut self) {
+        let Some((snapshot, environment)) = self.play_snapshot.take() else {
+            return;
+        };
+        self.mode = Mode::Edit;
+        // Keep script versions hot reload brought in while playing.
+        let current = self
+            .tree()
+            .world()
+            .resource::<ScriptRegistry>()
+            .map(|r| r.clone());
+        if let Some(registry) = current {
+            self.play_registry = registry;
+        }
+        let tree = self.engine.tree_mut();
+        for child in tree.children(tree.root()) {
+            let _ = tree.queue_free(child);
+        }
+        tree.flush_deletions();
+        let world = tree.world_mut();
+        // Stop sounds of the freed nodes.
+        audio_system(world);
+        world.insert_resource(InputState::new());
+        world.insert_resource(self.edit_registry.clone());
+        if let Some(mut time) = world.resource_mut::<Time>() {
+            time.time_scale = 1.0;
+        }
+        if let Some(mut debug) = world.resource_mut::<DebugDraw>() {
+            debug.clear();
+        }
+        if let Some(mut control) = world.resource_mut::<EngineControl>() {
+            control.set_mouse_captured(false);
+        }
+        self.restore(&snapshot);
+        self.tree_mut().world_mut().insert_resource(environment);
+        self.info("Stopped");
+    }
+
+    // =========================================================================================
+    // Frame
+    // =========================================================================================
+
+    /// Advances the scene by `delta`: the whole engine in play mode, only effect previews
+    /// while editing.
+    pub fn tick(&mut self, delta: f32) {
+        match self.mode {
+            Mode::Play { paused: false } => self.engine.update(delta),
+            Mode::Play { paused: true } => {}
+            Mode::Edit => {
+                // A rebuilt script library (a script was created or saved): new versions for
+                // Play mode, while the edited scene keeps its inert stand-ins.
+                match self.engine.poll_script_library() {
+                    Some(Ok(fresh)) => {
+                        let count = fresh.len();
+                        self.play_registry.extend(fresh);
+                        self.info(format!("Scripts reloaded ({count} scripts)"));
+                    }
+                    Some(Err(err)) => self.fail(format!("cannot load the new scripts: {err:#}")),
+                    None => {}
+                }
+                let world = self.engine.tree_mut().world_mut();
+                if let Some(mut time) = world.resource_mut::<Time>() {
+                    time.begin_frame(if self.preview_effects { delta } else { 0.0 });
+                }
+                // Scripts are inert stand-ins; this propagates transforms and frees nodes.
+                self.engine.tree_mut().process(0.0);
+                effects_system(self.engine.tree_mut().world_mut());
+                if let Some(mut time) = self.engine.tree().world().resource_mut::<Time>() {
+                    time.end_frame();
+                }
+            }
+        }
+        if self.selection.is_some_and(|s| !self.tree().is_valid(s)) {
+            self.selection = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor() -> Editor {
+        let project = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        Editor::new(project, None, AudioOutput::Silent)
+    }
+
+    fn cube() -> NodeDesc {
+        SceneFile::from_toml(
+            "[[node]]\nname = \"Cube\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\n",
+        )
+        .unwrap()
+        .nodes
+        .remove(0)
+    }
+
+    #[test]
+    fn new_scene_has_the_template() {
+        let editor = editor();
+        let tree = editor.tree();
+        assert!(editor.node_at("Sun").is_some());
+        assert!(editor.node_at("Camera").is_some());
+        assert_eq!(tree.parent(editor.scene_root), Some(tree.root()));
+        assert!(!editor.modified);
+    }
+
+    #[test]
+    fn add_rename_duplicate_delete_with_undo() {
+        let mut editor = editor();
+        let initial = editor.describe();
+        editor.add_node(cube(), Some(Vec3::new(1.0, 2.0, 3.0)));
+        let cube = editor.selection.unwrap();
+        assert_eq!(editor.relative_path(cube).as_deref(), Some("Cube"));
+        assert_eq!(
+            editor.tree().global_position(cube),
+            Some(Vec3::new(1.0, 2.0, 3.0))
+        );
+
+        editor.add_node(self::cube(), None);
+        let second = editor.selection.unwrap();
+        // Added under the selected cube.
+        assert_eq!(editor.relative_path(second).as_deref(), Some("Cube/Cube"));
+        editor.end_gesture();
+
+        editor.duplicate(cube);
+        let copy = editor.selection.unwrap();
+        assert_eq!(editor.relative_path(copy).as_deref(), Some("Cube2"));
+        assert!(editor.node_at("Cube2/Cube").is_some(), "children copied");
+
+        editor.rename(copy, "Crate");
+        editor.end_gesture();
+        assert!(editor.node_at("Crate").is_some());
+        // Names stay unique among siblings.
+        editor.rename(copy, "Cube");
+        editor.end_gesture();
+        assert_eq!(editor.relative_path(copy).as_deref(), Some("Cube2"));
+
+        editor.delete(cube);
+        assert!(editor.node_at("Cube").is_none());
+        for _ in 0..6 {
+            editor.undo();
+        }
+        assert_eq!(editor.describe(), initial);
+        editor.redo();
+        assert!(editor.node_at("Cube").is_some());
+    }
+
+    #[test]
+    fn editing_a_description_rebuilds_and_keeps_children() {
+        let mut editor = editor();
+        editor.add_node(cube(), None);
+        let parent = editor.selection.unwrap();
+        editor.add_node(cube(), None);
+        editor.end_gesture();
+        let old = editor.describe_node(parent).unwrap();
+        let mut new = old.clone();
+        new.mesh = Some(ab_engine::scene_file::MeshDesc::Sphere {
+            radius: 2.0,
+            segments: 8,
+            rings: 4,
+        });
+        new.position = Some([0.0, 5.0, 0.0]);
+        editor.set_transform(
+            parent,
+            Transform3D::from_translation(Vec3::new(0.0, 5.0, 0.0)),
+        );
+        editor.selection = Some(parent);
+        editor.apply_desc(parent, &old, new.clone());
+        let rebuilt = editor.selection.unwrap();
+        assert_ne!(rebuilt, parent);
+        assert_eq!(editor.describe_node(rebuilt).unwrap().mesh, new.mesh);
+        assert_eq!(
+            editor.tree().position(rebuilt),
+            Some(Vec3::new(0.0, 5.0, 0.0))
+        );
+        assert!(editor.node_at("Cube/Cube").is_some(), "child kept");
+        // One gesture: a single undo restores both edits.
+        editor.end_gesture();
+        editor.undo();
+        let back = editor.node_at("Cube").unwrap();
+        assert_eq!(editor.describe_node(back).unwrap(), old);
+    }
+
+    #[test]
+    fn reparent_keeps_world_position() {
+        let mut editor = editor();
+        editor.selection = None;
+        editor.add_node(cube(), Some(Vec3::new(2.0, 0.0, 0.0)));
+        let a = editor.selection.unwrap();
+        editor.selection = None;
+        editor.add_node(cube(), Some(Vec3::new(0.0, 0.0, 5.0)));
+        let b = editor.selection.unwrap();
+        editor.reparent(b, a, None);
+        assert_eq!(editor.relative_path(b).as_deref(), Some("Cube/Cube2"));
+        let at = editor.tree().global_position(b).unwrap();
+        assert!(at.distance(Vec3::new(0.0, 0.0, 5.0)) < 1e-4);
+        // Not into its own subtree.
+        editor.reparent(a, b, None);
+        assert_eq!(editor.tree().parent(a), Some(editor.scene_root));
+    }
+
+    #[test]
+    fn play_runs_and_stop_restores() {
+        let mut editor = editor();
+        editor.add_node(cube(), Some(Vec3::new(0.0, 3.0, 0.0)));
+        let before = editor.describe();
+        editor.play();
+        assert!(editor.is_playing());
+        let cube = editor.node_at("Cube").unwrap();
+        editor
+            .tree_mut()
+            .set_position(cube, Vec3::splat(9.0))
+            .unwrap();
+        for _ in 0..10 {
+            editor.tick(1.0 / 60.0);
+        }
+        editor.stop();
+        assert_eq!(editor.mode, Mode::Edit);
+        assert_eq!(editor.describe(), before, "play changes are discarded");
+        assert_eq!(editor.tree().children(editor.tree().root()).len(), 1);
+    }
+
+    #[test]
+    fn a_ragdoll_falls_while_playing_and_is_back_after_stop() {
+        let mut editor = editor();
+        editor.selection = None;
+        editor.add_scene(crate::create::ragdoll(true), Some(Vec3::new(0.0, 0.0, 0.0)));
+        let head_at = |editor: &Editor| {
+            let head = editor.node_at("Ragdoll/Head").unwrap();
+            editor.tree().global_position(head).unwrap()
+        };
+        let standing = head_at(&editor);
+        editor.play();
+        for _ in 0..120 {
+            editor.tick(1.0 / 60.0);
+        }
+        assert!(head_at(&editor).y < standing.y - 0.5, "fell over");
+        // Paused, a step advances exactly one frame.
+        editor.toggle_pause();
+        let frame = editor
+            .tree()
+            .world()
+            .resource::<Time>()
+            .unwrap()
+            .frame_count;
+        editor.tick(1.0 / 60.0);
+        editor.step_frame();
+        assert_eq!(
+            editor
+                .tree()
+                .world()
+                .resource::<Time>()
+                .unwrap()
+                .frame_count,
+            frame + 1
+        );
+        // Live tweaks while playing are not undo steps.
+        let can_undo = editor.history.can_undo();
+        let head = editor.node_at("Ragdoll/Head").unwrap();
+        editor.set_transform(head, Transform3D::from_translation(Vec3::splat(3.0)));
+        assert_eq!(editor.history.can_undo(), can_undo);
+        editor.stop();
+        assert!((head_at(&editor) - standing).length() < 1e-4, "restored");
+        assert_eq!(
+            editor.tree().world().resource::<Time>().unwrap().time_scale,
+            1.0
+        );
+    }
+
+    #[test]
+    fn opens_and_saves_scene_files() {
+        let mut editor = editor();
+        editor.open_scene("slice/level.toml");
+        assert_eq!(editor.status.as_ref().map(|s| s.error), Some(false));
+        let described = editor.describe();
+        assert!(described.environment.is_some());
+        assert!(described.nodes.len() > 20);
+        // Unknown game scripts are kept by name.
+        assert!(described
+            .nodes
+            .iter()
+            .any(|n| n.script.as_deref() == Some("Player")));
+
+        let dir = std::env::temp_dir().join(format!("ab-editor-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut other = Editor::new(dir.clone(), None, AudioOutput::Silent);
+        other.save_as("levels/new");
+        assert_eq!(other.scene_path.as_deref(), Some("levels/new.toml"));
+        let text = std::fs::read_to_string(dir.join("levels/new.toml")).unwrap();
+        assert_eq!(SceneFile::from_toml(&text).unwrap(), other.describe());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn several_scripts_attach_save_and_undo() {
+        let mut editor = editor();
+        editor.add_node(cube(), None);
+        let cube = editor.selection.unwrap();
+        editor.end_gesture();
+        editor.attach_script(cube, "Mover");
+        editor.end_gesture();
+        editor.attach_script(cube, "Health");
+        editor.end_gesture();
+        editor.attach_script(cube, "Mover");
+        assert_eq!(
+            editor.tree().script_names(cube),
+            ["Mover", "Health"],
+            "no duplicates"
+        );
+        let desc = editor.describe_node(cube).unwrap();
+        assert_eq!(desc.scripts, ["Mover", "Health"]);
+        assert!(editor.script_names().contains(&"Health".to_owned()));
+
+        // Reordering and removing through the description, as the Inspector does.
+        let mut reordered = desc.clone();
+        reordered.set_script_list(vec!["Health".into(), "Mover".into()]);
+        editor.apply_desc(cube, &desc, reordered);
+        editor.end_gesture();
+        let cube = editor.node_at("Cube").unwrap();
+        assert_eq!(editor.tree().script_names(cube), ["Health", "Mover"]);
+
+        editor.undo();
+        let cube = editor.node_at("Cube").unwrap();
+        assert_eq!(editor.tree().script_names(cube), ["Mover", "Health"]);
+        editor.undo();
+        let cube = editor.node_at("Cube").unwrap();
+        assert_eq!(
+            editor.tree().script_names(cube),
+            ["Mover"],
+            "one step per attach"
+        );
+        assert_eq!(
+            editor.describe_node(cube).unwrap().script.as_deref(),
+            Some("Mover")
+        );
+    }
+
+    /// The Unity-style flow for real: create a script in a new game, build the library the
+    /// way the editor does, attach the script by name, press Play and watch it run
+    /// (minutes): `cargo test -p ab-editor created_script -- --ignored`.
+    #[test]
+    #[ignore]
+    fn a_created_script_runs_in_play_mode() {
+        use crate::projects::{create, BuildState, NewProject, Profile, ScriptBuild};
+        use crate::scripts::GameScripts;
+        let location = std::env::temp_dir().join(format!("ab-flow-{}", std::process::id()));
+        std::fs::create_dir_all(&location).unwrap();
+        let new = NewProject {
+            title: "Script Flow Check".into(),
+            location: location.clone(),
+            new_folder: true,
+        };
+        let project = create(&new).unwrap();
+        let root = location;
+        let result = std::panic::catch_unwind(move || {
+            let mut scripts = GameScripts::new(project.root.clone());
+            let (name, path) = scripts.create("spinner", &[]).unwrap();
+            let (lifter, lifter_path) = scripts.create("lifter", &[]).unwrap();
+            // What a user would type in the code editor.
+            for (path, body) in [
+                (&path, "let _ = tree.rotate(node, Vec3::Y, delta);"),
+                (
+                    &lifter_path,
+                    "let _ = tree.translate(node, Vec3::Y * delta);",
+                ),
+            ] {
+                let source = std::fs::read_to_string(path)
+                    .unwrap()
+                    .replace("let _ = (tree, node, delta);", body);
+                std::fs::write(path, source).unwrap();
+            }
+            let mut build = ScriptBuild::start(&project, Profile::Debug).unwrap();
+            assert_eq!(*build.wait(), BuildState::Succeeded);
+
+            let mut editor = Editor::new(
+                project.assets.clone(),
+                project.editor_library(),
+                AudioOutput::Silent,
+            );
+            editor.open_scene(project.main_scene.as_deref().unwrap());
+            assert!(editor.script_names().contains(&name));
+            let target = editor
+                .tree()
+                .children(editor.scene_root)
+                .into_iter()
+                .find(|&n| editor.tree().is_node3d(n))
+                .expect("a 3D node in the empty template's scene");
+            editor.attach_script(target, &name);
+            assert_eq!(
+                editor.tree().script_name(target).as_deref(),
+                Some(name.as_str())
+            );
+            editor.undo();
+            assert_eq!(editor.tree().script_name(target), None, "one undo step");
+            editor.redo();
+            // A second script on the same node, Unity-style.
+            let target = editor
+                .tree()
+                .children(editor.scene_root)
+                .into_iter()
+                .find(|&n| editor.tree().script_name(n).as_deref() == Some(name.as_str()))
+                .unwrap();
+            editor.attach_script(target, &lifter);
+            let target = editor
+                .tree()
+                .children(editor.scene_root)
+                .into_iter()
+                .find(|&n| editor.tree().script_name(n).as_deref() == Some(name.as_str()))
+                .unwrap();
+            // Children of the scene root are found by name.
+            let path = editor.tree().name(target).unwrap().to_owned();
+
+            assert_eq!(
+                editor.tree().script_names(target),
+                [name.clone(), lifter.clone()]
+            );
+            let before = editor.tree().transform(target).unwrap().rotation;
+            let height = editor.tree().transform(target).unwrap().translation.y;
+            editor.play();
+            for _ in 0..30 {
+                editor.tick(1.0 / 60.0);
+            }
+            let node = editor.node_at(&path).unwrap();
+            let rotation = editor.tree().transform(node).unwrap().rotation;
+            let lifted = editor.tree().transform(node).unwrap().translation.y - height;
+            assert!(lifted > 0.3, "the second script ran too: {lifted}");
+            assert!(
+                rotation.angle_between(before) > 0.3,
+                "the script ran: {rotation:?}"
+            );
+            editor.stop();
+            let node = editor.node_at(&path).unwrap();
+            let after = editor.tree().transform(node).unwrap().rotation;
+            assert!(
+                after.abs_diff_eq(before, 1e-5),
+                "stopping restores the edited scene: {path} {before:?} -> {after:?}, \
+                 played {rotation:?}, script {:?}",
+                editor.tree().script_name(node)
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}

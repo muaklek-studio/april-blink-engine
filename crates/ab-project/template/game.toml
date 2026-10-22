@@ -1,0 +1,9 @@
+title = "{{title}}"
+# The scene the game starts with, in assets/.
+main_scene = "scenes/main.toml"
+# The input map, next to this file.
+input = "input.toml"
+
+[window]
+width = 1280
+height = 720

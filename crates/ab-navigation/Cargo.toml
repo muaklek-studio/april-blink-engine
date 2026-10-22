@@ -1,0 +1,17 @@
+[package]
+name = "ab-navigation"
+description = "Grid navigation for April Blink Engine: baking from physics, A* paths, path following"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-core.workspace = true
+ab-physics.workspace = true
+ab-scene.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

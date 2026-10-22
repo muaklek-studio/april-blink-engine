@@ -1,0 +1,120 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ab-core",
+    "crates/ab-ecs",
+    "crates/ab-platform",
+    "crates/ab-input",
+    "crates/ab-scene",
+    "crates/ab-asset",
+    "crates/ab-animation",
+    "crates/ab-rendering",
+    "crates/ab-physics",
+    "crates/ab-navigation",
+    "crates/ab-effects",
+    "crates/ab-audio",
+    "crates/ab-ui",
+    "crates/ab-engine",
+    "crates/ab-app",
+    "crates/ab-demo-scripts",
+    "crates/ab-slice",
+    "crates/ab-editor",
+    "crates/ab-vfs",
+    "crates/ab-script-api",
+    "crates/ab-script",
+    "crates/ab-player",
+    "crates/ab-project",
+    "tools/ab-pack",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+authors = ["April Blink Engine Team"]
+repository = "https://github.com/thanaphoom/april-blink-engine"
+
+[workspace.dependencies]
+# Internal crates
+ab-core = { path = "crates/ab-core" }
+ab-ecs = { path = "crates/ab-ecs" }
+ab-platform = { path = "crates/ab-platform", default-features = false }
+ab-input = { path = "crates/ab-input" }
+ab-scene = { path = "crates/ab-scene" }
+ab-rendering = { path = "crates/ab-rendering" }
+ab-animation = { path = "crates/ab-animation" }
+ab-asset = { path = "crates/ab-asset" }
+ab-physics = { path = "crates/ab-physics" }
+ab-navigation = { path = "crates/ab-navigation" }
+ab-effects = { path = "crates/ab-effects" }
+ab-audio = { path = "crates/ab-audio", default-features = false }
+ab-ui = { path = "crates/ab-ui" }
+ab-demo-scripts = { path = "crates/ab-demo-scripts" }
+ab-engine = { path = "crates/ab-engine" }
+ab-vfs = { path = "crates/ab-vfs" }
+ab-script-api = { path = "crates/ab-script-api", version = "0.1.0" }
+ab-script = { path = "crates/ab-script", version = "0.1.0" }
+ab-project = { path = "crates/ab-project" }
+
+# Core
+# 0.33: the glam that Rapier (via glamx) and Kira use, so their math types are ours.
+glam = { version = "0.33", features = ["serde"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.1"
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+uuid = { version = "1.28", features = ["v4", "serde"] }
+
+# Platform & Graphics
+winit = { version = "0.30.13", features = ["rwh_06", "serde"] }
+wgpu = "30.0"
+
+# Assets & Physics & Audio
+gltf = { version = "1.4.1", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# SIMD is always on since 0.35.
+rapier3d = { version = "0.36", features = ["debug-render"] }
+# Decoders only; the device backend (cpal) is enabled by `ab-audio/device`.
+kira = { version = "0.12", default-features = false, features = ["wav", "pcm", "ogg", "vorbis", "mp3", "flac"] }
+mint = "0.5.9"
+
+# UI text
+rustybuzz = "0.20.1"
+fdsm = "0.8"
+
+# Hot reload of script libraries.
+libloading = "0.9"
+
+# Work-stealing worker pool behind `ab_core::jobs`.
+rayon = "1.12"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+# Keep debug builds playable: optimise dependencies (wgpu, rapier, glam) but not our own crates.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Shipping builds (`cargo xtask export`): release, without debug symbols.
+[profile.dist]
+inherits = "release"
+strip = true

@@ -1,0 +1,26 @@
+[package]
+name = "ab-ui"
+description = "Screen-space UI for April Blink Engine: Godot-style controls, layout and MSDF text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-core.workspace = true
+ab-ecs.workspace = true
+ab-input.workspace = true
+ab-rendering.workspace = true
+ab-scene.workspace = true
+fdsm.workspace = true
+image.workspace = true
+rustybuzz.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ab-platform.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "ab-physics"
+description = "Rapier 3D physics for April Blink Engine: bodies, colliders, queries and a character controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-core.workspace = true
+ab-ecs.workspace = true
+ab-scene.workspace = true
+rapier3d.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

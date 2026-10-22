@@ -1,0 +1,26 @@
+[package]
+name = "ab-audio"
+description = "Kira audio for April Blink Engine: streams, 2D/3D players and a listener"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-core.workspace = true
+ab-ecs.workspace = true
+ab-scene.workspace = true
+kira.workspace = true
+mint.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["device"]
+# Output to the sound card (cpal). On Linux, building needs `libasound2-dev`. Without it the
+# engine runs a silent backend that still advances playback in real time.
+device = ["kira/cpal"]
+
+[lints]
+workspace = true

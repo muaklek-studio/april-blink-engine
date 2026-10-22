@@ -1,0 +1,9 @@
+# Night Relics: what `run_game` starts. Its scenes and models are in the engine's assets.
+title = "Night Relics"
+main_scene = "slice/main.toml"
+input = "input.toml"
+assets = "../../assets"
+
+[window]
+width = 1280
+height = 720

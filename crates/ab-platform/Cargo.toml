@@ -1,0 +1,22 @@
+[package]
+name = "ab-platform"
+description = "Windowing, OS events and frame pacing (winit) for April Blink Engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+winit.workspace = true
+gilrs = { version = "0.11.2", optional = true }
+
+[lints]
+workspace = true
+
+[features]
+default = ["gamepad"]
+# Gamepad support via gilrs. On Linux this needs libudev (`libudev-dev` to build).
+gamepad = ["dep:gilrs"]

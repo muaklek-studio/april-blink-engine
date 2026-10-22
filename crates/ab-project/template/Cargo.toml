@@ -1,0 +1,21 @@
+[package]
+name = "{{package}}"
+description = "{{title}}: a game made with April Blink Engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# The game's scripts, loaded by the April Blink editor and by the exported game.
+crate-type = ["cdylib"]
+
+[dependencies]
+ab-script = {{ab_script}}
+serde = { version = "1", features = ["derive"] }
+
+# The project is its own workspace (even inside another one).
+[workspace]
+
+[profile.dev]
+# Scripts compile fast and still run well; the engine running them is always optimised.
+opt-level = 1

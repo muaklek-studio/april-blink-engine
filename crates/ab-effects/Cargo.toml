@@ -1,0 +1,18 @@
+[package]
+name = "ab-effects"
+description = "Visual effects for April Blink Engine: particles with presets, one-shot effects, light flashes, camera shake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-core.workspace = true
+ab-ecs.workspace = true
+ab-rendering.workspace = true
+ab-scene.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "ab-project"
+description = "April Blink game projects: the new-project template, building scripts, exporting games"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Light on purpose: `cargo xtask` uses it and should not build the engine first.
+[dependencies]
+ab-vfs.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+# Release archives: .tar.gz for Linux, .zip (deflate, CRC-32) for Windows.
+flate2 = "1.1"
+crc32fast = "1.5"
+tar = { version = "0.4.46", default-features = false }
+
+[lints]
+workspace = true

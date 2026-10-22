@@ -1,0 +1,44 @@
+# Night Relics controls (keyboard + mouse, or a gamepad).
+
+mouse_sensitivity = 0.0022
+invert_y = false
+
+[actions.move_forward]
+bindings = ["key:KeyW", "key:ArrowUp", "pad_axis:LeftStickY+"]
+
+[actions.move_back]
+bindings = ["key:KeyS", "key:ArrowDown", "pad_axis:LeftStickY-"]
+
+[actions.move_left]
+bindings = ["key:KeyA", "key:ArrowLeft", "pad_axis:LeftStickX-"]
+
+[actions.move_right]
+bindings = ["key:KeyD", "key:ArrowRight", "pad_axis:LeftStickX+"]
+
+[actions.look_left]
+bindings = ["pad_axis:RightStickX-"]
+deadzone = 0.15
+
+[actions.look_right]
+bindings = ["pad_axis:RightStickX+"]
+deadzone = 0.15
+
+[actions.look_up]
+bindings = ["pad_axis:RightStickY+"]
+deadzone = 0.15
+
+[actions.look_down]
+bindings = ["pad_axis:RightStickY-"]
+deadzone = 0.15
+
+[actions.sprint]
+bindings = ["key:ShiftLeft", "pad:LeftStick"]
+
+[actions.interact]
+bindings = ["key:KeyE", "mouse:Left", "pad:South"]
+
+[actions.restart]
+bindings = ["key:KeyR", "pad:Start"]
+
+[actions.quit]
+bindings = ["key:Escape", "pad:Select"]

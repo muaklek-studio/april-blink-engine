@@ -1,0 +1,4 @@
+# Bindings: key:<KeyCode>, mouse:<Left|Right|Middle>, pad:<GamepadButton>,
+#           pad_axis:<GamepadAxis><+|->
+[actions.quit]
+bindings = ["key:Escape", "pad:Select"]

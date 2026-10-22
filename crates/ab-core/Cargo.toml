@@ -1,0 +1,19 @@
+[package]
+name = "ab-core"
+description = "Core math, time, identifiers and logging for April Blink Engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+glam.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

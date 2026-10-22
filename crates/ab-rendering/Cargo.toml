@@ -1,0 +1,22 @@
+[package]
+name = "ab-rendering"
+description = "wgpu forward renderer for April Blink Engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-core.workspace = true
+ab-ecs.workspace = true
+ab-scene.workspace = true
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "1.0"
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

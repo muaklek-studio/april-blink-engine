@@ -1,0 +1,26 @@
+[package]
+name = "ab-slice"
+description = "Night Relics: the April Blink Engine vertical slice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+# rlib: linked into the game binary. cdylib: hot reloaded during development.
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "night-relics"
+path = "src/main.rs"
+
+[dependencies]
+# The scripts (the library) only use the SDK; the game executable runs them on the engine.
+ab-script.workspace = true
+ab-engine.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

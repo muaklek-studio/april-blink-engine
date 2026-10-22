@@ -1,0 +1,712 @@
+# Night Relics: the vertical-slice level. Three rooms (west, hall, east) joined by doorways,
+# an altar in the hall, four relics on tables, the player and the ghost.
+#
+# Collision layers: 1 level, 2 relics, 4 player, 8 ghost reach (area), 16 ghost body.
+
+[environment]
+background = "#020306"
+ambient_color = "#5868a0"
+ambient_energy = 0.3
+fog_color = "#06080f"
+fog_density = 0.06
+fog_height = 0.0
+fog_height_falloff = 0.25
+exposure = 1.7
+
+[[node]]
+name = "Level"
+type = "Node3D"
+
+[[node]]
+name = "Geometry"
+parent = "."
+type = "Node3D"
+
+[[node]]
+name = "Floor"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [0.0, -0.25, 0.0]
+scale = [24.0, 0.5, 16.0]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Floor"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#4a443d", roughness = 0.85 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Floor"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "NorthWall"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [0.0, 1.6, -8.0]
+scale = [24.3, 3.2, 0.3]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/NorthWall"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/NorthWall"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "SouthWall"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [0.0, 1.6, 8.0]
+scale = [24.3, 3.2, 0.3]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/SouthWall"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/SouthWall"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "WestWall"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-12.0, 1.6, 0.0]
+scale = [0.3, 3.2, 16.0]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/WestWall"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/WestWall"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "EastWall"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [12.0, 1.6, 0.0]
+scale = [0.3, 3.2, 16.0]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/EastWall"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/EastWall"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "WestDividerN"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-4.0, 1.6, -4.5]
+scale = [0.3, 3.2, 7.0]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/WestDividerN"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/WestDividerN"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "WestDividerS"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-4.0, 1.6, 4.5]
+scale = [0.3, 3.2, 7.0]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/WestDividerS"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/WestDividerS"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "EastDividerN"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [4.0, 1.6, -2.75]
+scale = [0.3, 3.2, 10.5]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/EastDividerN"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/EastDividerN"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "EastDividerS"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [4.0, 1.6, 6.25]
+scale = [0.3, 3.2, 3.5]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/EastDividerS"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6a655c", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/EastDividerS"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Pillar0"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-2.0, 1.6, 1.5]
+scale = [0.6, 3.2, 0.6]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Pillar0"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a746a", roughness = 0.95 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Pillar0"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Pillar1"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [2.0, 1.6, 1.5]
+scale = [0.6, 3.2, 0.6]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Pillar1"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a746a", roughness = 0.95 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Pillar1"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Table0"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-9.0, 0.4, 5.0]
+scale = [1.4, 0.8, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Table0"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Table0"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Table1"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-10.0, 0.4, -5.5]
+scale = [1.4, 0.8, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Table1"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Table1"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Table2"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [9.0, 0.4, -5.0]
+scale = [1.4, 0.8, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Table2"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Table2"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Table3"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [9.5, 0.4, 5.5]
+scale = [1.4, 0.8, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Table3"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Table3"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Clutter0"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-6.5, 0.45, -1.5]
+scale = [0.9, 0.9, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Clutter0"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Clutter0"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Clutter1"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [6.5, 0.45, -0.5]
+scale = [0.9, 0.9, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Clutter1"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Clutter1"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Clutter2"
+parent = "Geometry"
+type = "StaticBody3D"
+position = [-1.0, 0.45, -6.5]
+scale = [0.9, 0.9, 0.9]
+
+[[node]]
+name = "Mesh"
+parent = "Geometry/Clutter2"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#7a5236", roughness = 0.8 }
+
+[[node]]
+name = "Shape"
+parent = "Geometry/Clutter2"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Altar"
+parent = "."
+type = "StaticBody3D"
+position = [0.0, 0.5, -5.0]
+scale = [1.8, 1.0, 0.9]
+groups = ["altar"]
+
+[[node]]
+name = "Mesh"
+parent = "Altar"
+type = "MeshInstance3D"
+mesh = { primitive = "cube" }
+material = { color = "#6b6258", roughness = 0.7 }
+
+[[node]]
+name = "Shape"
+parent = "Altar"
+type = "CollisionShape3D"
+shape = { box = [1.0, 1.0, 1.0] }
+
+[[node]]
+name = "Slots"
+parent = "."
+type = "Node3D"
+position = [0.0, 1.15, -5.0]
+
+[[node]]
+name = "Slot0"
+parent = "Slots"
+type = "Node3D"
+position = [-0.6, 0.0, 0.0]
+groups = ["altar_slot"]
+
+[[node]]
+name = "Slot1"
+parent = "Slots"
+type = "Node3D"
+position = [-0.2, 0.0, 0.0]
+groups = ["altar_slot"]
+
+[[node]]
+name = "Slot2"
+parent = "Slots"
+type = "Node3D"
+position = [0.2, 0.0, 0.0]
+groups = ["altar_slot"]
+
+[[node]]
+name = "Slot3"
+parent = "Slots"
+type = "Node3D"
+position = [0.6, 0.0, 0.0]
+groups = ["altar_slot"]
+
+[[node]]
+name = "AltarLight"
+parent = "."
+type = "OmniLight3D"
+position = [0.0, 2.2, -4.3]
+script = "Flicker"
+light = { color = "#ffb070", energy = 5.0, range = 7.0 }
+
+[[node]]
+name = "CandleLeft"
+parent = "."
+type = "Particles3D"
+position = [-0.85, 1.05, -5.25]
+particles = { preset = "fire", amount = 14, size = [0.16, 0.04], speed = [0.2, 0.45] }
+
+[[node]]
+name = "CandleRight"
+parent = "."
+type = "Particles3D"
+position = [0.85, 1.05, -5.25]
+particles = { preset = "fire", amount = 14, size = [0.16, 0.04], speed = [0.2, 0.45] }
+
+[[node]]
+name = "DustWest"
+parent = "."
+type = "Particles3D"
+position = [-8.0, 1.5, 0.0]
+particles = { preset = "dust", amount = 40 }
+
+[[node]]
+name = "DustEast"
+parent = "."
+type = "Particles3D"
+position = [8.0, 1.5, 0.0]
+particles = { preset = "dust", amount = 40 }
+
+[[node]]
+name = "Relics"
+parent = "."
+type = "Node3D"
+
+[[node]]
+name = "Relic0"
+parent = "Relics"
+type = "RigidBody3D"
+position = [-9.0, 1.0, 5.0]
+groups = ["relics"]
+body = { mass = 1.0, layer = 2, mask = 7 }
+
+[[node]]
+name = "Mesh"
+parent = "Relics/Relic0"
+type = "MeshInstance3D"
+cast_shadows = false
+mesh = { primitive = "cube", size = 0.3 }
+material = { color = "#d8a840", metallic = 0.6, roughness = 0.35, emission = "#ff9a20", emission_energy = 0.45 }
+
+[[node]]
+name = "Shape"
+parent = "Relics/Relic0"
+type = "CollisionShape3D"
+shape = { box = [0.3, 0.3, 0.3] }
+
+[[node]]
+name = "Glow"
+parent = "Relics/Relic0"
+type = "OmniLight3D"
+light = { color = "#ffb040", energy = 1.5, range = 2.5 }
+
+[[node]]
+name = "Relic1"
+parent = "Relics"
+type = "RigidBody3D"
+position = [-10.0, 1.0, -5.5]
+groups = ["relics"]
+body = { mass = 1.0, layer = 2, mask = 7 }
+
+[[node]]
+name = "Mesh"
+parent = "Relics/Relic1"
+type = "MeshInstance3D"
+cast_shadows = false
+mesh = { primitive = "cube", size = 0.3 }
+material = { color = "#d8a840", metallic = 0.6, roughness = 0.35, emission = "#ff9a20", emission_energy = 0.45 }
+
+[[node]]
+name = "Shape"
+parent = "Relics/Relic1"
+type = "CollisionShape3D"
+shape = { box = [0.3, 0.3, 0.3] }
+
+[[node]]
+name = "Glow"
+parent = "Relics/Relic1"
+type = "OmniLight3D"
+light = { color = "#ffb040", energy = 1.5, range = 2.5 }
+
+[[node]]
+name = "Relic2"
+parent = "Relics"
+type = "RigidBody3D"
+position = [9.0, 1.0, -5.0]
+groups = ["relics"]
+body = { mass = 1.0, layer = 2, mask = 7 }
+
+[[node]]
+name = "Mesh"
+parent = "Relics/Relic2"
+type = "MeshInstance3D"
+cast_shadows = false
+mesh = { primitive = "cube", size = 0.3 }
+material = { color = "#d8a840", metallic = 0.6, roughness = 0.35, emission = "#ff9a20", emission_energy = 0.45 }
+
+[[node]]
+name = "Shape"
+parent = "Relics/Relic2"
+type = "CollisionShape3D"
+shape = { box = [0.3, 0.3, 0.3] }
+
+[[node]]
+name = "Glow"
+parent = "Relics/Relic2"
+type = "OmniLight3D"
+light = { color = "#ffb040", energy = 1.5, range = 2.5 }
+
+[[node]]
+name = "Relic3"
+parent = "Relics"
+type = "RigidBody3D"
+position = [9.5, 1.0, 5.5]
+groups = ["relics"]
+body = { mass = 1.0, layer = 2, mask = 7 }
+
+[[node]]
+name = "Mesh"
+parent = "Relics/Relic3"
+type = "MeshInstance3D"
+cast_shadows = false
+mesh = { primitive = "cube", size = 0.3 }
+material = { color = "#d8a840", metallic = 0.6, roughness = 0.35, emission = "#ff9a20", emission_energy = 0.45 }
+
+[[node]]
+name = "Shape"
+parent = "Relics/Relic3"
+type = "CollisionShape3D"
+shape = { box = [0.3, 0.3, 0.3] }
+
+[[node]]
+name = "Glow"
+parent = "Relics/Relic3"
+type = "OmniLight3D"
+light = { color = "#ffb040", energy = 1.5, range = 2.5 }
+
+[[node]]
+name = "Lamp0"
+parent = "."
+type = "OmniLight3D"
+position = [-8.0, 2.6, 0.0]
+script = "Flicker"
+light = { color = "#ffaa66", energy = 6.0, range = 8.0 }
+
+[[node]]
+name = "Lamp1"
+parent = "."
+type = "OmniLight3D"
+position = [8.0, 2.6, 0.0]
+script = "Flicker"
+light = { color = "#ff9955", energy = 6.0, range = 8.0 }
+
+[[node]]
+name = "HallLamp"
+parent = "."
+type = "OmniLight3D"
+position = [0.0, 2.7, 3.5]
+light = { color = "#ffb27a", energy = 5.0, range = 7.5 }
+script = "Flicker"
+
+[[node]]
+name = "Moon"
+parent = "."
+type = "DirectionalLight3D"
+rotation = [-55.0, 35.0, 0.0]
+light = { color = "#8ca0ff", energy = 0.9, shadows = true }
+
+[[node]]
+name = "Player"
+parent = "."
+type = "CharacterBody3D"
+position = [0.0, 0.95, 6.0]
+script = "Player"
+body = { layer = 4, mask = 11 }
+character = { max_step_height = 0.25 }
+
+[[node]]
+name = "Shape"
+parent = "Player"
+type = "CollisionShape3D"
+shape = { capsule = [0.35, 1.8] }
+
+[[node]]
+name = "Shake"
+parent = "Player"
+type = "CameraShake"
+position = [0.0, 0.7, 0.0]
+
+[[node]]
+name = "Camera"
+parent = "Player/Shake"
+type = "Camera3D"
+camera = { fov = 75.0, current = true }
+
+[[node]]
+name = "Ears"
+parent = "Player/Shake/Camera"
+type = "AudioListener3D"
+
+[[node]]
+name = "Ghost"
+parent = "."
+type = "CharacterBody3D"
+position = [9.5, 1.1, 0.0]
+script = "Ghost"
+body = { layer = 16, mask = 1 }
+
+[[node]]
+name = "Shape"
+parent = "Ghost"
+type = "CollisionShape3D"
+shape = { capsule = [0.35, 1.4] }
+
+[[node]]
+name = "Body"
+parent = "Ghost"
+type = "MeshInstance3D"
+cast_shadows = false
+mesh = { primitive = "sphere", radius = 0.45 }
+material = { color = "#8aa8e0", roughness = 0.3, emission = "#5f86ff", emission_energy = 0.8 }
+
+[[node]]
+name = "Light"
+parent = "Ghost"
+type = "OmniLight3D"
+light = { color = "#7fa0ff", energy = 4.0, range = 5.0 }
+
+[[node]]
+name = "Reach"
+parent = "Ghost"
+type = "Area3D"
+body = { layer = 8, mask = 4 }
+
+[[node]]
+name = "Shape"
+parent = "Ghost/Reach"
+type = "CollisionShape3D"
+shape = { sphere = 0.7 }
+
+[[node]]
+name = "Wisps"
+parent = "Ghost"
+type = "Particles3D"
+particles = { preset = "wisps" }
+
+[[node]]
+name = "Hum"
+parent = "Ghost"
+type = "AudioStreamPlayer3D"
+audio = { stream = "audio/hum.wav", volume_db = -2.0, pitch = 0.6, looping = true, autoplay = true, min_distance = 1.5, max_distance = 14.0 }
+
+[[node]]
+name = "Wind"
+parent = "."
+type = "AudioStreamPlayer"
+audio = { stream = "audio/wind.wav", volume_db = -14.0, looping = true, autoplay = true }

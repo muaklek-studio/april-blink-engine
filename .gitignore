@@ -1,0 +1,35 @@
+# Build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Exported games (`cargo xtask export`); attach archives to GitHub releases instead
+/dist
+
+# Logs, crash reports and saves written while running games from the source tree
+*.log
+crash-*.txt
+/saves
+*.json.tmp
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Local settings
+.env
+.env.*
+
+# Editors and IDEs
+.idea/
+.vscode/
+.zed/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

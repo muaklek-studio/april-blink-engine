@@ -1,0 +1,24 @@
+[package]
+name = "ab-player"
+description = "April Blink Engine game player: runs any game made with the editor (its assets and script library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ab-player"
+path = "src/main.rs"
+
+[dependencies]
+ab-engine.workspace = true
+ab-project.workspace = true
+anyhow.workspace = true
+
+[features]
+# Builds for players: see `ab-engine/shipping`. Exported games use this build.
+shipping = ["ab-engine/shipping"]
+
+[lints]
+workspace = true

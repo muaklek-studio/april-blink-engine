@@ -1,0 +1,48 @@
+[package]
+name = "ab-engine"
+description = "April Blink Engine facade: game loop, scheduling and subsystem wiring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ab-animation.workspace = true
+ab-asset.workspace = true
+ab-audio.workspace = true
+ab-core.workspace = true
+ab-effects.workspace = true
+ab-ecs.workspace = true
+ab-input.workspace = true
+ab-navigation.workspace = true
+ab-vfs.workspace = true
+ab-physics.workspace = true
+ab-platform.workspace = true
+ab-rendering.workspace = true
+ab-scene.workspace = true
+ab-script-api.workspace = true
+ab-ui.workspace = true
+anyhow.workspace = true
+libloading.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image = { workspace = true, default-features = false, features = ["png"] }
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["gamepad", "audio"]
+# Gamepad support (gilrs). On Linux, building needs `libudev-dev`.
+gamepad = ["ab-platform/gamepad"]
+# Sound card output (kira + cpal). On Linux, building needs `libasound2-dev`. Without it
+# audio still works but is silent.
+audio = ["ab-audio/device"]
+# Builds for players (`cargo xtask export` turns it on): no debug overlay or physics view
+# keys, and the developer command-line options (`--hot`, `--overlay`, `--scene`,
+# `--screenshot`) are ignored.
+shipping = []
+
+[lints]
+workspace = true
