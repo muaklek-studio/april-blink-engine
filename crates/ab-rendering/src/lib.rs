@@ -41,8 +41,8 @@ pub use extract::{
     SpotLightData,
 };
 pub use gpu::{
-    instance_flags, FrameStats, GpuContext, OffscreenTarget, RenderError, RendererConfig,
-    SceneRenderer, WindowRenderer,
+    instance_flags, test_gpu_context, FrameStats, GpuContext, OffscreenTarget, RenderError,
+    RendererConfig, SceneRenderer, WindowRenderer,
 };
 pub use material::Material;
 pub use mesh::{Aabb, Mesh, MeshError, SkinWeights, Vertex};

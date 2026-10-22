@@ -1,25 +1,14 @@
 //! Particles in the HDR pass: placement, depth testing against opaque geometry, blending.
 
 use ab_core::{Color, Transform3D, Vec3};
+use ab_rendering::test_gpu_context as gpu;
 use ab_rendering::{
     Camera3D, Environment, GpuContext, Material, Mesh, MeshInstance3D, OffscreenTarget,
-    ParticleDrawList, ParticleInstance, RenderAssets, RenderError, RenderNodes, RendererConfig,
-    SceneRenderer,
+    ParticleDrawList, ParticleInstance, RenderAssets, RenderNodes, RendererConfig, SceneRenderer,
 };
 use ab_scene::SceneTree;
 
 const SIZE: u32 = 96;
-
-fn gpu() -> Option<GpuContext> {
-    match GpuContext::new_headless() {
-        Ok(gpu) => Some(gpu),
-        Err(RenderError::NoAdapter) => {
-            eprintln!("skipping GPU test: no adapter available");
-            None
-        }
-        Err(e) => panic!("GPU initialisation failed: {e}"),
-    }
-}
 
 fn particle(position: Vec3, color: Color, additive: bool) -> ParticleInstance {
     ParticleInstance {

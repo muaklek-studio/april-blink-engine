@@ -119,6 +119,14 @@ impl GpuContext {
         self.device.limits().max_texture_dimension_2d
     }
 
+    /// True when the adapter is a software rasterizer: Windows' WARP, Linux' llvmpipe.
+    ///
+    /// Such an adapter draws every pixel on the CPU, and some of them are broken enough to
+    /// crash the process instead of drawing (gfx-rs/wgpu#5591).
+    pub fn is_software_adapter(&self) -> bool {
+        self.adapter.get_info().device_type == wgpu::DeviceType::Cpu
+    }
+
     /// Renders with a device another part of the application opened (e.g. the editor's UI
     /// toolkit). The device must support the default limits.
     pub fn from_shared(adapter: wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Self {
@@ -144,6 +152,38 @@ pub fn instance_flags() -> wgpu::InstanceFlags {
     let mut flags = wgpu::InstanceFlags::from_build_config();
     flags.remove(wgpu::InstanceFlags::VALIDATION);
     flags.with_env()
+}
+
+/// Opens a headless GPU context for the offscreen rendering tests, or `None` when the machine
+/// has no GPU to render on.
+///
+/// CI runners have no graphics hardware: Windows offers WARP, a software rasterizer that
+/// crashes the driver instead of drawing (gfx-rs/wgpu#5591), and Linux has no Vulkan driver
+/// at all. Software adapters are therefore skipped; set `AB_TEST_SOFTWARE_GPU=1` to run the
+/// tests on one anyway.
+pub fn test_gpu_context() -> Option<GpuContext> {
+    match GpuContext::new_headless() {
+        Ok(gpu) if gpu.is_software_adapter() && !software_gpu_allowed() => {
+            let info = gpu.adapter.get_info();
+            eprintln!(
+                "skipping GPU test: only a software adapter is available ({} · {:?})",
+                info.name.trim(),
+                info.backend
+            );
+            None
+        }
+        Ok(gpu) => Some(gpu),
+        Err(RenderError::NoAdapter) => {
+            eprintln!("skipping GPU test: no adapter available");
+            None
+        }
+        Err(e) => panic!("GPU initialisation failed: {e}"),
+    }
+}
+
+/// Whether `AB_TEST_SOFTWARE_GPU` asks for the GPU tests to run on a software adapter.
+fn software_gpu_allowed() -> bool {
+    std::env::var_os("AB_TEST_SOFTWARE_GPU").is_some_and(|value| value != "0")
 }
 
 /// wgpu panics on uncaptured errors by default, which would take the whole game down for one

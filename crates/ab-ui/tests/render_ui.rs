@@ -1,28 +1,17 @@
 //! GPU tests: lay out UI, render it offscreen and inspect the pixels. They skip on machines
-//! without a usable GPU adapter. Set `AB_TEST_DUMP=<dir>` to save the images.
+//! without a usable GPU adapter (a software rasterizer counts as none). Set
+//! `AB_TEST_DUMP=<dir>` to save the images.
 
 use ab_core::{Color, Vec2};
 use ab_ecs::World;
-use ab_rendering::{
-    Environment, GpuContext, OffscreenTarget, RenderError, RendererConfig, SceneRenderer,
-};
+use ab_rendering::test_gpu_context as gpu;
+use ab_rendering::{Environment, GpuContext, OffscreenTarget, RendererConfig, SceneRenderer};
 use ab_scene::{NodeHandle, SceneTree};
 use ab_ui::{
     prepare_ui, Control, HAlign, Label, LayoutPreset, Panel, ProgressBar, StyleBox, TextStyle,
     UiNodes, VAlign,
 };
 use std::path::PathBuf;
-
-fn gpu() -> Option<GpuContext> {
-    match GpuContext::new_headless() {
-        Ok(gpu) => Some(gpu),
-        Err(RenderError::NoAdapter) => {
-            eprintln!("skipping GPU test: no adapter available");
-            None
-        }
-        Err(e) => panic!("GPU initialisation failed: {e}"),
-    }
-}
 
 struct Image {
     width: u32,

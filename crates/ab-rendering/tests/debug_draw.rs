@@ -1,24 +1,14 @@
 //! Debug lines: drawn over the scene, hidden behind geometry unless drawn on top.
 
 use ab_core::{Color, Transform3D, Vec3};
+use ab_rendering::test_gpu_context as gpu;
 use ab_rendering::{
     Camera3D, DebugDraw, Environment, GpuContext, Material, Mesh, MeshInstance3D, OffscreenTarget,
-    RenderAssets, RenderError, RenderNodes, RendererConfig, SceneRenderer,
+    RenderAssets, RenderNodes, RendererConfig, SceneRenderer,
 };
 use ab_scene::SceneTree;
 
 const SIZE: u32 = 96;
-
-fn gpu() -> Option<GpuContext> {
-    match GpuContext::new_headless() {
-        Ok(gpu) => Some(gpu),
-        Err(RenderError::NoAdapter) => {
-            eprintln!("skipping GPU test: no adapter available");
-            None
-        }
-        Err(e) => panic!("GPU initialisation failed: {e}"),
-    }
-}
 
 /// Camera at z = 5 looking at a grey unit cube at the origin.
 fn scene() -> SceneTree {

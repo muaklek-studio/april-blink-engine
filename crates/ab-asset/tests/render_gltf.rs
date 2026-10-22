@@ -1,27 +1,18 @@
-//! Renders the sample glTF assets offscreen. Skips without a GPU adapter.
+//! Renders the sample glTF assets offscreen. Skips without a GPU adapter (a software
+//! rasterizer counts as none).
 
 use ab_animation::{apply_animations, AnimationLibrary, AnimationPlayer};
 use ab_asset::{spawn_gltf, AssetServer};
 use ab_core::{Color, Transform3D, Vec3};
+use ab_rendering::test_gpu_context as gpu;
 use ab_rendering::{
     Camera3D, DirectionalLight3D, Environment, GpuContext, OffscreenTarget, RenderAssets,
-    RenderError, RenderNodes, RendererConfig, SceneRenderer,
+    RenderNodes, RendererConfig, SceneRenderer,
 };
 use ab_scene::{NodeHandle, SceneTree};
 use std::path::PathBuf;
 
 const SIZE: u32 = 160;
-
-fn gpu() -> Option<GpuContext> {
-    match GpuContext::new_headless() {
-        Ok(gpu) => Some(gpu),
-        Err(RenderError::NoAdapter) => {
-            eprintln!("skipping GPU test: no adapter available");
-            None
-        }
-        Err(e) => panic!("GPU initialisation failed: {e}"),
-    }
-}
 
 fn scene(model: &str, camera_at: Vec3, look_at: Vec3) -> (SceneTree, NodeHandle) {
     let mut tree = SceneTree::new();

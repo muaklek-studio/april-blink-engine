@@ -2,23 +2,13 @@
 
 use ab_core::Color;
 use ab_ecs::World;
+use ab_rendering::test_gpu_context as gpu;
 use ab_rendering::{
-    ColorSpace, Environment, GpuContext, OffscreenTarget, RenderAssets, RenderError,
-    RendererConfig, SceneRenderer, Texture, UiDrawList, UiFill, UiQuad,
+    ColorSpace, Environment, GpuContext, OffscreenTarget, RenderAssets, RendererConfig,
+    SceneRenderer, Texture, UiDrawList, UiFill, UiQuad,
 };
 
 const SIZE: u32 = 64;
-
-fn gpu() -> Option<GpuContext> {
-    match GpuContext::new_headless() {
-        Ok(gpu) => Some(gpu),
-        Err(RenderError::NoAdapter) => {
-            eprintln!("skipping GPU test: no adapter available");
-            None
-        }
-        Err(e) => panic!("GPU initialisation failed: {e}"),
-    }
-}
 
 fn render(gpu: &GpuContext, world: &World) -> Vec<[u8; 4]> {
     let mut renderer = SceneRenderer::new(gpu, OffscreenTarget::FORMAT, &RendererConfig::default());

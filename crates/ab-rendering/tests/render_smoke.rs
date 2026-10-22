@@ -2,25 +2,15 @@
 //! They skip (pass with a notice) on machines without a usable GPU adapter, e.g. CI runners.
 
 use ab_core::{Color, Transform3D, Vec3};
+use ab_rendering::test_gpu_context as gpu;
 use ab_rendering::{
     Camera3D, DirectionalLight3D, Environment, GpuContext, Material, Mesh, MeshInstance3D,
-    OffscreenTarget, RenderAssets, RenderError, RenderNodes, RendererConfig, SceneRenderer,
-    ScreenOverlay, SpotLight3D,
+    OffscreenTarget, RenderAssets, RenderNodes, RendererConfig, SceneRenderer, ScreenOverlay,
+    SpotLight3D,
 };
 use ab_scene::{NodeHandle, SceneTree};
 
 const SIZE: u32 = 128;
-
-fn gpu() -> Option<GpuContext> {
-    match GpuContext::new_headless() {
-        Ok(gpu) => Some(gpu),
-        Err(RenderError::NoAdapter) => {
-            eprintln!("skipping GPU test: no adapter available");
-            None
-        }
-        Err(e) => panic!("GPU initialisation failed: {e}"),
-    }
-}
 
 struct Scene {
     tree: SceneTree,
