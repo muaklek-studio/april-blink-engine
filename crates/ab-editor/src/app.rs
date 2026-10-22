@@ -981,9 +981,14 @@ impl EditorApp {
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(icon::LIGHTNING).size(40.0).color(theme::ACCENT));
                         ui.heading("April Blink Editor");
-                        ui.label(RichText::new(format!("version {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_DIM));
+                        ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_DIM));
                         ui.add_space(6.0);
-                        ui.label("Scene editing, play-in-editor, effects and assets for April Blink Engine.");
+                        ui.add(egui::Label::new(crate::loading::TAGLINE).wrap());
+                        ui.add_space(6.0);
+                        ui.label("Scene editing, play-in-editor, effects and assets.");
+                        ui.add(egui::Label::new(RichText::new("Game scripts are Rust: the editor builds them with cargo (https://rustup.rs) and hot-reloads them while you work.").color(theme::TEXT_DIM)).wrap());
+                        ui.label(RichText::new(format!("Rust {} or newer · {} license", env!("CARGO_PKG_RUST_VERSION"), env!("CARGO_PKG_LICENSE"))).color(theme::TEXT_DIM));
+                        ui.label(RichText::new(env!("CARGO_PKG_REPOSITORY")).size(11.5).color(theme::TEXT_DIM));
                         ui.add_space(6.0);
                         if ui.button("Close").clicked() {
                             keep = false;

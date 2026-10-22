@@ -18,6 +18,9 @@ const STEP_TIME: Duration = Duration::from_millis(170);
 /// Pause on 100 % before moving on when everything passed.
 const DONE_PAUSE: Duration = Duration::from_millis(450);
 
+/// What the engine is, in one line: the splash and the About box say the same thing.
+pub const TAGLINE: &str = "Lightweight 3D game engine. Performance and memory safety first.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Ok,
@@ -259,6 +262,11 @@ impl Loading {
     }
 
     fn draw(&mut self, ui: &mut egui::Ui, report: &Report, done: bool) -> Option<Next> {
+        // The splash is dragged to move the window: without this, the drag selects the text.
+        let mut style = (**ui.style()).clone();
+        style.interaction.selectable_labels = false;
+        ui.set_style(style);
+
         let full = ui.max_rect();
         let painter = ui.painter().clone();
         glow(&painter, full.left_top() + Vec2::new(70.0, 50.0), 260.0);
@@ -300,7 +308,7 @@ impl Loading {
             );
             ui.add_space(10.0);
             ui.label(
-                RichText::new("A 3D engine for offline games, scripted in Rust.")
+                RichText::new(TAGLINE)
                     .size(13.0)
                     .color(Color32::from_rgb(178, 184, 196)),
             );
@@ -477,40 +485,78 @@ fn check_audio() -> Outcome {
     }
 }
 
-/// `cargo` and a `rustc` at least as new as the engine's `rust-version`.
+/// The toolchain game scripts are built with: `cargo`, and a `rustc` at least as new as the
+/// engine's `rust-version` (the script SDK inherits it).
 fn check_toolchain() -> Outcome {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let version = |program: &std::ffi::OsStr| {
-        std::process::Command::new(program)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    let Some(cargo_version) = program_version(&cargo) else {
+        return Outcome::warn(
+            "cargo not found: install Rust (https://rustup.rs) to build game scripts",
+        );
     };
-    let Some(cargo_version) = version(&cargo) else {
-        return Outcome::warn("cargo not found: game scripts cannot be built");
-    };
-    let rustc = version(std::ffi::OsStr::new("rustc")).unwrap_or(cargo_version);
+    let rustc = program_version(std::ffi::OsStr::new("rustc")).unwrap_or(cargo_version);
     let found = parse_version(&rustc);
-    let needed = parse_version(env!("CARGO_PKG_RUST_VERSION")).unwrap_or((1, 95));
-    match found {
-        Some(v) if v < needed => Outcome::warn(format!(
-            "Rust {}.{} is older than {}.{}: run `rustup update`",
-            v.0, v.1, needed.0, needed.1
+    let needed = parse_version(env!("CARGO_PKG_RUST_VERSION"));
+    match (found, needed) {
+        (Some(found), Some(needed)) if found < needed => Outcome::warn(format!(
+            "Rust {found} is too old: game scripts need {needed} or newer ({})",
+            update_hint()
         )),
-        Some(v) => Outcome::ok(format!("Rust {}.{}", v.0, v.1)),
-        None => Outcome::ok(rustc),
+        (Some(found), _) => Outcome::ok(format!("Rust {found}")),
+        (None, _) => Outcome::ok(rustc),
     }
 }
 
-/// `rustc 1.90.0 (…)` or `1.85` → `(1, 90)`.
-fn parse_version(text: &str) -> Option<(u32, u32)> {
+/// `program --version`, when the program runs.
+fn program_version(program: &std::ffi::OsStr) -> Option<String> {
+    std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
+/// How to update Rust on this machine: rustup's way, or the system's.
+fn update_hint() -> &'static str {
+    if program_version(std::ffi::OsStr::new("rustup")).is_some() {
+        "run `rustup update`"
+    } else {
+        "update the Rust installation of your system"
+    }
+}
+
+/// A version number: `major.minor.patch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// `rustc 1.90.0 (…)` or `1.85` → `1.90.0` or `1.85.0`.
+fn parse_version(text: &str) -> Option<Version> {
     let word = text
         .split_whitespace()
         .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
     let mut parts = word.split(['.', '-']);
-    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = match parts.next() {
+        Some(patch) => patch.parse().ok()?,
+        None => 0,
+    };
+    Some(Version {
+        major,
+        minor,
+        patch,
+    })
 }
 
 fn check_engine() -> Outcome {
@@ -568,13 +614,27 @@ mod tests {
 
     #[test]
     fn versions() {
+        let version = |major, minor, patch| Version {
+            major,
+            minor,
+            patch,
+        };
         assert_eq!(
             parse_version("rustc 1.90.0 (1159e78c4 2025-09-14)"),
-            Some((1, 90))
+            Some(version(1, 90, 0))
         );
-        assert_eq!(parse_version("1.85"), Some((1, 85)));
-        assert_eq!(parse_version("cargo 1.86.0-nightly"), Some((1, 86)));
+        assert_eq!(parse_version("1.85"), Some(version(1, 85, 0)));
+        assert_eq!(
+            parse_version("cargo 1.86.0-nightly"),
+            Some(version(1, 86, 0))
+        );
+        assert_eq!(
+            parse_version("rustc 1.99.1 (58cf8f9c3 2026-10-13)"),
+            Some(version(1, 99, 1))
+        );
         assert_eq!(parse_version("nothing"), None);
+        // The patch decides: 1.99.0 is older than 1.99.1.
+        assert!(version(1, 99, 0) < version(1, 99, 1));
     }
 
     #[test]
@@ -588,5 +648,25 @@ mod tests {
         };
         assert_eq!(report.worst(), Level::Warn);
         assert_eq!(report.count(Level::Ok), 2);
+    }
+
+    /// The tagline must fit on one line on the splash and in the About box.
+    #[test]
+    fn tagline_fits_on_one_line() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        ctx.begin_pass(egui::RawInput::default());
+        let width = ctx.fonts_mut(|f| {
+            let job = egui::text::LayoutJob::simple_singleline(
+                TAGLINE.to_owned(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
+            f.layout_job(job).size().x
+        });
+        // The splash leaves 28 px of margin on each side; the About box is 440 px wide and
+        // its frame eats 4 px on each side.
+        assert!(width <= 464.0, "the tagline is {width:.1} px wide");
+        assert!(width <= 432.0, "the tagline is {width:.1} px wide");
     }
 }
