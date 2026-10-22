@@ -23,30 +23,7 @@ pub(crate) fn easing(name: &str) -> Result<Easing, CallError> {
 }
 
 fn preset(name: &str) -> Result<LayoutPreset, CallError> {
-    use LayoutPreset::*;
-    Ok(match name {
-        "top_left" => TopLeft,
-        "top_right" => TopRight,
-        "bottom_left" => BottomLeft,
-        "bottom_right" => BottomRight,
-        "center_left" => CenterLeft,
-        "center_top" => CenterTop,
-        "center_right" => CenterRight,
-        "center_bottom" => CenterBottom,
-        "center" => Center,
-        "left_wide" => LeftWide,
-        "top_wide" => TopWide,
-        "right_wide" => RightWide,
-        "bottom_wide" => BottomWide,
-        "vcenter_wide" => VCenterWide,
-        "hcenter_wide" => HCenterWide,
-        "full_rect" => FullRect,
-        other => {
-            return Err(CallError::BadArguments(format!(
-                "unknown layout preset `{other}`"
-            )))
-        }
-    })
+    crate::scene_file::ui::preset(name).map_err(CallError::BadArguments)
 }
 
 fn control(c: &Call<'_>, node: NodeHandle, f: impl FnOnce(&mut Control)) -> Result<(), CallError> {

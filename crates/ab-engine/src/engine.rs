@@ -74,6 +74,8 @@ pub struct Engine {
     hot_reload: Option<HotReload>,
     debug_overlay_key: Option<KeyCode>,
     debug_physics_key: Option<KeyCode>,
+    debug_input_key: Option<KeyCode>,
+    debug_trace_key: Option<KeyCode>,
     fullscreen_key: Option<KeyCode>,
 }
 
@@ -107,6 +109,10 @@ impl Engine {
         world.insert_resource(Audio::new(config.audio_output));
         world.insert_resource(Profiler::new());
         world.insert_resource(DebugOverlay::default());
+        world.insert_resource(crate::input_overlay::InputOverlay::default());
+        world.insert_resource(ab_input::InputLog::default());
+        world.insert_resource(crate::trace::Tracer::default());
+        world.insert_resource(crate::trace::TraceOverlay::default());
         world.insert_resource(DebugDraw::default());
         world.insert_resource(DebugSettings::default());
         world.insert_resource(crate::tween::Tweens::default());
@@ -123,6 +129,10 @@ impl Engine {
         );
         schedule.add_system(
             ScheduleStage::PreUpdate,
+            ab_ecs::named("input_log", crate::input_overlay::record_input_log),
+        );
+        schedule.add_system(
+            ScheduleStage::PreUpdate,
             ab_ecs::named("ui_input", ui_input_system),
         );
         schedule.add_system(
@@ -131,7 +141,15 @@ impl Engine {
         );
         schedule.add_system(
             ScheduleStage::Update,
+            ab_ecs::named("locomotion", ab_animation::locomotion_system),
+        );
+        schedule.add_system(
+            ScheduleStage::Update,
             ab_ecs::named("animation", animation_system),
+        );
+        schedule.add_system(
+            ScheduleStage::Update,
+            ab_ecs::named("head_bob", crate::head_bob::head_bob_system),
         );
         schedule.add_system(
             ScheduleStage::Update,
@@ -151,6 +169,10 @@ impl Engine {
         );
         schedule.add_system(
             ScheduleStage::PostUpdate,
+            ab_ecs::named("blood", crate::blood::blood_system),
+        );
+        schedule.add_system(
+            ScheduleStage::PostUpdate,
             ab_ecs::named("debug_shapes", debug_shapes_system),
         );
         Self {
@@ -161,6 +183,8 @@ impl Engine {
             hot_reload: None,
             debug_overlay_key: config.debug_overlay_key,
             debug_physics_key: config.debug_physics_key,
+            debug_input_key: config.debug_input_key,
+            debug_trace_key: config.debug_trace_key,
             fullscreen_key: config.fullscreen_key,
         }
     }
@@ -284,6 +308,8 @@ impl Engine {
         timed(3, start);
         let start = Instant::now();
         self.tree.process(delta);
+        // Before PostUpdate: its hit lines join this frame's debug drawing.
+        crate::trace::update(&mut self.tree, delta);
         timed(4, start);
 
         let start = Instant::now();
@@ -306,6 +332,7 @@ impl Engine {
 
     fn update_debug_overlay(&mut self, delta: f32) {
         debug_overlay::update(&mut self.tree, delta);
+        crate::input_overlay::update(&mut self.tree);
     }
 
     /// Debug keys act at the start of the frame, so their views show in the same frame.
@@ -339,6 +366,36 @@ impl Engine {
                 .resource::<InputState>()
                 .is_some_and(|input| input.is_key_just_pressed(key))
         });
+        let input_toggle = self.debug_input_key.is_some_and(|key| {
+            self.tree
+                .world()
+                .resource::<InputState>()
+                .is_some_and(|input| input.is_key_just_pressed(key))
+        });
+        let trace_toggle = self.debug_trace_key.is_some_and(|key| {
+            self.tree
+                .world()
+                .resource::<InputState>()
+                .is_some_and(|input| input.is_key_just_pressed(key))
+        });
+        if trace_toggle {
+            if let Some(mut overlay) = self
+                .tree
+                .world()
+                .resource_mut::<crate::trace::TraceOverlay>()
+            {
+                overlay.toggle();
+            }
+        }
+        if input_toggle {
+            if let Some(mut overlay) = self
+                .tree
+                .world()
+                .resource_mut::<crate::input_overlay::InputOverlay>()
+            {
+                overlay.toggle();
+            }
+        }
         if physics_toggle {
             if let Some(mut settings) = self.tree.world().resource_mut::<DebugSettings>() {
                 settings.physics = !settings.physics;
@@ -757,6 +814,38 @@ mod tests {
                 .contains(&player);
         }
         assert!(finished && !playing(&engine), "the 0.2 s sound ended");
+    }
+
+    #[test]
+    fn f8_shows_the_input_overlay_and_held_actions() {
+        let config = EngineConfig {
+            audio_output: ab_audio::AudioOutput::Silent,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(&config);
+        if let Some(mut actions) = engine.tree().world().resource_mut::<Actions>() {
+            actions
+                .map_mut()
+                .bind("jump", ab_input::Binding::Key(KeyCode::Space));
+            actions.hold("jump", 1.0);
+        }
+        let key = |code, pressed| PlatformEvent::Key {
+            code,
+            pressed,
+            repeat: false,
+        };
+        engine.handle_event(&key(KeyCode::F8, true));
+        engine.update(1.0 / 60.0);
+        engine.handle_event(&key(KeyCode::F8, false));
+        let tree = engine.tree();
+        let overlay = tree
+            .find_child(tree.root(), "InputOverlay", false)
+            .expect("F8 shows it");
+        let label = tree.find_child(overlay, "Text", true).unwrap();
+        let text = tree.component::<ab_ui::Label>(label).unwrap().text.clone();
+        assert!(text.contains("● jump"), "{text}");
+        assert!(text.contains("(held)"), "{text}");
+        assert!(text.contains("key F8 down"), "the log: {text}");
     }
 
     #[test]

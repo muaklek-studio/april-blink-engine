@@ -9,9 +9,11 @@
 
 mod actions;
 mod binding;
+pub mod debug;
 mod state;
 
 pub use ab_platform::{GamepadAxis, GamepadButton, GamepadId, KeyCode, MouseButton};
 pub use actions::{Action, ActionEvent, Actions, InputMap, InputMapError};
 pub use binding::{Binding, BindingParseError};
+pub use debug::InputLog;
 pub use state::{ButtonState, GamepadState, InputState};

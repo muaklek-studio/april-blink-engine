@@ -57,6 +57,71 @@ impl fmt::Debug for Signal {
     }
 }
 
+/// Most signals a [`SignalTap`] keeps between two [`SignalTap::take`] calls; later ones are
+/// counted in [`SignalTap::dropped`].
+pub const SIGNAL_TAP_CAPACITY: usize = 4096;
+
+/// One emitted signal as a [`SignalTap`] saw it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TappedSignal {
+    pub source: NodeHandle,
+    pub name: &'static str,
+    /// The argument, if it is a number (`f32`, `f64`, `i32`, `i64`, `u32`).
+    pub value: Option<f64>,
+    /// The argument, if it is a node.
+    pub node: Option<NodeHandle>,
+    /// The argument, if it is text.
+    pub text: Option<String>,
+}
+
+/// ECS resource: while `enabled`, every emitted signal is recorded, listened to or not (debug
+/// tracing: who damaged whom, what an object did). Read them with [`SignalTap::take`].
+#[derive(Debug, Default)]
+pub struct SignalTap {
+    pub enabled: bool,
+    records: Vec<TappedSignal>,
+    dropped: usize,
+}
+
+impl SignalTap {
+    pub fn record(&mut self, signal: &Signal) {
+        if !self.enabled {
+            return;
+        }
+        if self.records.len() >= SIGNAL_TAP_CAPACITY {
+            self.dropped += 1;
+            return;
+        }
+        let value = signal
+            .arg::<f32>()
+            .map(|&v| f64::from(v))
+            .or_else(|| signal.arg::<f64>().copied())
+            .or_else(|| signal.arg::<i64>().map(|&v| v as f64))
+            .or_else(|| signal.arg::<i32>().map(|&v| f64::from(v)))
+            .or_else(|| signal.arg::<u32>().map(|&v| f64::from(v)));
+        self.records.push(TappedSignal {
+            source: signal.source,
+            name: signal.name,
+            value,
+            node: signal.arg::<NodeHandle>().copied(),
+            text: signal
+                .arg::<String>()
+                .cloned()
+                .or_else(|| signal.arg::<&'static str>().map(|s| (*s).to_owned())),
+        });
+    }
+
+    /// The signals recorded since the last call.
+    pub fn take(&mut self) -> Vec<TappedSignal> {
+        std::mem::take(&mut self.records)
+    }
+
+    /// Signals not recorded because too many came between two reads.
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+}
+
 /// ECS resource where engine systems (UI, physics, audio, timers) queue signals. The tree
 /// delivers them at the start of `physics_process` and `process`.
 #[derive(Debug, Default)]
@@ -251,6 +316,9 @@ impl SceneTree {
     /// re-entered by an emission from inside itself, and chains of emissions deeper than 32
     /// are cut off.
     pub fn emit(&mut self, signal: Signal) {
+        if let Some(mut tap) = self.world.resource_mut::<SignalTap>() {
+            tap.record(&signal);
+        }
         let key = (signal.source.entity(), signal.name);
         let Some(ids) = self
             .signals
@@ -330,5 +398,38 @@ impl SceneTree {
                 self.emit(signal);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+
+    #[test]
+    fn the_tap_records_every_signal_with_its_argument() {
+        let mut tree = SceneTree::new();
+        let node = tree.create_node("Enemy");
+        tree.world_mut().insert_resource(SignalTap {
+            enabled: true,
+            ..Default::default()
+        });
+        // Nobody listens: recorded all the same.
+        tree.emit(Signal::new(node, "damage").with_arg(12.5_f32));
+        tree.emit(Signal::new(node, "taunt").with_arg("come here".to_owned()));
+        tree.emit(Signal::new(node, "target").with_arg(node));
+        let tapped = tree.world().resource_mut::<SignalTap>().unwrap().take();
+        assert_eq!(tapped.len(), 3);
+        assert_eq!((tapped[0].name, tapped[0].value), ("damage", Some(12.5)));
+        assert_eq!(tapped[1].text.as_deref(), Some("come here"));
+        assert_eq!(tapped[2].node, Some(node));
+
+        tree.world().resource_mut::<SignalTap>().unwrap().enabled = false;
+        tree.emit(Signal::new(node, "damage"));
+        assert!(tree
+            .world()
+            .resource_mut::<SignalTap>()
+            .unwrap()
+            .take()
+            .is_empty());
     }
 }

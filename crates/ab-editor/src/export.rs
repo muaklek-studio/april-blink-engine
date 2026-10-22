@@ -213,7 +213,7 @@ impl ExportJob {
     /// Starts exporting `target` in a background process of this editor.
     pub fn start(target: &ExportTarget, options: &ExportOptions) -> anyhow::Result<Self> {
         let editor = std::env::current_exe()?;
-        let mut command = Command::new(editor);
+        let mut command = ab_project::process::command(editor);
         command.args(options.args(&target.spec));
         let mut job = Self::spawn(command)?;
         job.platforms = usize::from(options.linux) + usize::from(options.windows);
@@ -322,7 +322,7 @@ impl ExportJob {
             .args(["-TERM", &format!("-{pid}")])
             .status();
         #[cfg(windows)]
-        let _ = Command::new("taskkill")
+        let _ = ab_project::process::command("taskkill")
             .args(["/PID", &pid, "/T", "/F"])
             .status();
         let _ = self.child.kill();
@@ -351,7 +351,7 @@ pub struct Toolchain {
 
 fn check_toolchain() -> Toolchain {
     let ok = |program: &str, args: &[&str]| {
-        Command::new(program)
+        ab_project::process::command(program)
             .args(args)
             .stdin(Stdio::null())
             .output()

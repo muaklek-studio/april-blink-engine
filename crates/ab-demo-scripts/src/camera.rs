@@ -116,12 +116,17 @@ fn shove(tree: &mut Tree<'_>, camera: Node) {
             .apply_impulse_at(forward * STRENGTH, hit.position);
         info!("shove {} at {:.1} m", hit.node, hit.distance);
     }
+    let root = tree.root();
+    if doll.is_some() {
+        // A mannequin bleeds, thrown on along the shove.
+        let _ = tree.spawn_blood(root, hit.position, Blood::along(forward + hit.normal * 0.5));
+        return;
+    }
     // A few sparks where the hand hits.
     let sparks = ParticleEffect::preset("sparks")
         .with_amount(18)
         .with_direction(hit.normal, 60.0)
         .with_speed(1.5, 4.0);
-    let root = tree.root();
     let _ = tree.spawn_effect(root, hit.position, &sparks);
 }
 

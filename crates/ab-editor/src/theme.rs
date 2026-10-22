@@ -123,7 +123,15 @@ pub fn class_icon(class: &str) -> &'static str {
         "Ragdoll" => icon::PERSON_ARMS_SPREAD,
         "CameraShake" => icon::VIBRATE,
         "AnimationPlayer" => icon::FILM_STRIP,
-        "CanvasLayer" | "Control" | "Label" | "Button" | "Panel" => icon::LAYOUT,
+        "CanvasLayer" => icon::STACK,
+        "Control" => icon::SELECTION,
+        "Panel" => icon::RECTANGLE,
+        "Label" => icon::TEXT_T,
+        "Button" => icon::CURSOR_CLICK,
+        "ProgressBar" => icon::BATTERY_HIGH,
+        "VBoxContainer" => icon::ROWS,
+        "HBoxContainer" => icon::COLUMNS,
+        "TextureRect" => icon::IMAGE,
         _ => icon::DOT_OUTLINE,
     }
 }
@@ -140,6 +148,8 @@ pub fn class_color(class: &str) -> Color32 {
             Color32::from_rgb(240, 130, 180)
         }
         "Particles3D" | "CameraShake" => Color32::from_rgb(255, 140, 80),
+        "CanvasLayer" | "Control" | "Panel" | "Label" | "Button" | "ProgressBar"
+        | "VBoxContainer" | "HBoxContainer" | "TextureRect" => Color32::from_rgb(110, 220, 160),
         _ => TEXT_DIM,
     }
 }

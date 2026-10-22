@@ -24,7 +24,9 @@
 pub mod archive;
 pub mod export;
 mod platform;
+pub mod process;
 mod project;
+pub mod script_templates;
 mod scripts;
 mod template;
 

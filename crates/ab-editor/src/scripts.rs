@@ -249,9 +249,16 @@ pub fn module_file(files: &[ScriptFile]) -> String {
     } else {
         out.push_str("pub fn register(registry: &mut ab_script::Registry) {\n");
         for (module, name) in registered {
-            out.push_str(&format!(
-                "    registry.register::<{module}::{name}>({name:?});\n"
-            ));
+            let line = format!("    registry.register::<{module}::{name}>({name:?});");
+            // As rustfmt writes it: past 100 columns the call goes on its own line.
+            if line.chars().count() > 100 {
+                out.push_str(&format!(
+                    "    registry\n        .register::<{module}::{name}>({name:?});\n"
+                ));
+            } else {
+                out.push_str(&line);
+                out.push('\n');
+            }
         }
         out.push_str("}\n");
     }
@@ -530,7 +537,18 @@ impl GameScripts {
 
     /// Creates `src/scripts/<module>.rs` for a script named from `input`; `taken` are script
     /// names in use elsewhere (the game's own `register`). Returns the type name and file.
+    #[cfg(test)]
     pub fn create(&mut self, input: &str, taken: &[String]) -> Result<(String, PathBuf)> {
+        self.create_from(input, taken, None)
+    }
+
+    /// [`GameScripts::create`] starting from a template's code (its type renamed).
+    pub fn create_from(
+        &mut self,
+        input: &str,
+        taken: &[String],
+        template: Option<&ab_project::script_templates::ScriptTemplate>,
+    ) -> Result<(String, PathBuf)> {
         let name = type_name(input).map_err(anyhow::Error::msg)?;
         let defined = self.find(&name).is_some();
         if taken.contains(&name) || defined {
@@ -542,8 +560,11 @@ impl GameScripts {
         if path.exists() {
             bail!("{} already exists.", path.display());
         }
-        std::fs::write(&path, template(&name))
-            .with_context(|| format!("writing {}", path.display()))?;
+        let source = match template {
+            Some(t) => t.source_for(&name),
+            None => self::template(&name),
+        };
+        std::fs::write(&path, source).with_context(|| format!("writing {}", path.display()))?;
         self.rescan();
         self.sync()?;
         Ok((name, path))
@@ -647,7 +668,7 @@ fn open_command(editor: &CodeEditor, file: &Path, line: usize, folder: &Path) ->
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
     {
-        let mut command = Command::new("cmd");
+        let mut command = ab_project::process::command("cmd");
         command.arg("/C").arg(&editor.program);
         command
     } else {
@@ -876,6 +897,11 @@ impl Script for Enemy {}
             let mut scripts = GameScripts::new(project.root.clone());
             scripts.create("spinner", &[]).unwrap();
             scripts.create("enemy AI", &[]).unwrap();
+            // Every template, renamed as a user would.
+            for template in ab_project::script_templates::SCRIPT_TEMPLATES {
+                let name = format!("My{}", template.type_name);
+                scripts.create_from(&name, &[], Some(template)).unwrap();
+            }
             // The editor's own build, as when opening the project.
             let mut build = ScriptBuild::start(&project, Profile::Debug).unwrap();
             assert_eq!(*build.wait(), BuildState::Succeeded);

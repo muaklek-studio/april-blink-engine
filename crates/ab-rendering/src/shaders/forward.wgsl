@@ -1,6 +1,7 @@
 // Forward PBR pass: metallic/roughness GGX with glTF-style textures (base color,
 // metallic-roughness, normal, emission), alpha cutoff, GPU skinning, directional + omni + spot
-// lights, PCF shadows and exponential height fog. Writes linear HDR color.
+// lights, PCF shadows and fog (`fog.wgsl`, prepended). Writes linear HDR color, and the
+// distance from the camera in alpha (read by the light shafts and their upsampling).
 
 const PI: f32 = 3.14159265;
 const MAX_OMNI: u32 = 16u;
@@ -25,6 +26,8 @@ struct Frame {
     ambient: vec4<f32>,
     fog_color: vec4<f32>,       // rgb, w: enabled
     fog_params: vec4<f32>,      // density, height, height falloff, max opacity
+    fog_scatter: vec4<f32>,     // sun scattering, anisotropy, camera height term, patchiness
+    fog_wind: vec4<f32>,        // noise offset (wind × time), 1 / patch size
     sun_direction: vec4<f32>,   // xyz: travel direction, w: enabled
     sun_radiance: vec4<f32>,    // rgb, w: shadow layer (-1 = none)
     shadow_params: vec4<f32>,   // depth bias, sun normal offset (m), 1 / map size, unused
@@ -32,7 +35,17 @@ struct Frame {
     shadow_matrices: array<mat4x4<f32>, 5>,
     omni: array<Omni, 16>,
     spot: array<Spot, 8>,
+    inverse_view_proj: mat4x4<f32>,
+    background: vec4<f32>,      // rgb
+    shafts: vec4<f32>,          // light shafts: intensity, anisotropy, max distance, density
 };
+
+// The distance written for the sky and the cleared background.
+const FAR_DISTANCE: f32 = 60000.0;
+
+fn view_distance(p: vec3<f32>) -> f32 {
+    return length(p - frame.camera_position.xyz);
+}
 
 struct Object {
     model: mat4x4<f32>,
@@ -188,30 +201,6 @@ fn shadow_factor(layer: i32, world_position: vec3<f32>, normal: vec3<f32>, norma
     return lit / 9.0;
 }
 
-fn apply_fog(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
-    if frame.fog_color.w < 0.5 {
-        return color;
-    }
-    let density = frame.fog_params.x;
-    let base = frame.fog_params.y;
-    let falloff = frame.fog_params.z;
-    let camera = frame.camera_position.xyz;
-    let distance = length(world_position - camera);
-    // Integral of density * exp(-falloff * (h - base)) along the view ray.
-    var optical_depth = density * distance;
-    if falloff > 0.0 {
-        let start = exp(clamp(-falloff * (camera.y - base), -80.0, 80.0));
-        let dh = world_position.y - camera.y;
-        var scale = start;
-        if abs(falloff * dh) > 1e-4 {
-            scale = start * (1.0 - exp(clamp(-falloff * dh, -80.0, 80.0))) / (falloff * dh);
-        }
-        optical_depth = density * distance * scale;
-    }
-    let amount = min(1.0 - exp(-max(optical_depth, 0.0)), frame.fog_params.w);
-    return mix(color, frame.fog_color.rgb, amount);
-}
-
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     let material = materials[in.material];
@@ -230,7 +219,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     let emission = material.emission.rgb * emission_sample;
 
     if material.params.z > 0.5 {
-        return vec4<f32>(apply_fog(albedo + emission, in.world_position), 1.0);
+        return vec4<f32>(apply_fog(albedo + emission, in.world_position), view_distance(in.world_position));
     }
 
     var n = normalize(in.normal);
@@ -295,5 +284,127 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     }
 
     color += emission;
-    return vec4<f32>(apply_fog(color, in.world_position), 1.0);
+    return vec4<f32>(apply_fog(color, in.world_position), view_distance(in.world_position));
+}
+
+// The background seen through the fog: a full-screen triangle on the far plane, drawn where
+// no geometry is, so the sky fades into the fog like distant geometry does (thin overhead,
+// thick towards the horizon, glowing around the sun).
+
+struct SkyOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn vs_sky(@builtin(vertex_index) index: u32) -> SkyOut {
+    let ndc = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u)) * 2.0 - 1.0;
+    var out: SkyOut;
+    out.clip = vec4<f32>(ndc, 1.0, 1.0);
+    out.ndc = ndc;
+    return out;
+}
+
+@fragment
+fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
+    let far = frame.inverse_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
+    return vec4<f32>(apply_fog(frame.background.rgb, far.xyz / far.w), FAR_DISTANCE);
+}
+
+// ---------------------------------------------------------------------------------------
+// Light shafts: light scattered by the air towards the camera, traced through the shadow
+// maps along each view ray (half resolution; `vs_sky` covers the target). Lit stretches of
+// the ray add light, shadowed ones do not: beams through windows and gaps.
+// ---------------------------------------------------------------------------------------
+
+// Full-resolution scene color, distance from the camera in alpha.
+@group(2) @binding(0) var scene_color: texture_2d<f32>;
+
+const SHAFT_STEPS: i32 = 20;
+const MAX_SHAFT_SPOTS: u32 = 4u;
+
+// 1 when `p` is lit by the light of shadow `layer` (-1: no shadow map), 0 when shadowed.
+fn shaft_visibility(layer: i32, p: vec3<f32>) -> f32 {
+    if layer < 0 {
+        return 1.0;
+    }
+    let clip = frame.shadow_matrices[layer] * vec4<f32>(p, 1.0);
+    if clip.w <= 0.0 {
+        return 1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if any(abs(ndc.xy) > vec2<f32>(1.0)) || ndc.z > 1.0 || ndc.z < 0.0 {
+        return 1.0;
+    }
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    // No depth bias: air has no surface to shadow itself, and the surfaces' bias (metres in
+    // a big light volume) would let light leak under thin roofs and walls.
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, ndc.z);
+}
+
+// Scattering coefficient of the air at `p`: the shafts' own density plus the fog's.
+fn medium_density(p: vec3<f32>) -> f32 {
+    var density = frame.shafts.w;
+    if frame.fog_color.w > 0.5 {
+        var height = 1.0;
+        if frame.fog_params.z > 0.0 {
+            height = exp(clamp(-frame.fog_params.z * (p.y - frame.fog_params.y), -80.0, 80.0));
+        }
+        density += frame.fog_params.x * height;
+    }
+    return density;
+}
+
+fn phase_hg(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cos_theta, 1e-4), 1.5));
+}
+
+@fragment
+fn fs_shafts(in: SkyOut) -> @location(0) vec4<f32> {
+    let full = vec2<i32>(textureDimensions(scene_color));
+    let texel = min(vec2<i32>(in.clip.xy * 2.0), full - vec2<i32>(1));
+    let distance = textureLoad(scene_color, texel, 0).a;
+    let camera = frame.camera_position.xyz;
+    let far = frame.inverse_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
+    let dir = normalize(far.xyz / far.w - camera);
+    let reach = min(distance, frame.shafts.z);
+    let dt = reach / f32(SHAFT_STEPS);
+    // Interleaved gradient noise: a different start per pixel turns banding into fine grain
+    // that the upsampling smooths.
+    let jitter = fract(52.9829189 * fract(dot(in.clip.xy, vec2<f32>(0.06711056, 0.00583715))));
+    let g = frame.shafts.y;
+    let sun_on = frame.sun_direction.w > 0.5;
+    let sun_layer = i32(frame.sun_radiance.w);
+    let sun_phase = phase_hg(dot(dir, -frame.sun_direction.xyz), g);
+    let spots = min(frame.light_counts.y, MAX_SHAFT_SPOTS);
+    var light = vec3<f32>(0.0);
+    var optical_depth = 0.0;
+    for (var i = 0; i < SHAFT_STEPS; i++) {
+        let t = (f32(i) + jitter) * dt;
+        let p = camera + dir * t;
+        let density = medium_density(p);
+        var scattered = vec3<f32>(0.0);
+        if sun_on {
+            scattered += frame.sun_radiance.rgb * shaft_visibility(sun_layer, p) * sun_phase;
+        }
+        for (var s = 0u; s < spots; s++) {
+            let spot = frame.spot[s];
+            let to_point = p - spot.position_range.xyz;
+            let d = length(to_point);
+            if d >= spot.position_range.w {
+                continue;
+            }
+            let travel = to_point / max(d, 1e-4);
+            let cone = smoothstep(spot.direction_cos_outer.w, spot.radiance_cos_inner.w, dot(travel, spot.direction_cos_outer.xyz));
+            if cone <= 0.0 {
+                continue;
+            }
+            let lit = cone * range_attenuation(d, spot.position_range.w) * shaft_visibility(i32(spot.shadow.x), p);
+            scattered += spot.radiance_cos_inner.rgb * lit * phase_hg(dot(dir, -travel), g);
+        }
+        light += exp(-optical_depth) * density * scattered * dt;
+        optical_depth += density * dt;
+    }
+    return vec4<f32>(light * frame.shafts.x, distance);
 }

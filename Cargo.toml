@@ -22,6 +22,7 @@ members = [
     "crates/ab-vfs",
     "crates/ab-script-api",
     "crates/ab-script",
+    "crates/ab-script-templates",
     "crates/ab-player",
     "crates/ab-project",
     "tools/ab-pack",

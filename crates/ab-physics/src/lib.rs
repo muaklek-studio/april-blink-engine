@@ -43,6 +43,7 @@ mod character;
 mod components;
 mod convert;
 mod events;
+mod humanoid;
 mod joint;
 mod nodes;
 mod query;
@@ -52,6 +53,9 @@ mod world;
 
 pub use components::{BodyKind, CharacterBody3D, CollisionShape3D, PhysicsBody3D};
 pub use events::PhysicsEvent;
+pub use humanoid::{
+    create_humanoid_ragdoll, fill_humanoid_ragdoll, HumanBone, HumanoidMap, HumanoidRagdollSettings,
+};
 pub use joint::{Joint3D, JointKind};
 pub use nodes::PhysicsNodes;
 pub use query::{QueryOptions, RayHit};
@@ -93,6 +97,8 @@ pub enum PhysicsError {
     NotARagdoll(NodeHandle),
     #[error("the ragdoll has no bone long enough for a body")]
     NoRagdollBones,
+    #[error("no `{0}` bone found in the skeleton: set it in the ragdoll's bone map")]
+    MissingHumanBone(&'static str),
     #[error(transparent)]
     Scene(#[from] SceneError),
 }

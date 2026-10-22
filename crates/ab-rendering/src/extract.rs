@@ -4,6 +4,7 @@
 //! parallel on the [`ab_core::jobs`] workers.
 
 use crate::assets::{MaterialHandle, MeshHandle, RenderAssets};
+use crate::bounds::posed_bounds;
 use crate::camera::{CameraView, Frustum};
 use crate::components::{
     Camera3D, DirectionalLight3D, MeshInstance3D, OmniLight3D, Skin, SpotLight3D,
@@ -260,13 +261,23 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
     if let Some(assets) = world.resource::<RenderAssets>() {
         let frustum = Frustum::from_view_projection(&view.view_projection);
         let assets = &*assets;
+        let palettes = &out.joint_matrices;
         jobs::par_for_each_mut(&mut out.draws, CULL_PER_JOB, |draw| {
-            // Skinned meshes move with their joints, so their bind-pose bounds are meaningless.
-            if draw.joints.is_none() {
-                draw.in_view = assets
+            let bounds = match &draw.joints {
+                // Skinned meshes move with their joints: bounds of the posed joints.
+                Some(range) => {
+                    let joints = assets.mesh_joint_bounds(draw.mesh);
+                    let palette = &palettes[range.start as usize..range.end as usize];
+                    if joints.is_empty() {
+                        return; // no skin data: always drawn
+                    }
+                    posed_bounds(joints, palette)
+                }
+                None => assets
                     .mesh_aabb(draw.mesh)
-                    .is_some_and(|aabb| frustum.intersects_aabb(&aabb.transformed(&draw.model)));
-            }
+                    .map(|aabb| aabb.transformed(&draw.model)),
+            };
+            draw.in_view = bounds.is_some_and(|b| frustum.intersects_aabb(&b));
         });
     }
     let eye = view.position;

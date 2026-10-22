@@ -370,6 +370,13 @@ impl CharacterBody3D {
         self.floor_normal
     }
 
+    /// Sets the floor contact as `move_and_slide` would, for tools and tests that move the
+    /// body some other way.
+    pub fn set_on_floor(&mut self, on_floor: bool) {
+        let up = self.up;
+        self.set_contacts(on_floor.then_some(up), self.on_wall, self.on_ceiling);
+    }
+
     pub(crate) fn set_contacts(&mut self, floor: Option<Vec3>, wall: bool, ceiling: bool) {
         self.on_floor = floor.is_some();
         self.floor_normal = floor.unwrap_or(self.up);

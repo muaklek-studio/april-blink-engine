@@ -60,7 +60,11 @@ pub struct Editor {
     pub scene_path: Option<String>,
     pub scene_root: NodeHandle,
     pub environment: EnvironmentDesc,
+    /// The active node: shown in the inspector, where the gizmo sits. Change the selection
+    /// with [`Editor::select`] and friends, which keep it in [`Editor::selected`].
     pub selection: Option<NodeHandle>,
+    /// Every selected node, in the order they were selected (the active one included).
+    pub selected: Vec<NodeHandle>,
     pub modified: bool,
     pub history: History,
     pub mode: Mode,
@@ -124,6 +128,7 @@ impl Editor {
             scene_root,
             environment: EnvironmentDesc::default(),
             selection: None,
+            selected: Vec::new(),
             modified: false,
             history: History::default(),
             mode: Mode::Edit,
@@ -212,7 +217,7 @@ impl Editor {
         new.set_script_list(list);
         let node_name = new.name.clone();
         self.apply_desc(node, &old, new);
-        self.selection = Some(node);
+        self.select(Some(node));
         let built = self.play_registry.names().any(|n| n == name);
         if built {
             self.info(format!("Attached {name} to {node_name}"));
@@ -247,7 +252,7 @@ impl Editor {
             self.scene_path = None;
             self.modified = false;
             self.history.clear();
-            self.selection = None;
+            self.select(None);
             self.info("New scene");
         }
     }
@@ -267,12 +272,30 @@ impl Editor {
                 self.scene_path = Some(path.to_owned());
                 self.modified = false;
                 self.history.clear();
-                self.selection = None;
+                self.select(None);
                 self.load_input_map();
                 self.info(format!("Opened {path}"));
             }
             Err(err) => self.fail(format!("{err:#}")),
         }
+    }
+
+    /// Adds the input actions `template` reads to the game's input map (those it has not
+    /// got yet). Returns the actions added.
+    pub fn add_template_actions(
+        &mut self,
+        template: &ab_project::script_templates::ScriptTemplate,
+    ) -> anyhow::Result<Vec<String>> {
+        let Some(path) = self.input_map.clone() else {
+            return Ok(Vec::new());
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let (text, added) = ab_project::script_templates::add_actions(&text, template)?;
+        if !added.is_empty() {
+            std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            self.load_input_map();
+        }
+        Ok(added)
     }
 
     /// Loads the game's input map, for Play mode.
@@ -361,6 +384,11 @@ impl Editor {
         Snapshot {
             scene: self.describe(),
             selection: self.selection.and_then(|n| self.relative_path(n)),
+            selected: self
+                .selected
+                .iter()
+                .filter_map(|&n| self.relative_path(n))
+                .collect(),
         }
     }
 
@@ -369,7 +397,17 @@ impl Editor {
             self.fail(format!("cannot restore the scene: {err:#}"));
             return;
         }
-        self.selection = snapshot.selection.as_deref().and_then(|p| self.node_at(p));
+        self.restore_selection(snapshot);
+    }
+
+    fn restore_selection(&mut self, snapshot: &Snapshot) {
+        let nodes = snapshot
+            .selected
+            .iter()
+            .filter_map(|p| self.node_at(p))
+            .collect();
+        let active = snapshot.selection.as_deref().and_then(|p| self.node_at(p));
+        self.set_selection(nodes, active);
     }
 
     /// Records the state before an edit. Within one gesture (a drag, a text field being
@@ -385,6 +423,21 @@ impl Editor {
             self.gesture = true;
         }
         self.modified = true;
+    }
+
+    /// Runs `edit`, a series of edits, as one undo step.
+    pub fn as_one_step(&mut self, edit: impl FnOnce(&mut Self)) {
+        if self.is_playing() {
+            edit(self);
+            return;
+        }
+        let before = self.snapshot();
+        let steps = self.history.undo_len();
+        edit(self);
+        if self.history.undo_len() > steps {
+            self.history.truncate_undo(steps);
+            self.history.push(before);
+        }
     }
 
     /// Ends the current gesture (called every frame once the pointer is up and no text
@@ -492,6 +545,97 @@ impl Editor {
     }
 
     // =========================================================================================
+    // Selection
+    // =========================================================================================
+
+    /// Selects only `node`, or nothing.
+    pub fn select(&mut self, node: Option<NodeHandle>) {
+        self.selection = node;
+        self.selected = node.into_iter().collect();
+    }
+
+    /// Selects `nodes` (duplicates dropped); `active` is shown in the inspector, the last
+    /// node when it is not among them.
+    pub fn set_selection(&mut self, nodes: Vec<NodeHandle>, active: Option<NodeHandle>) {
+        let mut unique = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            if !unique.contains(&node) {
+                unique.push(node);
+            }
+        }
+        self.selection = active
+            .filter(|a| unique.contains(a))
+            .or_else(|| unique.last().copied());
+        self.selected = unique;
+    }
+
+    /// Adds `nodes` to the selection; the last one becomes active.
+    pub fn add_to_selection(&mut self, nodes: &[NodeHandle]) {
+        let mut all = self.selected.clone();
+        all.extend_from_slice(nodes);
+        let active = nodes.last().copied().or(self.selection);
+        self.set_selection(all, active);
+    }
+
+    /// Ctrl+click: adds `node` (making it active), or takes it out of the selection.
+    pub fn toggle_selected(&mut self, node: NodeHandle) {
+        if self.is_selected(node) {
+            let rest: Vec<NodeHandle> = self
+                .selected
+                .iter()
+                .copied()
+                .filter(|&n| n != node)
+                .collect();
+            let active = self.selection.filter(|&a| a != node);
+            self.set_selection(rest, active);
+        } else {
+            self.add_to_selection(&[node]);
+        }
+    }
+
+    pub fn is_selected(&self, node: NodeHandle) -> bool {
+        self.selected.contains(&node)
+    }
+
+    /// The selected nodes that still exist.
+    pub fn selected_nodes(&self) -> Vec<NodeHandle> {
+        let tree = self.tree();
+        self.selected
+            .iter()
+            .copied()
+            .filter(|&n| tree.is_valid(n))
+            .collect()
+    }
+
+    /// The selected nodes that are not inside another selected node: what moving,
+    /// duplicating and deleting act on (a child moves with its parent already).
+    pub fn selected_roots(&self) -> Vec<NodeHandle> {
+        let nodes = self.selected_nodes();
+        let tree = self.tree();
+        nodes
+            .iter()
+            .copied()
+            .filter(|&n| {
+                !nodes
+                    .iter()
+                    .any(|&other| other != n && tree.is_ancestor_of(other, n))
+            })
+            .collect()
+    }
+
+    /// Drops deleted nodes from the selection.
+    fn prune_selection(&mut self) {
+        if self.selected.iter().all(|&n| self.tree().is_valid(n))
+            && self.selection.is_none_or(|n| self.tree().is_valid(n))
+        {
+            return;
+        }
+        let nodes = self.selected_nodes();
+        let active = self.selection.filter(|&n| self.tree().is_valid(n));
+        self.set_selection(nodes, active);
+    }
+
+    // =========================================================================================
     // Edits
     // =========================================================================================
 
@@ -536,15 +680,20 @@ impl Editor {
             let _ = tree.set_global_position(node, at);
         }
         tree.update_transforms();
+        // Humanoid ragdolls find their character now that they are in the scene.
+        let failed = ab_engine::ragdoll::build_rigs(tree, node);
         self.history.push(before);
         self.modified = true;
-        self.selection = Some(node);
+        self.select(Some(node));
         let name = self
             .tree()
             .name(node)
             .map(|n| n.to_owned())
             .unwrap_or_default();
-        self.info(format!("Added {name}"));
+        match failed.first() {
+            Some((_, err)) => self.fail(format!("Added {name}, but its ragdoll: {err}")),
+            None => self.info(format!("Added {name}")),
+        }
     }
 
     /// Adds a single node.
@@ -559,48 +708,113 @@ impl Editor {
     }
 
     pub fn delete(&mut self, node: NodeHandle) {
-        if self.is_playing() || node == self.scene_root || !self.is_editable(node) {
+        self.delete_nodes(&[node]);
+    }
+
+    /// Deletes the selected nodes (one undo step).
+    pub fn delete_selected(&mut self) {
+        let nodes = self.selected_roots();
+        self.delete_nodes(&nodes);
+    }
+
+    /// Deletes `nodes` (with their children) as one undo step; the scene root and the
+    /// contents of instances are left alone.
+    pub fn delete_nodes(&mut self, nodes: &[NodeHandle]) {
+        let nodes: Vec<NodeHandle> = nodes
+            .iter()
+            .copied()
+            .filter(|&n| n != self.scene_root && self.is_editable(n))
+            .collect();
+        if self.is_playing() || nodes.is_empty() {
             return;
         }
         let before = self.snapshot();
         let tree = self.engine.tree_mut();
-        let name = tree.name(node).map(|n| n.to_owned()).unwrap_or_default();
-        let _ = tree.queue_free(node);
+        let first = tree
+            .name(nodes[0])
+            .map(|n| n.to_owned())
+            .unwrap_or_default();
+        for &node in &nodes {
+            // A node inside another deleted one is already gone.
+            if tree.is_valid(node) {
+                let _ = tree.queue_free(node);
+            }
+        }
         tree.flush_deletions();
         self.history.push(before);
         self.modified = true;
-        if self.selection.is_some_and(|s| !self.tree().is_valid(s)) {
-            self.selection = None;
+        self.prune_selection();
+        if nodes.len() == 1 {
+            self.info(format!("Deleted {first}"));
+        } else {
+            self.info(format!("Deleted {} nodes", nodes.len()));
         }
-        self.info(format!("Deleted {name}"));
     }
 
     pub fn duplicate(&mut self, node: NodeHandle) {
-        if self.is_playing() || node == self.scene_root || !self.is_editable(node) {
+        self.duplicate_nodes(&[node]);
+    }
+
+    /// Duplicates the selected nodes (one undo step) and selects the copies.
+    pub fn duplicate_selected(&mut self) {
+        let nodes = self.selected_roots();
+        self.duplicate_nodes(&nodes);
+    }
+
+    /// Duplicates each of `nodes` next to itself (one undo step) and selects the copies.
+    pub fn duplicate_nodes(&mut self, nodes: &[NodeHandle]) {
+        let nodes: Vec<NodeHandle> = nodes
+            .iter()
+            .copied()
+            .filter(|&n| n != self.scene_root && self.is_editable(n))
+            .collect();
+        if self.is_playing() || nodes.is_empty() {
             return;
         }
-        let Some(parent) = self.tree().parent(node) else {
-            return;
-        };
-        let mut scene = save_scene(self.tree(), node);
-        let base = scene.nodes[0].name.clone();
-        scene.nodes[0].name = self.unique_name(parent, &base, None);
         let before = self.snapshot();
-        let tree = self.engine.tree_mut();
-        match instantiate_scene(tree, &scene, "duplicate") {
-            Ok(copy) => {
-                let index = tree.children(parent).iter().position(|&c| c == node);
-                let _ = tree.add_child(parent, copy);
-                if let Some(index) = index {
-                    let _ = tree.move_child(parent, copy, index + 1);
+        let mut copies = Vec::with_capacity(nodes.len());
+        let mut active = None;
+        let mut first = String::new();
+        for &node in &nodes {
+            let Some(parent) = self.tree().parent(node) else {
+                continue;
+            };
+            let mut scene = save_scene(self.tree(), node);
+            let base = scene.nodes[0].name.clone();
+            scene.nodes[0].name = self.unique_name(parent, &base, None);
+            let tree = self.engine.tree_mut();
+            match instantiate_scene(tree, &scene, "duplicate") {
+                Ok(copy) => {
+                    let index = tree.children(parent).iter().position(|&c| c == node);
+                    let _ = tree.add_child(parent, copy);
+                    if let Some(index) = index {
+                        let _ = tree.move_child(parent, copy, index + 1);
+                    }
+                    if self.selection == Some(node) {
+                        active = Some(copy);
+                    }
+                    if copies.is_empty() {
+                        first = base;
+                    }
+                    copies.push(copy);
                 }
-                tree.update_transforms();
-                self.history.push(before);
-                self.modified = true;
-                self.selection = Some(copy);
-                self.info(format!("Duplicated {base}"));
+                Err(err) => {
+                    self.fail(format!("{err}"));
+                }
             }
-            Err(err) => self.fail(format!("{err}")),
+        }
+        if copies.is_empty() {
+            return;
+        }
+        self.tree_mut().update_transforms();
+        self.history.push(before);
+        self.modified = true;
+        let count = copies.len();
+        self.set_selection(copies, active);
+        if count == 1 {
+            self.info(format!("Duplicated {first}"));
+        } else {
+            self.info(format!("Duplicated {count} nodes"));
         }
     }
 
@@ -727,6 +941,14 @@ impl Editor {
             script: None,
             scripts: Vec::new(),
             particles: None,
+            canvas: None,
+            control: None,
+            label: None,
+            button: None,
+            panel: None,
+            progress: None,
+            box_container: None,
+            image: None,
             ..d.clone()
         };
         let tree = self.engine.tree_mut();
@@ -772,6 +994,22 @@ impl Editor {
                 }
             }
         }
+        // UI widgets update in place (a drag in the viewport changes them every frame).
+        let ui_changed =
+            ab_engine::scene_file::ui::ui_tables(old) != ab_engine::scene_file::ui::ui_tables(&new);
+        if ui_changed {
+            let tree = self.engine.tree_mut();
+            let in_place = tree.component::<ab_engine::ui::Control>(node).is_some()
+                || tree.class_name(node) == Some(ab_engine::ui::class::CANVAS_LAYER);
+            if !in_place {
+                self.rebuild_node(node, new);
+                return;
+            }
+            if let Err(err) = ab_engine::scene_file::ui::apply(tree, node, &new) {
+                self.fail(err);
+                return;
+            }
+        }
         if common(old) != common(&new) {
             self.rebuild_node(node, new);
         }
@@ -801,16 +1039,40 @@ impl Editor {
             let _ = tree.set_transform(fresh, transform);
         }
         let index = tree.children(parent).iter().position(|&c| c == node);
-        for child in tree.children(node) {
-            let _ = tree.reparent(child, fresh, false);
+        // A humanoid ragdoll's bodies are made from its rig: rebuilt, not moved over.
+        let rig = tree
+            .component::<ab_engine::ragdoll::RagdollRig>(node)
+            .is_some();
+        if !rig {
+            for child in tree.children(node) {
+                let _ = tree.reparent(child, fresh, false);
+            }
         }
         let _ = tree.queue_free(node);
         tree.flush_deletions();
         let _ = tree.add_child(parent, fresh);
+        let failed = ab_engine::ragdoll::build_rigs(tree, fresh);
+        // An AnimationPlayer finds its targets now that it has a parent again.
+        let animation = tree
+            .component::<ab_engine::scene_file::SceneOrigin>(fresh)
+            .and_then(|o| o.animation.clone());
+        if let Some(animation) = animation {
+            if let Err(err) = ab_engine::scene_file::load_animations(tree, fresh, &animation) {
+                warn!("{err}");
+            }
+        }
         if let Some(index) = index {
             let _ = tree.move_child(parent, fresh, index);
         }
         tree.update_transforms();
+        if let Some((_, err)) = failed.first() {
+            self.fail(format!("Ragdoll: {err}"));
+        }
+        for selected in &mut self.selected {
+            if *selected == node {
+                *selected = fresh;
+            }
+        }
         if self.selection == Some(node) {
             self.selection = Some(fresh);
         }
@@ -866,9 +1128,12 @@ impl Editor {
             self.fail(format!("cannot start: {err:#}"));
             return;
         }
-        self.selection = snapshot.selection.as_deref().and_then(|p| self.node_at(p));
+        self.restore_selection(&snapshot);
         if let Some(mut profiler) = self.tree().world().resource_mut::<Profiler>() {
             profiler.reset();
+        }
+        if let Some(mut tracer) = self.tree().world().resource_mut::<Tracer>() {
+            tracer.restart();
         }
         self.play_snapshot = Some((snapshot, environment));
         self.mode = Mode::Play { paused: false };
@@ -960,9 +1225,7 @@ impl Editor {
                 }
             }
         }
-        if self.selection.is_some_and(|s| !self.tree().is_valid(s)) {
-            self.selection = None;
-        }
+        self.prune_selection();
     }
 }
 
@@ -982,6 +1245,98 @@ mod tests {
         .unwrap()
         .nodes
         .remove(0)
+    }
+
+    /// Three cubes at the scene root; nothing selected.
+    fn three_cubes(editor: &mut Editor) -> [NodeHandle; 3] {
+        let nodes = std::array::from_fn(|_| {
+            editor.select(None);
+            editor.add_node(cube(), None);
+            editor.selection.unwrap()
+        });
+        editor.select(None);
+        nodes
+    }
+
+    #[test]
+    fn selection_toggle_add_and_roots() {
+        let mut editor = editor();
+        let [a, b, c] = three_cubes(&mut editor);
+        editor.select(Some(a));
+        editor.toggle_selected(b);
+        assert_eq!(editor.selected, [a, b]);
+        assert_eq!(editor.selection, Some(b), "the added node is active");
+        editor.toggle_selected(b);
+        assert_eq!(editor.selected, [a]);
+        assert_eq!(editor.selection, Some(a));
+        editor.add_to_selection(&[b, c, b]);
+        assert_eq!(editor.selected, [a, b, c]);
+        assert_eq!(editor.selection, Some(b));
+        editor.set_selection(vec![c, a], Some(b));
+        assert_eq!(
+            editor.selection,
+            Some(a),
+            "an active node outside falls back to the last"
+        );
+        editor.select(None);
+        assert!(editor.selected.is_empty() && editor.selection.is_none());
+
+        // A child whose parent is selected is not a root.
+        editor.reparent(c, a, None);
+        editor.set_selection(vec![a, b, c], None);
+        assert_eq!(editor.selected_roots(), [a, b]);
+    }
+
+    #[test]
+    fn multi_delete_and_duplicate_are_one_undo_step() {
+        let mut editor = editor();
+        let [a, b, _] = three_cubes(&mut editor);
+        let children = |editor: &Editor| editor.tree().children(editor.scene_root).len();
+        let before = children(&editor);
+
+        editor.set_selection(vec![a, b], Some(a));
+        editor.duplicate_selected();
+        assert_eq!(children(&editor), before + 2);
+        assert_eq!(editor.selected.len(), 2, "the copies are selected");
+        assert!(!editor.is_selected(a) && !editor.is_selected(b));
+        editor.undo();
+        assert_eq!(children(&editor), before);
+
+        let a = editor.node_at("Cube").unwrap();
+        let b = editor.node_at("Cube2").unwrap();
+        editor.set_selection(vec![a, b], Some(b));
+        editor.delete_selected();
+        assert_eq!(children(&editor), before - 2);
+        assert!(editor.selected.is_empty());
+        editor.undo();
+        assert_eq!(children(&editor), before);
+        assert_eq!(editor.selected.len(), 2, "undo brings the selection back");
+        assert_eq!(
+            editor
+                .selection
+                .and_then(|n| editor.relative_path(n))
+                .as_deref(),
+            Some("Cube2")
+        );
+    }
+
+    #[test]
+    fn one_step_groups_edits() {
+        let mut editor = editor();
+        let [a, b, c] = three_cubes(&mut editor);
+        let steps = editor.history.undo_len();
+        editor.as_one_step(|editor| {
+            editor.reparent(b, a, None);
+            editor.reparent(c, a, None);
+        });
+        assert_eq!(editor.history.undo_len(), steps + 1);
+        editor.undo();
+        let tree = editor.tree();
+        assert_eq!(
+            tree.children(editor.scene_root).len(),
+            3 + 3,
+            "template + cubes"
+        );
     }
 
     #[test]
@@ -1054,7 +1409,7 @@ mod tests {
             parent,
             Transform3D::from_translation(Vec3::new(0.0, 5.0, 0.0)),
         );
-        editor.selection = Some(parent);
+        editor.select(Some(parent));
         editor.apply_desc(parent, &old, new.clone());
         let rebuilt = editor.selection.unwrap();
         assert_ne!(rebuilt, parent);
@@ -1074,10 +1429,10 @@ mod tests {
     #[test]
     fn reparent_keeps_world_position() {
         let mut editor = editor();
-        editor.selection = None;
+        editor.select(None);
         editor.add_node(cube(), Some(Vec3::new(2.0, 0.0, 0.0)));
         let a = editor.selection.unwrap();
-        editor.selection = None;
+        editor.select(None);
         editor.add_node(cube(), Some(Vec3::new(0.0, 0.0, 5.0)));
         let b = editor.selection.unwrap();
         editor.reparent(b, a, None);
@@ -1113,7 +1468,7 @@ mod tests {
     #[test]
     fn a_ragdoll_falls_while_playing_and_is_back_after_stop() {
         let mut editor = editor();
-        editor.selection = None;
+        editor.select(None);
         editor.add_scene(crate::create::ragdoll(true), Some(Vec3::new(0.0, 0.0, 0.0)));
         let head_at = |editor: &Editor| {
             let head = editor.node_at("Ragdoll/Head").unwrap();

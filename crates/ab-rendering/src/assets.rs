@@ -31,6 +31,8 @@ handle_index!(MeshHandle, MaterialHandle, TextureHandle);
 pub(crate) struct MeshEntry {
     pub(crate) mesh: Mesh,
     pub(crate) aabb: Aabb,
+    /// Per skin joint, the box of the vertices it moves (see [`crate::bounds`]).
+    pub(crate) joint_bounds: Vec<Option<Aabb>>,
 }
 
 /// ECS resource holding meshes, textures and materials.
@@ -54,8 +56,13 @@ impl RenderAssets {
     pub fn add_mesh(&mut self, mesh: Mesh) -> Result<MeshHandle, MeshError> {
         mesh.validate()?;
         let aabb = mesh.aabb().ok_or(MeshError::Empty)?;
+        let joint_bounds = crate::bounds::joint_bounds(&mesh);
         let handle = MeshHandle(self.meshes.len() as u32);
-        self.meshes.push(MeshEntry { mesh, aabb });
+        self.meshes.push(MeshEntry {
+            mesh,
+            aabb,
+            joint_bounds,
+        });
         Ok(handle)
     }
 
@@ -77,8 +84,18 @@ impl RenderAssets {
         self.meshes.get(handle.index()).map(|e| &e.mesh)
     }
 
+    /// The mesh's box in its own space (bind pose for a skinned mesh; see
+    /// [`Bounds`](crate::Bounds) for the box as drawn).
     pub fn mesh_aabb(&self, handle: MeshHandle) -> Option<Aabb> {
         self.meshes.get(handle.index()).map(|e| e.aabb)
+    }
+
+    /// Per skin joint of a skinned mesh, the mesh-space box of the vertices it moves; empty
+    /// for other meshes.
+    pub fn mesh_joint_bounds(&self, handle: MeshHandle) -> &[Option<Aabb>] {
+        self.meshes
+            .get(handle.index())
+            .map_or(&[], |e| &e.joint_bounds)
     }
 
     pub fn texture(&self, handle: TextureHandle) -> Option<&Texture> {

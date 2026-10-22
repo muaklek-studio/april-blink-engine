@@ -31,6 +31,12 @@ impl NodeScript for FreeWhenFinished {
     }
 }
 
+/// Frees `node` once every one-shot emitter and light flash in its subtree is done: an effect
+/// scene played once.
+pub fn free_when_finished(tree: &mut SceneTree, node: NodeHandle) -> Result<(), SceneError> {
+    tree.set_script(node, FreeWhenFinished)
+}
+
 /// Options for [`EffectNodes::spawn_explosion`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExplosionOptions {

@@ -1,11 +1,12 @@
-// Full-screen post-process: chromatic aberration, bloom, exposure, ACES tonemap,
+// Full-screen post-process: light shafts (upsampled), chromatic aberration, bloom, exposure,
+// ACES tonemap,
 // saturation/contrast/tint, vignette, film grain, a screen overlay (flashes, fades), and sRGB
 // encoding when the target format does not do it in hardware.
 
 struct Post {
     params: vec4<f32>,    // exposure, contrast, saturation, tonemap (0/1)
     tint: vec4<f32>,
-    vignette: vec4<f32>,  // intensity, smoothness, encode sRGB (0/1), unused
+    vignette: vec4<f32>,  // intensity, smoothness, encode sRGB (0/1), light shafts (0/1)
     effects: vec4<f32>,   // chromatic aberration, grain, bloom intensity, seconds
     overlay: vec4<f32>,   // rgb, amount
 };
@@ -14,6 +15,32 @@ struct Post {
 @group(0) @binding(1) var hdr_sampler: sampler;
 @group(0) @binding(2) var<uniform> post: Post;
 @group(0) @binding(3) var bloom_texture: texture_2d<f32>;
+// Half resolution light shafts: rgb, and the distance they were traced to in alpha.
+@group(0) @binding(4) var shafts_texture: texture_2d<f32>;
+
+// The light shafts at a full-resolution pixel: a 3 × 3 tent of the nearest half-resolution
+// samples, weighted by how close their distance is to this pixel's, which smooths the
+// tracing's per-pixel jitter without bleeding beams over silhouettes.
+fn shafts_at(pixel: vec2<f32>, distance: f32) -> vec3<f32> {
+    let size = vec2<i32>(textureDimensions(shafts_texture));
+    let position = pixel * 0.5 - vec2<f32>(0.5);
+    let centre = vec2<i32>(round(position));
+    var sum = vec3<f32>(0.0);
+    var total = 0.0;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let at = clamp(centre + vec2<i32>(i, j), vec2<i32>(0), size - vec2<i32>(1));
+            let sample = textureLoad(shafts_texture, at, 0);
+            let offset = vec2<f32>(at) - position;
+            let tent = max(1.5 - abs(offset.x), 0.0) * max(1.5 - abs(offset.y), 0.0);
+            let closeness = 1.0 / (abs(sample.a - distance) / max(distance, 1.0) + 0.02);
+            let w = tent * closeness + 1e-5;
+            sum += sample.rgb * w;
+            total += w;
+        }
+    }
+    return sum / total;
+}
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -62,6 +89,12 @@ fn fs_post(in: VsOut) -> @location(0) vec4<f32> {
         textureSample(hdr_texture, hdr_sampler, in.uv).g,
         textureSample(hdr_texture, hdr_sampler, in.uv + offset).b,
     );
+    if post.vignette.w > 0.5 {
+        let full = vec2<i32>(textureDimensions(hdr_texture));
+        let pixel = min(vec2<i32>(in.clip.xy), full - vec2<i32>(1));
+        let distance = textureLoad(hdr_texture, pixel, 0).a;
+        color += shafts_at(in.clip.xy, distance);
+    }
     color += textureSample(bloom_texture, hdr_sampler, in.uv).rgb * post.effects.z;
     color *= post.params.x;
     if post.params.w > 0.5 {

@@ -470,6 +470,58 @@ impl ParticleSettings {
         }
     }
 
+    /// Droplets of blood thrown from a wound, arcing down and streaking (use one-shot, aimed
+    /// along the hit with `with_direction`; `spawn_blood` in the engine adds a mist and
+    /// splats on the ground).
+    pub fn blood() -> Self {
+        Self {
+            amount: 45,
+            lifetime: 0.9,
+            lifetime_random: 0.4,
+            shape: EmissionShape::Sphere { radius: 0.04 },
+            spread: 28.0,
+            speed: [2.0, 5.5],
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            damping: 0.6,
+            size: [0.045, 0.02],
+            size_random: 0.6,
+            color: ColorRamp(vec![
+                (0.0, rgba(0.42, 0.01, 0.015, 1.0)),
+                (0.7, rgba(0.3, 0.0, 0.01, 1.0)),
+                (1.0, rgba(0.2, 0.0, 0.005, 0.0)),
+            ]),
+            hardness: 0.75,
+            stretch: 0.045,
+            ..Self::default()
+        }
+    }
+
+    /// The fine red spray of a hit, hanging in the air for a moment (use one-shot with
+    /// [`ParticleSettings::blood`]).
+    pub fn blood_mist() -> Self {
+        Self {
+            amount: 14,
+            lifetime: 0.7,
+            lifetime_random: 0.3,
+            shape: EmissionShape::Sphere { radius: 0.06 },
+            spread: 40.0,
+            speed: [0.6, 1.8],
+            gravity: Vec3::new(0.0, -0.6, 0.0),
+            damping: 3.5,
+            turbulence: 0.4,
+            size: [0.12, 0.45],
+            size_random: 0.4,
+            color: ColorRamp(vec![
+                (0.0, rgba(0.38, 0.02, 0.02, 0.0)),
+                (0.12, rgba(0.36, 0.02, 0.02, 0.45)),
+                (1.0, rgba(0.25, 0.01, 0.01, 0.0)),
+            ]),
+            spin: [-1.0, 1.0],
+            hardness: 0.0,
+            ..Self::default()
+        }
+    }
+
     /// A preset by name (one of [`ParticleSettings::PRESETS`]), for scene files and tools.
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
@@ -487,12 +539,14 @@ impl ParticleSettings {
             "fireflies" => Self::fireflies(),
             "splash" => Self::splash(),
             "leaves" => Self::leaves(),
+            "blood" => Self::blood(),
+            "blood_mist" => Self::blood_mist(),
             _ => return None,
         })
     }
 
     /// Names accepted by [`ParticleSettings::preset`].
-    pub const PRESETS: [&'static str; 14] = [
+    pub const PRESETS: [&'static str; 16] = [
         "smoke",
         "fire",
         "embers",
@@ -507,6 +561,8 @@ impl ParticleSettings {
         "fireflies",
         "splash",
         "leaves",
+        "blood",
+        "blood_mist",
     ];
 
     pub fn with_amount(mut self, amount: u32) -> Self {

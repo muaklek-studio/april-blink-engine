@@ -73,6 +73,39 @@ impl Aabb {
         (self.min + self.max) * 0.5
     }
 
+    pub fn size(&self) -> Vec3 {
+        self.max - self.min
+    }
+
+    /// The smallest box holding both.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    pub fn contains_point(&self, point: Vec3) -> bool {
+        point.cmpge(self.min).all() && point.cmple(self.max).all()
+    }
+
+    /// Whether the boxes overlap (touching counts).
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.min.cmple(other.max).all() && other.min.cmple(self.max).all()
+    }
+
+    /// The eight corners: bit 0 of the index picks x (min, max), bit 1 y, bit 2 z.
+    pub fn corners(&self) -> [Vec3; 8] {
+        std::array::from_fn(|i| {
+            Vec3::new(
+                if i & 1 == 0 { self.min.x } else { self.max.x },
+                if i & 2 == 0 { self.min.y } else { self.max.y },
+                if i & 4 == 0 { self.min.z } else { self.max.z },
+            )
+        })
+    }
+
     pub fn half_extents(&self) -> Vec3 {
         (self.max - self.min) * 0.5
     }
@@ -415,6 +448,33 @@ mod tests {
                 vertices: 24
             })
         );
+    }
+
+    #[test]
+    fn aabb_set_operations() {
+        let a = Aabb {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        };
+        let b = Aabb {
+            min: Vec3::splat(0.5),
+            max: Vec3::splat(2.0),
+        };
+        let far = Aabb {
+            min: Vec3::splat(3.0),
+            max: Vec3::splat(4.0),
+        };
+        assert_eq!(a.union(&b).min, Vec3::ZERO);
+        assert_eq!(a.union(&b).max, Vec3::splat(2.0));
+        assert!(a.intersects(&b) && b.intersects(&a));
+        assert!(!a.intersects(&far));
+        assert!(a.contains_point(Vec3::splat(0.5)) && a.contains_point(Vec3::ONE));
+        assert!(!a.contains_point(Vec3::new(0.5, 1.5, 0.5)));
+        assert_eq!(a.size(), Vec3::ONE);
+        let corners = a.corners();
+        assert_eq!(corners[0], Vec3::ZERO);
+        assert_eq!(corners[7], Vec3::ONE);
+        assert_eq!(corners[5], Vec3::new(1.0, 0.0, 1.0));
     }
 
     #[test]

@@ -148,6 +148,8 @@ pub struct Actions {
     values: BTreeMap<String, ActionValue>,
     look: Vec2,
     events: Vec<ActionEvent>,
+    /// Actions held down from code (debug tools, tests, tutorials), with their strength.
+    held: BTreeMap<String, f32>,
 }
 
 impl Actions {
@@ -183,7 +185,8 @@ impl Actions {
                 .bindings
                 .iter()
                 .map(|b| b.strength(input, action.deadzone))
-                .fold(0.0, f32::max);
+                .fold(0.0, f32::max)
+                .max(self.held.get(name).copied().unwrap_or(0.0));
             let value = self.values.entry(name.clone()).or_default();
             value.was_pressed = value.pressed;
             value.strength = strength;
@@ -255,6 +258,28 @@ impl Actions {
     pub fn events(&self) -> &[ActionEvent] {
         &self.events
     }
+
+    /// The names of the actions, in order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.map.actions.keys().map(String::as_str)
+    }
+
+    /// Holds `action` down at `strength` (0..1) as if its input were, from the next update
+    /// until [`Actions::release`]: for debug tools, tests and tutorials.
+    pub fn hold(&mut self, action: &str, strength: f32) {
+        self.held
+            .insert(action.to_owned(), strength.clamp(0.0, 1.0));
+    }
+
+    /// Stops holding `action` down.
+    pub fn release(&mut self, action: &str) {
+        self.held.remove(action);
+    }
+
+    /// Whether `action` is held down from code.
+    pub fn is_held(&self, action: &str) -> bool {
+        self.held.contains_key(action)
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +319,21 @@ mod tests {
             pressed,
             repeat: false,
         });
+    }
+
+    #[test]
+    fn held_actions_press_like_their_inputs() {
+        let mut actions = Actions::new(map());
+        let input = InputState::new();
+        actions.hold("jump", 1.0);
+        actions.update(&input);
+        assert!(actions.is_just_pressed("jump") && actions.is_held("jump"));
+        actions.hold("move_forward", 0.5);
+        actions.update(&input);
+        assert_eq!(actions.strength("move_forward"), 0.5);
+        actions.release("jump");
+        actions.update(&input);
+        assert!(actions.is_just_released("jump"));
     }
 
     #[test]

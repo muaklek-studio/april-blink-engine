@@ -25,20 +25,26 @@
 //! }
 //! ```
 
+pub mod animation_file;
 mod app;
 pub mod assets;
+pub mod blood;
+pub mod climb;
 mod config;
 pub mod crash;
 mod debug;
 mod debug_overlay;
 mod engine;
 pub mod game;
+pub mod head_bob;
 mod hot_reload;
+pub mod input_overlay;
 mod profiler;
 pub mod ragdoll;
 pub mod save;
 pub mod scene_file;
 pub mod script_host;
+pub mod trace;
 pub mod tween;
 
 pub use app::{render_offscreen, run, run_headless};
@@ -47,24 +53,28 @@ pub use app::{render_offscreen, run, run_headless};
 /// keys and developer options are off.
 pub const SHIPPING: bool = cfg!(feature = "shipping");
 pub use config::EngineConfig;
-pub use debug::{debug_shapes_system, profile, DebugSettings};
+pub use debug::{debug_shapes_system, profile, DebugSettings, BOUNDS_COLOR, SKINNED_BOUNDS_COLOR};
 pub use debug_overlay::DebugOverlay;
 pub use engine::{Engine, EngineControl, RenderStats};
 pub use game::{change_scene, reload_scene, run_game, CurrentScene, Game, GameSettings};
+pub use input_overlay::InputOverlay;
 pub use profiler::{
     FrameSample, FrameStatistics, ProfileEntry, Profiler, HISTORY as PROFILE_HISTORY,
 };
+pub use trace::{TraceOverlay, Tracer};
 
 /// Commonly used types, for `use ab_engine::prelude::*`.
 pub mod prelude {
+    pub use crate::head_bob::HeadBob;
     pub use crate::save::SaveStore;
     pub use crate::scene_file::{load_scene, save_scene, SceneFile};
+    pub use crate::trace::{Tracer, Tracing};
     pub use crate::tween::{Repeat, TweenNodes};
     pub use crate::{
         change_scene, profile, reload_scene, run_game, DebugOverlay, DebugSettings, Engine,
-        EngineConfig, EngineControl, Game, Profiler, RenderStats,
+        EngineConfig, EngineControl, Game, InputOverlay, Profiler, RenderStats,
     };
-    pub use ab_animation::{AnimationLibrary, AnimationPlayer};
+    pub use ab_animation::{AnimationLibrary, AnimationPlayer, Locomotion, LocomotionState};
     pub use ab_asset::{spawn_gltf, AssetServer};
     pub use ab_audio::{
         Attenuation, Audio, AudioListener3D, AudioNodes, AudioPlayer, AudioStream, SoundOptions,
@@ -85,7 +95,7 @@ pub mod prelude {
         SkeletonRagdoll,
     };
     pub use ab_rendering::{
-        Bloom, Camera3D, DebugDraw, DirectionalLight3D, Environment, Material, Mesh,
+        Aabb, Bloom, Bounds, Camera3D, DebugDraw, DirectionalLight3D, Environment, Material, Mesh,
         MeshInstance3D, OmniLight3D, RenderAssets, RenderNodes, SpotLight3D,
     };
     pub use ab_scene::{

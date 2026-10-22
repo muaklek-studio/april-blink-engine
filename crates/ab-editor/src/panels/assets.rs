@@ -9,6 +9,7 @@ use crate::scripts::{self, ScriptDrag, ScriptFile};
 use crate::state::Editor;
 use crate::theme;
 use crate::viewport::AssetDrag;
+use ab_project::script_templates::SCRIPT_TEMPLATES;
 use eframe::egui::{self, Key, RichText, Sense};
 use egui_phosphor::regular as icon;
 use std::path::PathBuf;
@@ -35,6 +36,8 @@ pub struct AssetsPanel {
 struct Create {
     kind: CreateKind,
     name: String,
+    /// Starting code: an index in `SCRIPT_TEMPLATES`, or the empty script.
+    template: Option<usize>,
     open_after: bool,
     error: Option<String>,
     /// Focus the name field on the first frame.
@@ -244,6 +247,7 @@ impl AssetsPanel {
                 self.create = Some(Create {
                     kind: CreateKind::Script,
                     name: "NewScript".into(),
+                    template: None,
                     open_after: true,
                     error: None,
                     focus: true,
@@ -258,6 +262,7 @@ impl AssetsPanel {
                 self.create = Some(Create {
                     kind: CreateKind::Folder,
                     name: "New Folder".into(),
+                    template: None,
                     open_after: false,
                     error: None,
                     focus: true,
@@ -272,7 +277,7 @@ impl AssetsPanel {
             return;
         };
         let mut close = false;
-        let mut done: Option<(CreateKind, String)> = None;
+        let mut done: Option<(CreateKind, String, Option<usize>)> = None;
         let modal = egui::Modal::new(egui::Id::new("asset_create")).show(ctx, |ui| {
             ui.set_width(420.0);
             let (glyph, title) = match create.kind {
@@ -308,6 +313,7 @@ impl AssetsPanel {
                 }
             }
             if create.kind == CreateKind::Script {
+                template_picker(ui, create);
                 ui.checkbox(&mut create.open_after, "Open it in the code editor");
             }
             ui.separator();
@@ -319,7 +325,7 @@ impl AssetsPanel {
                 );
                 let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if valid && (button.clicked() || enter) {
-                    done = Some((create.kind, create.name.clone()));
+                    done = Some((create.kind, create.name.clone(), create.template));
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
@@ -332,9 +338,9 @@ impl AssetsPanel {
         if modal.should_close() {
             close = true;
         }
-        if let Some((kind, name)) = done {
+        if let Some((kind, name, template)) = done {
             let open_after = create.open_after;
-            match self.create_asset(editor, kind, &name, open_after) {
+            match self.create_asset(editor, kind, &name, template, open_after) {
                 Ok(()) => close = true,
                 Err(err) => {
                     if let Some(create) = &mut self.create {
@@ -353,19 +359,35 @@ impl AssetsPanel {
         editor: &mut Editor,
         kind: CreateKind,
         name: &str,
+        template: Option<usize>,
         open_after: bool,
     ) -> Result<(), String> {
         match kind {
             CreateKind::Script => {
+                let template = template.and_then(|i| SCRIPT_TEMPLATES.get(i));
                 let taken = editor.registered_script_names();
                 let scripts = editor.scripts.as_mut().ok_or("no game crate")?;
-                let (name, path) = scripts.create(name, &taken).map_err(|e| format!("{e:#}"))?;
+                let (name, path) = scripts
+                    .create_from(name, &taken, template)
+                    .map_err(|e| format!("{e:#}"))?;
                 self.folder = SCRIPTS.into();
                 self.filter.clear();
                 self.selected = Some(path.to_string_lossy().into_owned());
-                editor.info(format!(
-                    "Created script {name}: drag it onto a node to attach it"
-                ));
+                let added = match template {
+                    Some(t) => editor
+                        .add_template_actions(t)
+                        .map_err(|e| format!("{e:#}"))?,
+                    None => Vec::new(),
+                };
+                let attach = template.map_or("a node".to_owned(), |t| t.attach_to.to_owned());
+                if added.is_empty() {
+                    editor.info(format!("Created script {name}: drag it onto {attach}"));
+                } else {
+                    editor.info(format!(
+                        "Created script {name} (drag it onto {attach}); input actions added: {}",
+                        added.join(", ")
+                    ));
+                }
                 if open_after {
                     let line = editor
                         .scripts
@@ -757,6 +779,57 @@ fn kind_color(kind: AssetKind) -> egui::Color32 {
         AssetKind::Font => egui::Color32::from_rgb(200, 200, 200),
         AssetKind::Config => theme::TEXT_DIM,
         AssetKind::Other => theme::TEXT_DIM,
+    }
+}
+
+/// The starting code of a new script: empty, or one of the templates, by category.
+fn template_picker(ui: &mut egui::Ui, create: &mut Create) {
+    ui.add_space(4.0);
+    let chosen = create.template.and_then(|i| SCRIPT_TEMPLATES.get(i));
+    egui::ComboBox::from_id_salt("script_template")
+        .selected_text(chosen.map_or("Empty script", |t| t.title))
+        .width(ui.available_width())
+        .height(420.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut create.template, None, "Empty script");
+            let mut category = "";
+            for (i, template) in SCRIPT_TEMPLATES.iter().enumerate() {
+                if template.category != category {
+                    category = template.category;
+                    ui.label(
+                        RichText::new(category)
+                            .small()
+                            .strong()
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+                ui.selectable_value(&mut create.template, Some(i), template.title)
+                    .on_hover_text(template.description);
+            }
+        });
+    if let Some(template) = create.template.and_then(|i| SCRIPT_TEMPLATES.get(i)) {
+        // Name the script after the template until the user names it.
+        if create.name == "NewScript" || SCRIPT_TEMPLATES.iter().any(|t| t.type_name == create.name)
+        {
+            create.name = template.type_name.to_owned();
+        }
+        ui.label(RichText::new(template.description).small());
+        ui.label(
+            RichText::new(format!("Attach it to {}.", template.attach_to))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        let actions: Vec<&str> = template.actions().map(|(name, _)| *name).collect();
+        if !actions.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Input actions (added to input.toml if missing): {}",
+                    actions.join(", ")
+                ))
+                .small()
+                .color(theme::TEXT_DIM),
+            );
+        }
     }
 }
 

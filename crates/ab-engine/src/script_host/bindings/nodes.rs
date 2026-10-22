@@ -470,6 +470,19 @@ fn scenes_and_files(b: &mut Builder) {
         c.push_node(node);
         Ok(())
     });
+    // An effect scene (assets/effects/...) at a position, freed when it has played.
+    b.add("effects.spawn_scene", |c| {
+        let (parent, position, path) = (c.node(0)?, c.vec3(1)?, c.str(2)?);
+        let node = load_scene(c.tree, path).map_err(scene_error)?;
+        if let Err(err) = c.tree.add_child(parent, node) {
+            let _ = c.tree.queue_free(node);
+            return Err(err.into());
+        }
+        let _ = c.tree.set_global_position(node, position);
+        ab_effects::free_when_finished(c.tree, node)?;
+        c.push_node(node);
+        Ok(())
+    });
     b.add("scene.from_toml", |c| {
         let scene = SceneFile::from_toml(c.str(0)?).map_err(scene_error)?;
         let node = instantiate_scene(c.tree, &scene, "<script>").map_err(scene_error)?;

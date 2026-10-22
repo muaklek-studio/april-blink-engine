@@ -80,7 +80,8 @@ impl LinePass {
                     targets: &[Some(wgpu::ColorTargetState {
                         format: color_format,
                         blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
+                        // Alpha holds the distance from the camera (light shafts).
+                        write_mask: wgpu::ColorWrites::COLOR,
                     })],
                 }),
                 multiview_mask: None,

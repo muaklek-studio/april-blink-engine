@@ -7,6 +7,10 @@ Outputs:
   totem.gltf + totem_albedo.png  Skinned 3-segment totem (3-joint chain) with two animation
                                  clips ("Sway", "Spin"). Buffer embedded as a base64 data URI,
                                  base color texture as an external PNG.
+  mannequin.gltf                 Rigged humanoid (Mixamo bone names, faces +Z, 1.8 m) built
+                                 from boxes, with clips Idle, Walk, Run, Jump, Attack, Climb
+                                 and Fall: the character the script templates and the
+                                 locomotion system animate, and that ragdolls map onto.
   crate.glb                      Binary glTF cube with base color + normal map PNGs embedded
                                  in the BIN chunk (exercises bufferView images, no tangents).
   audio/thud.wav                 Short low impact (crates landing).
@@ -269,6 +273,321 @@ def build_totem():
 
 
 # ----------------------------------------------------------------------------------------
+# Mannequin: rigged humanoid with locomotion and combat clips
+# ----------------------------------------------------------------------------------------
+
+# (name, parent, local translation); rest rotations are identity, so animation rotations are
+# relative to the parent's axes. +X is the character's left, +Z its front.
+MANNEQUIN_BONES = [
+    ("mixamorig:Hips", None, (0, 1.0, 0)),
+    ("mixamorig:Spine", "mixamorig:Hips", (0, 0.1, 0)),
+    ("mixamorig:Spine1", "mixamorig:Spine", (0, 0.12, 0)),
+    ("mixamorig:Spine2", "mixamorig:Spine1", (0, 0.13, 0)),
+    ("mixamorig:Neck", "mixamorig:Spine2", (0, 0.17, 0)),
+    ("mixamorig:Head", "mixamorig:Neck", (0, 0.08, 0)),
+]
+for side, sx in (("Left", 1), ("Right", -1)):
+    MANNEQUIN_BONES += [
+        (f"mixamorig:{side}Shoulder", "mixamorig:Spine2", (0.06 * sx, 0.12, 0)),
+        (f"mixamorig:{side}Arm", f"mixamorig:{side}Shoulder", (0.12 * sx, 0, 0)),
+        (f"mixamorig:{side}ForeArm", f"mixamorig:{side}Arm", (0, -0.28, 0)),
+        (f"mixamorig:{side}Hand", f"mixamorig:{side}ForeArm", (0, -0.25, 0)),
+    ]
+for side, sx in (("Left", 1), ("Right", -1)):
+    MANNEQUIN_BONES += [
+        (f"mixamorig:{side}UpLeg", "mixamorig:Hips", (0.09 * sx, -0.05, 0)),
+        (f"mixamorig:{side}Leg", f"mixamorig:{side}UpLeg", (0, -0.43, 0)),
+        (f"mixamorig:{side}Foot", f"mixamorig:{side}Leg", (0, -0.42, 0)),
+        (f"mixamorig:{side}ToeBase", f"mixamorig:{side}Foot", (0, -0.07, 0.12)),
+    ]
+
+
+def mannequin_world():
+    """World position of every bone at rest."""
+    index = {name: i for i, (name, _, _) in enumerate(MANNEQUIN_BONES)}
+    world = []
+    for name, parent, t in MANNEQUIN_BONES:
+        base = world[index[parent]] if parent else (0, 0, 0)
+        world.append(tuple(base[k] + t[k] for k in range(3)))
+    return index, world
+
+
+# (bone, centre, half size, skin?) — boxes rigidly bound to one bone each.
+def mannequin_parts():
+    parts = [
+        ("mixamorig:Hips", (0, 0.98, 0), (0.15, 0.08, 0.09), False),
+        ("mixamorig:Spine", (0, 1.15, 0), (0.135, 0.08, 0.085), False),
+        ("mixamorig:Spine2", (0, 1.34, 0), (0.17, 0.12, 0.1), False),
+        ("mixamorig:Neck", (0, 1.55, 0), (0.04, 0.05, 0.04), True),
+        ("mixamorig:Head", (0, 1.68, 0.01), (0.09, 0.11, 0.1), True),
+        # A visor shows which way the head faces.
+        ("mixamorig:Head", (0, 1.7, 0.105), (0.065, 0.025, 0.015), False),
+    ]
+    for side, sx in (("Left", 1), ("Right", -1)):
+        x = 0.18 * sx
+        parts += [
+            (f"mixamorig:{side}Arm", (x, 1.33, 0), (0.045, 0.13, 0.045), False),
+            (f"mixamorig:{side}ForeArm", (x, 1.07, 0), (0.04, 0.12, 0.04), True),
+            (f"mixamorig:{side}Hand", (x, 0.88, 0.0), (0.035, 0.065, 0.025), True),
+            (f"mixamorig:{side}UpLeg", (0.09 * sx, 0.73, 0), (0.065, 0.2, 0.065), False),
+            (f"mixamorig:{side}Leg", (0.09 * sx, 0.31, 0), (0.05, 0.2, 0.05), False),
+            (f"mixamorig:{side}Foot", (0.09 * sx, 0.04, 0.05), (0.05, 0.04, 0.11), False),
+        ]
+    return parts
+
+
+def quat(axis, angle):
+    s = math.sin(angle / 2)
+    return [axis[0] * s, axis[1] * s, axis[2] * s, math.cos(angle / 2)]
+
+
+def quat_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+
+
+X, Y, Z = (1, 0, 0), (0, 1, 0), (0, 0, 1)
+
+
+def euler(x=0.0, y=0.0, z=0.0):
+    """Rotation about X, then Y, then Z (parent axes)."""
+    return quat_mul(quat(Z, z), quat_mul(quat(Y, y), quat(X, x)))
+
+
+# Clips: (name, seconds, looping, pose(t in 0..1) -> {bone: (x, y, z) radians}). Signs:
+# bones pointing down swing forwards with -X, bones pointing up lean forwards with +X;
+# +Z on the left arm raises it sideways (-Z on the right).
+def pose_idle(t):
+    breath = math.sin(t * math.tau)
+    return {
+        "mixamorig:Spine2": (0.03 * breath, 0, 0),
+        "mixamorig:LeftArm": (0, 0, 0.08 + 0.02 * breath),
+        "mixamorig:RightArm": (0, 0, -0.08 - 0.02 * breath),
+        "mixamorig:Head": (-0.02 * breath, 0, 0),
+    }
+
+
+def gait(t, stride, knee, arm, elbow, lean, bounce_twist):
+    phase = t * math.tau
+    s = math.sin(phase)
+    pose = {
+        "mixamorig:LeftUpLeg": (-stride * s, 0, 0),
+        "mixamorig:RightUpLeg": (stride * s, 0, 0),
+        # The knee bends while the leg swings through (behind the body).
+        "mixamorig:LeftLeg": (knee * max(0.0, math.sin(phase + 1.2)), 0, 0),
+        "mixamorig:RightLeg": (knee * max(0.0, math.sin(phase + 1.2 + math.pi)), 0, 0),
+        "mixamorig:LeftFoot": (0.25 * max(0.0, math.sin(phase - 0.6)), 0, 0),
+        "mixamorig:RightFoot": (0.25 * max(0.0, math.sin(phase - 0.6 + math.pi)), 0, 0),
+        "mixamorig:LeftArm": (arm * s, 0, 0.1),
+        "mixamorig:RightArm": (-arm * s, 0, -0.1),
+        "mixamorig:LeftForeArm": (-elbow, 0, 0),
+        "mixamorig:RightForeArm": (-elbow, 0, 0),
+        "mixamorig:Spine": (lean, bounce_twist * s, 0),
+        "mixamorig:Spine2": (0, -bounce_twist * s, 0),
+    }
+    return pose
+
+
+def pose_walk(t):
+    return gait(t, 0.45, 0.7, 0.35, 0.25, 0.04, 0.08)
+
+
+def pose_run(t):
+    return gait(t, 0.85, 1.5, 0.8, 1.3, 0.2, 0.15)
+
+
+def pose_jump(t):
+    # Crouch, push off with arms thrown up, tuck, land.
+    crouch = math.sin(min(t / 0.3, 1.0) * math.pi) if t < 0.3 else 0.0
+    air = math.sin((t - 0.3) / 0.7 * math.pi) if t >= 0.3 else 0.0
+    return {
+        "mixamorig:LeftUpLeg": (-0.9 * crouch - 0.5 * air, 0, 0),
+        "mixamorig:RightUpLeg": (-0.9 * crouch - 0.3 * air, 0, 0),
+        "mixamorig:LeftLeg": (1.4 * crouch + 0.9 * air, 0, 0),
+        "mixamorig:RightLeg": (1.4 * crouch + 0.7 * air, 0, 0),
+        "mixamorig:LeftFoot": (-0.4 * crouch, 0, 0),
+        "mixamorig:RightFoot": (-0.4 * crouch, 0, 0),
+        "mixamorig:Spine": (0.35 * crouch, 0, 0),
+        "mixamorig:LeftArm": (0.5 * crouch - 2.4 * air, 0, 0.2),
+        "mixamorig:RightArm": (0.5 * crouch - 2.4 * air, 0, -0.2),
+    }
+
+
+def pose_attack(t):
+    # Wind up, punch with the right arm, recover.
+    wind = math.sin(min(t / 0.35, 1.0) * math.pi / 2) if t < 0.35 else 1.0
+    hit = math.sin(min(max((t - 0.35) / 0.2, 0.0), 1.0) * math.pi / 2) if t >= 0.35 else 0.0
+    back = max(0.0, (t - 0.65) / 0.35)
+    reach = hit * (1.0 - back)
+    windup = wind * (1.0 - hit)
+    return {
+        "mixamorig:Spine": (0.1 * reach, 0.5 * windup - 0.5 * reach, 0),
+        "mixamorig:RightArm": (0.4 * windup - 1.55 * reach, 0, -0.15),
+        "mixamorig:RightForeArm": (-1.9 * windup - 0.1 * reach, 0, 0),
+        "mixamorig:LeftArm": (-0.9 * (windup + reach), 0, 0.2),
+        "mixamorig:LeftForeArm": (-1.8 * (windup + reach) * 0.8, 0, 0),
+        "mixamorig:LeftUpLeg": (-0.3 * reach, 0, 0),
+        "mixamorig:RightUpLeg": (0.2 * reach, 0, 0),
+        "mixamorig:LeftLeg": (0.3 * reach, 0, 0),
+    }
+
+
+def pose_climb(t):
+    s = math.sin(t * math.tau)
+    return {
+        "mixamorig:LeftArm": (-2.7 + 0.35 * s, 0, 0.15),
+        "mixamorig:RightArm": (-2.7 - 0.35 * s, 0, -0.15),
+        "mixamorig:LeftForeArm": (-0.5 - 0.4 * max(0.0, -s), 0, 0),
+        "mixamorig:RightForeArm": (-0.5 - 0.4 * max(0.0, s), 0, 0),
+        "mixamorig:LeftUpLeg": (-0.9 - 0.4 * s, 0, 0),
+        "mixamorig:RightUpLeg": (-0.9 + 0.4 * s, 0, 0),
+        "mixamorig:LeftLeg": (1.3 + 0.3 * s, 0, 0),
+        "mixamorig:RightLeg": (1.3 - 0.3 * s, 0, 0),
+        "mixamorig:Head": (-0.4, 0, 0),
+    }
+
+
+def pose_fall(t):
+    s = math.sin(t * math.tau * 2)
+    return {
+        "mixamorig:LeftArm": (-0.6 + 0.3 * s, 0, 1.2),
+        "mixamorig:RightArm": (-0.6 - 0.3 * s, 0, -1.2),
+        "mixamorig:LeftUpLeg": (-0.4 + 0.2 * s, 0, 0.1),
+        "mixamorig:RightUpLeg": (-0.2 - 0.2 * s, 0, -0.1),
+        "mixamorig:LeftLeg": (0.6, 0, 0),
+        "mixamorig:RightLeg": (0.9, 0, 0),
+    }
+
+
+MANNEQUIN_CLIPS = [
+    ("Idle", 2.4, pose_idle),
+    ("Walk", 1.0, pose_walk),
+    ("Run", 0.66, pose_run),
+    ("Jump", 0.8, pose_jump),
+    ("Attack", 0.6, pose_attack),
+    ("Climb", 1.1, pose_climb),
+    ("Fall", 0.8, pose_fall),
+]
+
+
+def build_mannequin():
+    buf = BufferBuilder()
+    index, world = mannequin_world()
+    # One primitive per material: suit and skin.
+    prims = {False: [[], [], [], [], [], []], True: [[], [], [], [], [], []]}
+    for bone, centre, half, skin in mannequin_parts():
+        positions, normals, uvs, indices, joints, weights = prims[skin]
+        p, n, t, idx = box(centre, half)
+        base = len(positions)
+        positions += p
+        normals += n
+        uvs += t
+        indices += [i + base for i in idx]
+        joints += [[index[bone], 0, 0, 0]] * len(p)
+        weights += [[1.0, 0.0, 0.0, 0.0]] * len(p)
+    primitives = []
+    for skin, material in ((False, 0), (True, 1)):
+        positions, normals, uvs, indices, joints, weights = prims[skin]
+        primitives.append(
+            {
+                "attributes": {
+                    "POSITION": buf.accessor(positions, "VEC3", FLOAT, ARRAY_BUFFER, bounds=True),
+                    "NORMAL": buf.accessor(normals, "VEC3", FLOAT, ARRAY_BUFFER),
+                    "TEXCOORD_0": buf.accessor(uvs, "VEC2", FLOAT, ARRAY_BUFFER),
+                    "JOINTS_0": buf.accessor(joints, "VEC4", USHORT, ARRAY_BUFFER),
+                    "WEIGHTS_0": buf.accessor(weights, "VEC4", FLOAT, ARRAY_BUFFER),
+                },
+                "indices": buf.accessor(indices, "SCALAR", UINT, ELEMENT_ARRAY_BUFFER),
+                "material": material,
+            }
+        )
+    ibm = [[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -w[0], -w[1], -w[2], 1] for w in world]
+    a_ibm = buf.accessor(ibm, "MAT4", FLOAT)
+
+    # Nodes: 0 the model, 1.. the bones, last the mesh.
+    first_bone = 1
+    nodes = [{"name": "Mannequin", "children": [first_bone, first_bone + len(MANNEQUIN_BONES)]}]
+    for i, (name, parent, t) in enumerate(MANNEQUIN_BONES):
+        node = {"name": name}
+        if any(c != 0 for c in t):
+            node["translation"] = list(t)
+        children = [first_bone + c for c, (_, p, _) in enumerate(MANNEQUIN_BONES) if p == name]
+        if children:
+            node["children"] = children
+        nodes.append(node)
+    nodes.append({"name": "Body", "mesh": 0, "skin": 0})
+
+    animations = []
+    samples = 16
+    for name, seconds, pose in MANNEQUIN_CLIPS:
+        times = [seconds * k / samples for k in range(samples + 1)]
+        a_time = buf.accessor(times, "SCALAR", FLOAT)
+        buf.accessors[a_time]["min"] = [0.0]
+        buf.accessors[a_time]["max"] = [seconds]
+        poses = [pose(k / samples) for k in range(samples + 1)]
+        bones = sorted({b for p in poses for b in p})
+        samplers, channels = [], []
+        for bone in bones:
+            rotations = [euler(*p.get(bone, (0, 0, 0))) for p in poses]
+            a_rot = buf.accessor(rotations, "VEC4", FLOAT)
+            samplers.append({"input": a_time, "output": a_rot, "interpolation": "LINEAR"})
+            channels.append(
+                {"sampler": len(samplers) - 1, "target": {"node": first_bone + index[bone], "path": "rotation"}}
+            )
+        animations.append({"name": name, "samplers": samplers, "channels": channels})
+
+    gltf = {
+        "asset": {"version": "2.0", "generator": "april-blink gen_sample_assets.py"},
+        "scene": 0,
+        "scenes": [{"name": "Mannequin", "nodes": [0]}],
+        "nodes": nodes,
+        "skins": [
+            {
+                "name": "Skeleton",
+                "joints": [first_bone + i for i in range(len(MANNEQUIN_BONES))],
+                "inverseBindMatrices": a_ibm,
+                "skeleton": first_bone,
+            }
+        ],
+        "meshes": [{"name": "Body", "primitives": primitives}],
+        "materials": [
+            {
+                "name": "Suit",
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [0.18, 0.24, 0.36, 1.0],
+                    "metallicFactor": 0.0,
+                    "roughnessFactor": 0.6,
+                },
+            },
+            {
+                "name": "Skin",
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [0.8, 0.6, 0.48, 1.0],
+                    "metallicFactor": 0.0,
+                    "roughnessFactor": 0.7,
+                },
+            },
+        ],
+        "animations": animations,
+        "bufferViews": buf.views,
+        "accessors": buf.accessors,
+        "buffers": [
+            {
+                "byteLength": len(buf.data),
+                "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(buf.data)).decode(),
+            }
+        ],
+    }
+    (OUT / "mannequin.gltf").write_text(json.dumps(gltf, indent=1) + "\n")
+
+
+# ----------------------------------------------------------------------------------------
 # Crate: GLB with embedded base color + normal map
 # ----------------------------------------------------------------------------------------
 
@@ -454,6 +773,7 @@ def build_audio():
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     build_totem()
+    build_mannequin()
     build_crate()
     build_audio()
     for f in sorted([*OUT.iterdir(), *AUDIO_OUT.iterdir()]):

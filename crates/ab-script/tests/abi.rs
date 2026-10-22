@@ -170,12 +170,67 @@ impl Script for Prober {
         if let Some(hit) = hit {
             self.report
                 .push(format!("ray hit at y {:.2}", hit.position.y));
+            // Blood over the floor: particles, and splats where the droplets land.
+            let root = tree.root();
+            let blood = Blood {
+                splats: 3,
+                ..Blood::along(Vec3::new(1.0, 0.2, 0.0))
+            };
+            let spawned = tree.spawn_blood(root, Vec3::new(0.0, 1.0, 0.0), blood);
+            self.report.push(format!("blood: {}", spawned.is_ok()));
+        }
+    }
+}
+
+/// Spawns the sample mannequin and runs it through its animations and locomotion.
+#[derive(Debug, Default)]
+struct Animator {
+    model: Option<Node>,
+    report: Vec<String>,
+    frames: u32,
+}
+
+impl Script for Animator {
+    fn ready(&mut self, tree: &mut Tree<'_>, node: Node) {
+        let model = tree
+            .instantiate_toml("[[node]]\nname = \"Hero\"\ninstance = \"models/mannequin.gltf\"\n")
+            .unwrap();
+        tree.add_child(node, model).unwrap();
+        self.model = Some(model);
+        let clips = tree.animation(model).clips();
+        self.report.push(format!("clips: {}", clips.join(" ")));
+        let missing = tree.animation(model).play("Dance").unwrap_err();
+        self.report.push(format!("missing: {missing}"));
+        tree.animation(model).crossfade("Walk", 0.2).unwrap();
+        self.report
+            .push(format!("current: {:?}", tree.animation(model).current()));
+    }
+
+    fn process(&mut self, tree: &mut Tree<'_>, _node: Node, _delta: f32) {
+        let model = self.model.expect("ready");
+        self.frames += 1;
+        let mut loco = tree.locomotion(model);
+        match self.frames {
+            1..=10 => loco.update(4.0, true, 0.0, false).unwrap(),
+            11 => loco.play_action("Attack").unwrap(),
+            12 => self.report.push(format!(
+                "action: {} {:?}",
+                loco.is_action_playing(),
+                loco.state()
+            )),
+            // The 0.6 s attack ends, then the fall shows.
+            13..=60 => loco.update(0.0, false, -3.0, false).unwrap(),
+            _ => {}
+        }
+        if self.frames == 60 {
+            self.report.push(format!("air: {:?}", loco.state()));
         }
     }
 }
 
 fn register(registry: &mut Registry) {
     registry
+        .register::<Animator>("Animator")
         .register::<Mover>("Mover")
         .register::<Listener>("Listener")
         .register::<Counter>("Counter")
@@ -187,6 +242,7 @@ ab_script::export!(register);
 
 fn engine() -> Engine {
     let config = EngineConfig {
+        asset_root: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into(),
         audio_output: ab_engine::audio::AudioOutput::Silent,
         ..Default::default()
     };
@@ -194,7 +250,7 @@ fn engine() -> Engine {
     let library = ScriptLibrary::from_entry(ab_script_library, "abi test").unwrap();
     assert_eq!(
         library.names().collect::<Vec<_>>(),
-        ["Mover", "Listener", "Counter", "Panicker", "Prober"]
+        ["Animator", "Mover", "Listener", "Counter", "Panicker", "Prober"]
     );
     let world = engine.tree_mut().world_mut();
     library.register(world.resource_or_insert_with(ab_engine::scene::ScriptRegistry::new));
@@ -336,4 +392,30 @@ fn errors_properties_and_physics_queries() {
     assert!(report.contains("lamp energy: Some(5.0)"), "{report}");
     assert!(report.contains("button text on a light: true"), "{report}");
     assert!(report.contains("ray hit at y 0.00"), "{report}");
+    assert!(report.contains("blood: true"), "{report}");
+    let tree = engine.tree();
+    let splats = tree
+        .subtree(tree.root())
+        .into_iter()
+        .filter(|&n| tree.name(n).is_some_and(|n| n.starts_with("BloodSplat")))
+        .count();
+    assert_eq!(splats, 3, "the droplets land on the floor");
+}
+
+#[test]
+fn scripts_animate_models_and_drive_their_locomotion() {
+    let mut engine = engine();
+    let animator = add(&mut engine, "Animator", "Animator", true);
+    for _ in 0..65 {
+        engine.update(1.0 / 60.0);
+    }
+    let report = script::<Animator>(&mut engine, animator).report.join("\n");
+    assert!(
+        report.contains("clips: Idle Walk Run Jump Attack Climb Fall"),
+        "{report}"
+    );
+    assert!(report.contains("no animation `Dance`"), "{report}");
+    assert!(report.contains("current: Some(\"Walk\")"), "{report}");
+    assert!(report.contains("action: true Action"), "{report}");
+    assert!(report.contains("air: Fall"), "{report}");
 }

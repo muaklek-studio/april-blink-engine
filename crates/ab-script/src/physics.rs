@@ -1,7 +1,7 @@
 //! Physics: scene queries, bodies, characters and ragdolls.
 
 use crate::host::method;
-use crate::math::Vec3;
+use crate::math::{Vec2, Vec3};
 use crate::tree::Tree;
 use crate::value::{Arg, Error, IntoValue, Node};
 use ab_script_api as ffi;
@@ -496,6 +496,24 @@ impl<'a> Tree<'a> {
         self.query(method!("ragdoll.of"), &[node.to_value()])
     }
 
+    /// Builds a person-shaped ragdoll for the rigged humanoid character under `model` (its
+    /// bones are found by name: Mixamo, Unreal, Unity, Blender, VRoid... rigs) and adds it
+    /// to the model. It follows the animation as hit boxes until [`Tree::go_limp`].
+    /// `mass`: total kg (`None`: 70).
+    pub fn humanoid_ragdoll(&mut self, model: Node, mass: Option<f32>) -> Result<Node, Error> {
+        self.created(
+            method!("ragdoll.humanoid"),
+            &[model.to_value(), mass.to_value()],
+        )
+    }
+
+    /// Climbing for the `CharacterBody3D` at `node`: grab walls in front of it, climb, pull
+    /// up over the top. Walls must be in the `climbable` group unless
+    /// [`ClimbRef::set_group`] says otherwise.
+    pub fn climb(&mut self, node: Node) -> ClimbRef<'_, 'a> {
+        ClimbRef { tree: self, node }
+    }
+
     /// Makes a ragdoll go limp (fully simulated).
     pub fn go_limp(&mut self, ragdoll: Node) -> Result<(), Error> {
         self.run(method!("ragdoll.go_limp"), &[ragdoll.to_value()])
@@ -504,5 +522,105 @@ impl<'a> Tree<'a> {
     pub fn is_ragdoll_active(&self, ragdoll: Node) -> bool {
         self.query(method!("ragdoll.is_active"), &[ragdoll.to_value()])
             .unwrap_or(false)
+    }
+}
+
+/// What a climbing character does ([`Tree::climb`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClimbState {
+    /// Not climbing: the script moves it (walking, falling).
+    #[default]
+    None,
+    Climbing,
+    /// Pulling itself up over the top of the wall.
+    Mantling,
+}
+
+/// Climbing for a character ([`Tree::climb`]).
+#[derive(Debug)]
+pub struct ClimbRef<'t, 'a> {
+    tree: &'t mut Tree<'a>,
+    node: Node,
+}
+
+fn climb_state(name: Option<String>) -> ClimbState {
+    match name.as_deref() {
+        Some("climbing") => ClimbState::Climbing,
+        Some("mantling") => ClimbState::Mantling,
+        _ => ClimbState::None,
+    }
+}
+
+impl ClimbRef<'_, '_> {
+    /// Grabs the climbable wall in front of the character (its -Z), if within reach.
+    /// Returns whether it climbs now.
+    pub fn grab(&mut self) -> bool {
+        self.tree
+            .fetch(method!("climb.grab"), &[self.node.to_value()])
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+    }
+
+    /// One physics step on the wall: `input.y` up/down, `input.x` right/left, `jump` jumps
+    /// off. It moves the body itself (no `move_and_slide` while climbing).
+    pub fn step(&mut self, input: Vec2, jump: bool, delta: f32) -> ClimbState {
+        climb_state(
+            self.tree
+                .fetch(
+                    method!("climb.step"),
+                    &[
+                        self.node.to_value(),
+                        input.to_value(),
+                        jump.to_value(),
+                        delta.to_value(),
+                    ],
+                )
+                .ok()
+                .flatten(),
+        )
+    }
+
+    pub fn state(&self) -> ClimbState {
+        climb_state(
+            self.tree
+                .query(method!("climb.state"), &[self.node.to_value()]),
+        )
+    }
+
+    pub fn is_climbing(&self) -> bool {
+        self.state() != ClimbState::None
+    }
+
+    pub fn release(&mut self) -> Result<(), Error> {
+        self.tree
+            .run(method!("climb.release"), &[self.node.to_value()])
+    }
+
+    /// The direction out of the wall being climbed.
+    pub fn wall_normal(&self) -> Vec3 {
+        self.tree
+            .query(method!("climb.wall_normal"), &[self.node.to_value()])
+            .unwrap_or(Vec3::ZERO)
+    }
+
+    /// Climbing speed in m/s (default 1.4).
+    pub fn set_speed(&mut self, speed: f32) -> Result<(), Error> {
+        self.tree.run(
+            method!("climb.configure"),
+            &[self.node.to_value(), speed.to_value(), ffi::Value::NIL],
+        )
+    }
+
+    /// Only bodies in `group` can be climbed (`None`: any wall). Default `climbable`.
+    pub fn set_group(&mut self, group: Option<&str>) -> Result<(), Error> {
+        self.tree.run(
+            method!("climb.configure"),
+            &[
+                self.node.to_value(),
+                ffi::Value::NIL,
+                group.unwrap_or("").to_value(),
+            ],
+        )
     }
 }

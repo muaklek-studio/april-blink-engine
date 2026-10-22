@@ -1,6 +1,7 @@
 //! Physics: queries, events, impulses, characters, ragdolls.
 
 use super::Builder;
+use crate::climb::{ClimbState, Climber, Climbing};
 use crate::script_host::call::{Call, CallError};
 use ab_physics::{
     BodyKind, PhysicsBody3D, PhysicsEvent, PhysicsNodes, PhysicsWorld, QueryOptions, Ragdoll,
@@ -37,6 +38,14 @@ fn body<R>(
         .component_mut::<PhysicsBody3D>(node)
         .ok_or_else(|| CallError::Failed(format!("{node} has no PhysicsBody3D")))?;
     Ok(f(&mut body))
+}
+
+fn climb_state_name(state: ClimbState) -> &'static str {
+    match state {
+        ClimbState::None => "none",
+        ClimbState::Climbing => "climbing",
+        ClimbState::Mantling => "mantling",
+    }
 }
 
 pub(super) fn add(b: &mut Builder) {
@@ -165,6 +174,69 @@ pub(super) fn add(b: &mut Builder) {
     b.add("ragdoll.go_limp", |c| {
         let node = c.node(0)?;
         crate::ragdoll::go_limp(c.tree, node, None).map_err(CallError::failed)
+    });
+    b.add("climb.grab", |c| {
+        let node = c.node(0)?;
+        let grabbed = c.tree.try_grab(node);
+        c.push_bool(grabbed);
+        Ok(())
+    });
+    b.add("climb.step", |c| {
+        let node = c.node(0)?;
+        let (input, jump, delta) = (c.vec2(1)?, c.bool(2)?, c.f32(3)?);
+        let state = c.tree.climb_step(node, input, jump, delta);
+        c.push_str(climb_state_name(state));
+        Ok(())
+    });
+    b.add("climb.state", |c| {
+        let node = c.node(0)?;
+        c.push_str(climb_state_name(c.tree.climb_state(node)));
+        Ok(())
+    });
+    b.add("climb.release", |c| {
+        let node = c.node(0)?;
+        c.tree.release_climb(node);
+        Ok(())
+    });
+    b.add("climb.wall_normal", |c| {
+        let node = c.node(0)?;
+        let normal = c
+            .tree
+            .component::<Climber>(node)
+            .map(|cl| cl.wall_normal())
+            .unwrap_or(ab_core::Vec3::ZERO);
+        c.push(crate::script_host::call::to_vec3(normal));
+        Ok(())
+    });
+    b.add("climb.configure", |c| {
+        let node = c.node(0)?;
+        let (speed, group) = (c.opt_f32(1)?, c.opt_str(2)?);
+        if c.tree.component::<Climber>(node).is_none() {
+            // Sized from the shape on first use; grab sets it up.
+            let _ = c.tree.climb_state(node);
+            c.tree
+                .insert_component(node, Climber::default())
+                .map_err(CallError::failed)?;
+        }
+        let mut climber = c.tree.component_mut::<Climber>(node).expect("inserted");
+        if let Some(speed) = speed {
+            climber.speed = speed.max(0.0);
+        }
+        if let Some(group) = group {
+            climber.group = (!group.is_empty()).then(|| group.to_owned());
+        }
+        Ok(())
+    });
+    b.add("ragdoll.humanoid", |c| {
+        let model = c.node(0)?;
+        let mut settings = ab_physics::HumanoidRagdollSettings::default();
+        if let Some(mass) = c.opt_f32(1)? {
+            settings.total_mass = mass.max(1.0);
+        }
+        let doll = crate::ragdoll::humanoid_ragdoll_for_model(c.tree, model, &settings)
+            .map_err(CallError::failed)?;
+        c.push_node(doll);
+        Ok(())
     });
     b.add("ragdoll.is_active", |c| {
         let node = c.node(0)?;

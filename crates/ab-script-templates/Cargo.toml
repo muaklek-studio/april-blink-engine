@@ -1,0 +1,20 @@
+[package]
+name = "ab-script-templates"
+description = "Starter scripts the editor offers for new scripts (movement, combat, guns, cars...), built and tested with the workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# The templates only use what a game's script crate has: ab-script and serde.
+[dependencies]
+ab-script.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+ab-engine.workspace = true
+
+[lints]
+workspace = true

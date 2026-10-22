@@ -116,7 +116,7 @@ fn write_report(dir: &Path, title: &str, what: &str, backtrace: Option<&str>) ->
 
 /// Shows `text` to the player: a message box on Windows (games have no console there), the
 /// terminal elsewhere.
-pub(crate) fn show_text(title: &str, text: &str) {
+pub fn show_text(title: &str, text: &str) {
     if cfg!(windows) {
         message_box(title, text);
     } else {

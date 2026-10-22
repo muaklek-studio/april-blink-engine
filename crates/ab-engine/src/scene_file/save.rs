@@ -12,8 +12,8 @@ use ab_scene::{Groups, NodeHandle, SceneTree, Timer};
 use tracing::warn;
 
 /// Describes `root` and its subtree. Instanced models and scenes are written as
-/// `instance = path` without their contents. Nodes whose data cannot be described (UI,
-/// meshes created in code, triangle-mesh shapes) are written as plain `Node` / `Node3D`
+/// `instance = path` without their contents. Nodes whose data cannot be described (images
+/// and meshes created in code, triangle-mesh shapes) are written as plain `Node` / `Node3D`
 /// with a warning. Write the result with [`SceneFile::to_toml`].
 pub fn save_scene(tree: &SceneTree, root: NodeHandle) -> SceneFile {
     let mut scene = SceneFile::default();
@@ -30,8 +30,11 @@ pub fn save_scene(tree: &SceneTree, root: NodeHandle) -> SceneFile {
         };
         common(tree, node, &mut desc);
         let instance = tree.component::<SceneInstance>(node).map(|i| i.0.clone());
+        // A humanoid ragdoll's bodies are rebuilt from its skeleton on load.
+        let generated = tree.component::<crate::ragdoll::RagdollRig>(node).is_some();
         match instance {
             Some(instance) => desc.instance = Some(instance),
+            None if generated => describe(tree, node, &mut desc),
             None => {
                 describe(tree, node, &mut desc);
                 for child in tree.children(node).into_iter().rev() {
@@ -101,8 +104,16 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
         "Node" | "Node3D" | "AudioListener3D" | "CameraShake" => class,
         "Ragdoll" => {
             let active = tree.component::<Ragdoll>(node).is_some_and(|r| r.active);
+            let rig = tree
+                .component::<crate::ragdoll::RagdollRig>(node)
+                .map(|r| r.clone())
+                .unwrap_or_default();
             desc.ragdoll = Some(RagdollDesc {
                 active: active.then_some(true),
+                skeleton: (!rig.skeleton.is_empty()).then_some(rig.skeleton),
+                bones: rig.bones,
+                mass: rig.mass,
+                thickness: rig.thickness,
             });
             class
         }
@@ -134,6 +145,13 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
                     }
                 }
                 desc.joint = Some(d);
+                class
+            }
+            None => unsupported(tree, node, class, plain),
+        },
+        "AnimationPlayer" => match origin.as_ref().and_then(|o| o.animation.clone()) {
+            Some(animation) => {
+                desc.animation = Some(animation);
                 class
             }
             None => unsupported(tree, node, class, plain),
@@ -181,10 +199,15 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
         }
         "OmniLight3D" => {
             if let Some(l) = tree.component::<OmniLight3D>(node) {
+                // A flash keeps its peak energy and duration (its light fades as it plays).
+                let flash = tree
+                    .component::<ab_effects::LightFlash>(node)
+                    .map(|f| (f.energy, f.duration));
                 desc.light = Some(LightDesc {
                     color: Some(ColorDesc::from_color(l.color)),
-                    energy: Some(l.energy),
+                    energy: Some(flash.map_or(l.energy, |f| f.0)),
                     range: Some(l.range),
+                    flash: flash.map(|f| f.1),
                     ..Default::default()
                 });
             }
@@ -199,6 +222,7 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
                     angle: Some(l.angle_degrees),
                     softness: Some(l.edge_softness),
                     shadows: l.shadow_enabled.then_some(true),
+                    flash: None,
                 });
             }
             class
@@ -272,6 +296,13 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
                 });
             }
             class
+        }
+        _ if super::ui::UI_TYPES.contains(&class) => {
+            if super::ui::describe(tree, node, class, desc) {
+                class
+            } else {
+                unsupported(tree, node, class, plain)
+            }
         }
         _ => unsupported(tree, node, class, plain),
     };

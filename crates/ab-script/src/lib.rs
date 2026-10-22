@@ -57,7 +57,8 @@ mod world;
 pub use ab_script_api as ffi;
 pub use math::{EulerRot, Mat3, Mat4, Quat, Transform, Vec2, Vec3, Vec4};
 pub use physics::{
-    signals, Body, BodyKind, Character, Physics, PhysicsEvent, QueryOptions, RayHit,
+    signals, Body, BodyKind, Character, ClimbRef, ClimbState, Physics, PhysicsEvent, QueryOptions,
+    RayHit,
 };
 pub use script::{script_type, Registry, Script, Signal};
 pub use tree::{Connection, Engine, Input, RenderStats, Saves, Tree};
@@ -68,17 +69,18 @@ pub use ui::{
 pub use util::{PathFollower, Rng};
 pub use value::{Arg, Color, Error, ErrorKind, FromValue, IntoValue, Node};
 pub use world::{
-    AudioPlayerRef, CameraRef, Explosion, LightRef, MeshRef, NavBakeSettings, ParticleEffect,
-    ParticlesRef, Repeat, SoundOptions, TimerRef, TweenBuilder, TIMEOUT, TWEEN_FINISHED,
+    AnimationRef, AudioPlayerRef, Blood, CameraRef, Explosion, LightRef, LocomotionRef,
+    LocomotionState, MeshRef, NavBakeSettings, ParticleEffect, ParticlesRef, Repeat, SoundOptions,
+    TimerRef, TweenBuilder, TIMEOUT, TWEEN_FINISHED,
 };
 
 /// Everything a script usually needs: `use ab_script::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        debug, error, info, serde_state, trace, warn, Arg, BodyKind, Color, Easing, EulerRot,
-        Explosion, HAlign, LayoutPreset, MouseFilter, NavBakeSettings, Node, ParticleEffect,
-        PathFollower, PhysicsEvent, Quat, QueryOptions, Registry, Repeat, Rng, Script, Signal,
-        SoundOptions, Transform, Tree, VAlign, Vec2, Vec3,
+        debug, error, info, serde_state, trace, warn, Arg, Blood, BodyKind, Color, Easing,
+        EulerRot, Explosion, HAlign, LayoutPreset, MouseFilter, NavBakeSettings, Node,
+        ParticleEffect, PathFollower, PhysicsEvent, Quat, QueryOptions, Registry, Repeat, Rng,
+        Script, Signal, SoundOptions, Transform, Tree, VAlign, Vec2, Vec3,
     };
     pub use serde::{Deserialize, Serialize};
 }

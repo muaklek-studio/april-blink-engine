@@ -69,6 +69,19 @@ impl InspectorPanel {
                 ui.label(RichText::new(subtitle).small().color(theme::TEXT_DIM));
             });
         });
+        let others = editor.selected.len().saturating_sub(1);
+        if others > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{}  {} nodes selected: these are the active one's properties. The \
+                     gizmo, Duplicate and Delete act on all of them.",
+                    icon::SELECTION_ALL,
+                    others + 1
+                ))
+                .small()
+                .color(theme::ACCENT),
+            );
+        }
         if !editable {
             ui.label(
                 RichText::new(format!(
@@ -191,7 +204,7 @@ impl InspectorPanel {
     ) {
         section(ui, "node", icon::CIRCLES_THREE, "Node", |ui| {
             grid(ui, "node_grid", |ui| {
-                if editor.tree().is_node3d(node) {
+                if editor.tree().is_node3d(node) || ui_kind(editor, node) {
                     label(ui, "Visible");
                     opt_visible(ui, &mut desc.visible);
                     ui.end_row();
@@ -410,6 +423,27 @@ fn class_sections(
             }),
         ),
         "Particles3D" => particles_section(ui, desc.particles.get_or_insert_with(Default::default)),
+        "CanvasLayer" => {
+            let c = desc.canvas.get_or_insert_with(Default::default);
+            section(ui, "canvas", icon::STACK, "Canvas layer", |ui| {
+                grid(ui, "canvas_grid", |ui| {
+                    label(ui, "Layer");
+                    let mut layer = c.layer.unwrap_or(0);
+                    if ui
+                        .add(egui::DragValue::new(&mut layer).range(-128..=128))
+                        .on_hover_text("Higher layers draw on top")
+                        .changed()
+                    {
+                        c.layer = (layer != 0).then_some(layer);
+                    }
+                    ui.end_row();
+                });
+            });
+            if desc.canvas == Some(Default::default()) {
+                desc.canvas = None;
+            }
+        }
+        _ if ui_kind(editor, node) => ui_sections(ui, editor, node, class, desc),
         _ => {}
     }
     // Drop tables the UI created but left empty, so saved files stay minimal.
@@ -539,21 +573,174 @@ fn joint_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, j: &mut J
 }
 
 fn ragdoll_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, r: &mut RagdollDesc) {
-    let parts = editor.tree().ragdoll_parts(node).len();
+    use ab_engine::ragdoll::{humanoid_map, skeleton_bones};
+    let tree = editor.tree();
+    let parts = tree.ragdoll_parts(node).len();
+    // Characters to build on: the models in the scene that have a skin.
+    let mut characters: Vec<NodeHandle> = tree
+        .subtree(editor.scene_root)
+        .into_iter()
+        .filter(|&n| tree.component::<ab_engine::rendering::Skin>(n).is_some())
+        .filter_map(|n| editor.instance_owner(n))
+        .collect();
+    characters.dedup();
+    let model = r
+        .skeleton
+        .as_deref()
+        .and_then(|path| tree.get_node(node, path));
     section(ui, "ragdoll", icon::PERSON_ARMS_SPREAD, "Ragdoll", |ui| {
         grid(ui, "ragdoll_grid", |ui| {
             label(ui, "Limp on start");
             opt_bool(ui, &mut r.active, false);
             ui.end_row();
+            label(ui, "Character");
+            let shown = model
+                .and_then(|m| tree.name(m).map(|n| n.to_owned()))
+                .or_else(|| r.skeleton.clone().map(|s| format!("{s} (not found)")))
+                .unwrap_or_else(|| "None (bodies built by hand)".into());
+            egui::ComboBox::from_id_salt("ragdoll_character")
+                .selected_text(shown)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(r.skeleton.is_none(), "None (bodies built by hand)")
+                        .clicked()
+                    {
+                        r.skeleton = None;
+                        r.bones.clear();
+                    }
+                    for &character in &characters {
+                        let name = tree
+                            .name(character)
+                            .map(|n| n.to_owned())
+                            .unwrap_or_default();
+                        let path = relative_path(tree, node, character);
+                        if ui
+                            .selectable_label(model == Some(character), name)
+                            .clicked()
+                        {
+                            r.skeleton = path;
+                            r.bones.clear();
+                        }
+                    }
+                });
+            ui.end_row();
+            if r.skeleton.is_some() {
+                label(ui, "Mass (kg)");
+                opt_f32(ui, &mut r.mass, 70.0, 1.0..=1000.0, 0.5);
+                ui.end_row();
+                label(ui, "Thickness");
+                opt_f32(ui, &mut r.thickness, 1.0, 0.3..=3.0, 0.01);
+                ui.end_row();
+            }
             label(ui, "Parts");
             ui.label(format!("{parts} bodies"));
             ui.end_row();
         });
         ui.label(
-            RichText::new("Off: parts stay kinematic (follow their bones, act as hit boxes) until a script calls ragdoll::go_limp.")
+            RichText::new(if r.skeleton.is_some() {
+                "Bodies shaped like a person are made from the character's skeleton when the scene loads. Off: they follow the animation as hit boxes until a script calls go_limp."
+            } else {
+                "Off: parts stay kinematic (follow their bones, act as hit boxes) until a script calls ragdoll::go_limp. Pick a character to build the bodies from its skeleton."
+            })
+            .small()
+            .color(theme::TEXT_DIM),
+        );
+        if characters.is_empty() && r.skeleton.is_none() {
+            ui.label(
+                RichText::new(
+                    "Drop a rigged model (glTF with a skin) into the scene to pick it here.",
+                )
                 .small()
                 .color(theme::TEXT_DIM),
-        );
+            );
+        }
+    });
+    let Some(model) = model else {
+        return;
+    };
+    let bones = skeleton_bones(tree, model);
+    let automatic = humanoid_map(tree, model, &Default::default());
+    let current = humanoid_map(tree, model, &r.bones);
+    let bone_name = |b: Option<NodeHandle>| b.and_then(|b| tree.name(b).map(|n| n.to_owned()));
+    section(ui, "ragdoll_bones", icon::BONE, "Bone map", |ui| {
+        let missing = current.missing();
+        if missing.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "{}  Every bone a ragdoll needs is mapped",
+                    icon::CHECK_CIRCLE
+                ))
+                .color(theme::PLAY),
+            );
+        } else {
+            ui.label(
+                RichText::new(format!(
+                    "{}  Missing: {}. Pick them below.",
+                    icon::WARNING,
+                    missing
+                        .iter()
+                        .map(|b| b.label())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .color(theme::WARN),
+            );
+        }
+        grid(ui, "ragdoll_bones_grid", |ui| {
+            for slot in ab_engine::physics::HumanBone::ALL {
+                let set_by_hand = r.bones.get(slot.key()).cloned();
+                let mapped = bone_name(current.get(slot));
+                let text = RichText::new(slot.label());
+                let text = if slot.is_required() && mapped.is_none() {
+                    text.color(theme::WARN)
+                } else {
+                    text
+                };
+                ui.label(text);
+                let shown = match (&mapped, &set_by_hand) {
+                    (Some(name), Some(_)) => name.clone(),
+                    (Some(name), None) => format!("{name}  (auto)"),
+                    (None, _) => "—".into(),
+                };
+                egui::ComboBox::from_id_salt(("ragdoll_bone", slot.key()))
+                    .selected_text(shown)
+                    .width(ui.available_width())
+                    .height(320.0)
+                    .show_ui(ui, |ui| {
+                        let auto =
+                            bone_name(automatic.get(slot)).unwrap_or_else(|| "none found".into());
+                        if ui
+                            .selectable_label(set_by_hand.is_none(), format!("Automatic ({auto})"))
+                            .clicked()
+                        {
+                            r.bones.remove(slot.key());
+                        }
+                        if ui
+                            .selectable_label(set_by_hand.as_deref() == Some(""), "None")
+                            .clicked()
+                        {
+                            r.bones.insert(slot.key().into(), String::new());
+                        }
+                        ui.separator();
+                        for &bone in &bones {
+                            let name = tree.name(bone).map(|n| n.to_owned()).unwrap_or_default();
+                            let chosen = set_by_hand.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(chosen, &name).clicked() {
+                                r.bones.insert(slot.key().into(), name);
+                            }
+                        }
+                    });
+                ui.end_row();
+            }
+        });
+        if !r.bones.is_empty()
+            && ui
+                .button(format!("{}  All automatic", icon::MAGIC_WAND))
+                .clicked()
+        {
+            r.bones.clear();
+        }
     });
 }
 
@@ -1115,7 +1302,100 @@ pub fn environment(ui: &mut egui::Ui, editor: &mut Editor) {
                         0.01,
                     );
                     ui.end_row();
+                    label(ui, "Max opacity");
+                    opt_f32(
+                        ui,
+                        &mut desc.fog_max_opacity,
+                        defaults.fog.max_opacity,
+                        0.0..=1.0,
+                        0.005,
+                    );
+                    ui.end_row();
+                    label(ui, "Sun glow");
+                    opt_f32(
+                        ui,
+                        &mut desc.fog_sun_scattering,
+                        defaults.fog.sun_scattering,
+                        0.0..=4.0,
+                        0.01,
+                    );
+                    ui.end_row();
+                    label(ui, "Sun halo");
+                    opt_f32(
+                        ui,
+                        &mut desc.fog_sun_anisotropy,
+                        defaults.fog.sun_scattering_anisotropy,
+                        0.0..=0.95,
+                        0.005,
+                    );
+                    ui.end_row();
                 });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Patches blown by the wind")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                grid(ui, "fog_wind_grid", |ui| {
+                    label(ui, "Patchiness");
+                    let mut patchiness = desc.fog_patchiness.unwrap_or(defaults.fog.patchiness);
+                    if ui
+                        .add(egui::Slider::new(&mut patchiness, 0.0..=1.0))
+                        .on_hover_text("0: even fog · 1: clear gaps between thick banks")
+                        .changed()
+                    {
+                        desc.fog_patchiness = Some(patchiness);
+                    }
+                    ui.end_row();
+                    label(ui, "Patch size");
+                    opt_f32(
+                        ui,
+                        &mut desc.fog_patch_size,
+                        defaults.fog.patch_size,
+                        0.5..=500.0,
+                        0.1,
+                    );
+                    ui.end_row();
+                    label(ui, "Wind (m/s)");
+                    let mut wind = desc.fog_wind.unwrap_or(defaults.fog.wind.into());
+                    if super::vec3(ui, &mut wind, 0.05, "") {
+                        desc.fog_wind = Some(wind);
+                    }
+                    ui.end_row();
+                });
+            });
+            section(ui, "light_shafts", icon::SUN_DIM, "Light shafts", |ui| {
+                let shafts = defaults.light_shafts;
+                grid(ui, "shafts_grid", |ui| {
+                    label(ui, "Intensity");
+                    let mut intensity = desc.light_shafts.unwrap_or(if shafts.enabled {
+                        shafts.intensity
+                    } else {
+                        0.0
+                    });
+                    if ui
+                        .add(egui::Slider::new(&mut intensity, 0.0..=8.0))
+                        .on_hover_text("0 turns them off")
+                        .changed()
+                    {
+                        desc.light_shafts = Some(intensity);
+                    }
+                    ui.end_row();
+                    label(ui, "Air density");
+                    opt_f32(ui, &mut desc.light_shafts_density, shafts.density, 0.0..=2.0, 0.001);
+                    ui.end_row();
+                    label(ui, "Towards the light");
+                    opt_f32(ui, &mut desc.light_shafts_anisotropy, shafts.anisotropy, 0.0..=0.95, 0.005);
+                    ui.end_row();
+                    label(ui, "Distance (m)");
+                    opt_f32(ui, &mut desc.light_shafts_distance, shafts.max_distance, 1.0..=500.0, 0.5);
+                    ui.end_row();
+                });
+                ui.label(
+                    RichText::new("Beams where the sun and spot lights shine through openings: windows, gaps in roofs and trees, a flashlight in dusty air. Lights need shadows on for the beams to be cut out.")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
             });
             section(ui, "post", icon::APERTURE, "Post-processing", |ui| {
                 let post = defaults.post;
@@ -1184,6 +1464,452 @@ pub fn environment(ui: &mut egui::Ui, editor: &mut Editor) {
     editor.set_environment(desc);
 }
 
+// =============================================================================================
+// UI
+// =============================================================================================
+
+fn ui_kind(editor: &Editor, node: NodeHandle) -> bool {
+    let tree = editor.tree();
+    tree.component::<ab_engine::ui::Control>(node).is_some()
+        || tree.class_name(node) == Some(ab_engine::ui::class::CANVAS_LAYER)
+}
+
+/// A combo box over an optional name, showing `default` while unset.
+fn choice(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut Option<String>,
+    default: &str,
+    options: &[(&str, &str)],
+) {
+    let current = value.as_deref().unwrap_or(default).to_owned();
+    let current = current.as_str();
+    let shown = options
+        .iter()
+        .find(|(name, _)| *name == current)
+        .map_or(current, |(_, label)| *label);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for (name, text) in options {
+                if ui.selectable_label(current == *name, *text).clicked() {
+                    *value = (*name != default).then(|| (*name).to_owned());
+                }
+            }
+        });
+}
+
+fn text_field(ui: &mut egui::Ui, text: &mut String) {
+    ui.add(
+        egui::TextEdit::multiline(text)
+            .desired_rows(1)
+            .desired_width(ui.available_width() - 4.0),
+    );
+}
+
+fn edges(
+    ui: &mut egui::Ui,
+    values: &mut [f32; 4],
+    range: std::ops::RangeInclusive<f32>,
+    speed: f64,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        for (v, hint) in values.iter_mut().zip(["Left", "Top", "Right", "Bottom"]) {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(v)
+                        .range(range.clone())
+                        .speed(speed)
+                        .max_decimals(3),
+                )
+                .on_hover_text(hint)
+                .changed();
+        }
+    });
+    changed
+}
+
+/// The 16 layout presets as a 4 × 4 grid of little pictures of where the control goes.
+fn preset_picker(ui: &mut egui::Ui) -> Option<ab_engine::ui::LayoutPreset> {
+    use ab_engine::scene_file::ui::PRESETS;
+    let mut picked = None;
+    egui::Grid::new("ui_presets")
+        .spacing([3.0, 3.0])
+        .show(ui, |ui| {
+            for (i, (name, preset)) in PRESETS.iter().enumerate() {
+                let size = egui::vec2(26.0, 18.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let painter = ui.painter_at(rect);
+                let hovered = response.hovered();
+                painter.rect_filled(rect, 2.0, if hovered { theme::BG_2 } else { theme::BG_1 });
+                painter.rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(1.0, theme::TEXT_DIM.gamma_multiply(0.5)),
+                    egui::StrokeKind::Inside,
+                );
+                // Where the control would sit, small, in the parent box.
+                let c = ab_engine::ui::Control::new().with_preset(
+                    *preset,
+                    ab_engine::core::Vec2::new(0.3, 0.3),
+                    0.08,
+                );
+                let at = |fx: f32, fy: f32, ox: f32, oy: f32| {
+                    let inner = rect.shrink(2.0);
+                    egui::pos2(
+                        inner.left() + (fx + ox) * inner.width(),
+                        inner.top() + (fy + oy) * inner.height(),
+                    )
+                };
+                let min = at(c.anchors[0], c.anchors[1], c.offsets[0], c.offsets[1]);
+                let max = at(c.anchors[2], c.anchors[3], c.offsets[2], c.offsets[3]);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(min, max),
+                    1.0,
+                    if hovered {
+                        theme::SELECTION
+                    } else {
+                        theme::ACCENT
+                    },
+                );
+                if response.on_hover_text(name.replace('_', " ")).clicked() {
+                    picked = Some(*preset);
+                }
+                if i % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+        });
+    picked
+}
+
+fn ui_sections(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    node: NodeHandle,
+    class: &str,
+    desc: &mut NodeDesc,
+) {
+    use ab_engine::scene_file::{
+        BoxDesc, ButtonDesc, ImageDesc, LabelDesc, PanelDesc, ProgressDesc,
+    };
+    use ab_engine::ui::class as ui_class;
+    let tree = editor.tree();
+    let in_box = tree.parent(node).is_some_and(|p| {
+        matches!(
+            tree.class_name(p),
+            Some(ui_class::VBOX_CONTAINER | ui_class::HBOX_CONTAINER)
+        )
+    });
+    let current = tree
+        .component::<ab_engine::ui::Control>(node)
+        .map(|c| c.rect());
+    let c = desc.control.get_or_insert_with(Default::default);
+    // Presets and sizes become anchors and offsets: what files store once saved.
+    let fresh = ab_engine::scene_file::ui::control(Some(c)).unwrap_or_default();
+    c.preset = None;
+    c.size = None;
+    c.margin = None;
+    let mut anchors = fresh.anchors;
+    let mut offsets = fresh.offsets;
+    section(ui, "layout", icon::LAYOUT, "Layout", |ui| {
+        if in_box {
+            ui.label(
+                RichText::new(
+                    "The container places this control: set its minimum size and expand instead.",
+                )
+                .color(theme::TEXT_DIM),
+            );
+        } else if let Some(preset) = preset_picker(ui) {
+            let size = current.map_or(ab_engine::core::Vec2::new(200.0, 100.0), |r| r.size);
+            let placed = ab_engine::ui::Control::new().with_preset(preset, size, 0.0);
+            anchors = placed.anchors;
+            offsets = placed.offsets;
+        }
+        grid(ui, "layout_grid", |ui| {
+            if !in_box {
+                label(ui, "Anchors");
+                edges(ui, &mut anchors, 0.0..=1.0, 0.005);
+                ui.end_row();
+                label(ui, "Offsets");
+                edges(ui, &mut offsets, -100_000.0..=100_000.0, 1.0);
+                ui.end_row();
+                // Position and size, for controls that are not stretched along an axis.
+                label(ui, "Position");
+                ui.horizontal(|ui| {
+                    for axis in 0..2 {
+                        let mut v = offsets[axis];
+                        if ui
+                            .add(egui::DragValue::new(&mut v).speed(1.0).max_decimals(1))
+                            .changed()
+                        {
+                            offsets[axis + 2] += v - offsets[axis];
+                            offsets[axis] = v;
+                        }
+                    }
+                });
+                ui.end_row();
+                label(ui, "Size");
+                ui.horizontal(|ui| {
+                    for axis in 0..2 {
+                        // Stretched along this axis: the anchors and offsets size it.
+                        if anchors[axis] != anchors[axis + 2] {
+                            ui.label(RichText::new("stretched").color(theme::TEXT_DIM));
+                            continue;
+                        }
+                        let mut v = offsets[axis + 2] - offsets[axis];
+                        let response = ui.add(
+                            // No range: it would clamp (and so change) a flipped rect.
+                            egui::DragValue::new(&mut v).speed(1.0).max_decimals(1),
+                        );
+                        if response.changed() {
+                            offsets[axis + 2] = offsets[axis] + v.max(0.0);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+            label(ui, "Minimum size");
+            pair(ui, &mut c.min_size, [0.0, 0.0], 1.0);
+            ui.end_row();
+            if in_box {
+                label(ui, "Expand");
+                opt_bool(ui, &mut c.expand, false);
+                ui.end_row();
+            }
+            label(ui, "Takes the mouse");
+            let passive = ab_engine::scene_file::ui::passive_by_default(class);
+            let mut stops = c.mouse.as_deref().map_or(!passive, |m| m == "stop");
+            if ui
+                .checkbox(&mut stops, "")
+                .on_hover_text("Off: clicks go through to what is behind")
+                .changed()
+            {
+                c.mouse =
+                    (stops == passive).then(|| if stops { "stop" } else { "ignore" }.to_owned());
+            }
+            ui.end_row();
+            label(ui, "Modulate");
+            opt_color(ui, &mut c.modulate, Color::WHITE, true);
+            ui.end_row();
+            label(ui, "Clip children");
+            opt_bool(ui, &mut c.clip, false);
+            ui.end_row();
+        });
+    });
+    c.anchors = (anchors != [0.0; 4]).then_some(anchors);
+    c.offsets = (offsets != [0.0; 4]).then_some(offsets);
+    if c.expand == Some(false) {
+        c.expand = None;
+    }
+    if c.clip == Some(false) {
+        c.clip = None;
+    }
+    if desc.control == Some(Default::default()) {
+        desc.control = None;
+    }
+
+    let colors = |ui: &mut egui::Ui,
+                  name: &str,
+                  value: &mut Option<ab_engine::scene_file::ColorDesc>,
+                  default: Color| {
+        label(ui, name);
+        opt_color(ui, value, default, true);
+        ui.end_row();
+    };
+    match class {
+        ui_class::LABEL => {
+            let l = desc.label.get_or_insert_with(LabelDesc::default);
+            section(ui, "label", icon::TEXT_T, "Label", |ui| {
+                grid(ui, "label_grid", |ui| {
+                    label(ui, "Text");
+                    text_field(ui, &mut l.text);
+                    ui.end_row();
+                    label(ui, "Font size");
+                    opt_f32(ui, &mut l.size, 24.0, 4.0..=400.0, 0.2);
+                    ui.end_row();
+                    colors(ui, "Color", &mut l.color, Color::WHITE);
+                    label(ui, "Align");
+                    choice(
+                        ui,
+                        "label_align",
+                        &mut l.align,
+                        "left",
+                        &[("left", "Left"), ("center", "Center"), ("right", "Right")],
+                    );
+                    ui.end_row();
+                    label(ui, "Vertical align");
+                    choice(
+                        ui,
+                        "label_valign",
+                        &mut l.valign,
+                        "top",
+                        &[("top", "Top"), ("center", "Center"), ("bottom", "Bottom")],
+                    );
+                    ui.end_row();
+                    label(ui, "Outline");
+                    opt_f32(ui, &mut l.outline, 0.0, 0.0..=32.0, 0.05);
+                    ui.end_row();
+                    if l.outline.is_some_and(|o| o > 0.0) {
+                        colors(ui, "Outline color", &mut l.outline_color, Color::BLACK);
+                    }
+                    label(ui, "Wrap lines");
+                    opt_bool(ui, &mut l.autowrap, false);
+                    ui.end_row();
+                });
+            });
+        }
+        ui_class::BUTTON => {
+            let b = desc.button.get_or_insert_with(ButtonDesc::default);
+            let default = ab_engine::ui::Button::new("");
+            section(ui, "button", icon::CURSOR_CLICK, "Button", |ui| {
+                grid(ui, "button_grid", |ui| {
+                    label(ui, "Text");
+                    text_field(ui, &mut b.text);
+                    ui.end_row();
+                    label(ui, "Font size");
+                    opt_f32(ui, &mut b.size, default.text_style.size, 4.0..=400.0, 0.2);
+                    ui.end_row();
+                    colors(ui, "Color", &mut b.color, default.normal.color);
+                    colors(ui, "Text color", &mut b.text_color, Color::WHITE);
+                    label(ui, "Disabled");
+                    opt_bool(ui, &mut b.disabled, false);
+                    ui.end_row();
+                });
+                ui.label(
+                    RichText::new("Scripts hear it through its `pressed` signal.")
+                        .color(theme::TEXT_DIM),
+                );
+            });
+        }
+        ui_class::PANEL => {
+            let p = desc.panel.get_or_insert_with(PanelDesc::default);
+            let default = ab_engine::ui::StyleBox::default();
+            section(ui, "panel", icon::RECTANGLE, "Panel", |ui| {
+                grid(ui, "panel_grid", |ui| {
+                    colors(ui, "Color", &mut p.color, default.color);
+                    label(ui, "Corner radius");
+                    opt_f32(
+                        ui,
+                        &mut p.corner_radius,
+                        default.corner_radius,
+                        0.0..=500.0,
+                        0.2,
+                    );
+                    ui.end_row();
+                    label(ui, "Border");
+                    opt_f32(
+                        ui,
+                        &mut p.border_width,
+                        default.border_width,
+                        0.0..=64.0,
+                        0.1,
+                    );
+                    ui.end_row();
+                    if p.border_width.is_some_and(|w| w > 0.0) {
+                        colors(ui, "Border color", &mut p.border_color, Color::WHITE);
+                    }
+                });
+            });
+        }
+        ui_class::PROGRESS_BAR => {
+            let p = desc.progress.get_or_insert_with(ProgressDesc::default);
+            let default = ab_engine::ui::ProgressBar::default();
+            section(ui, "progress", icon::BATTERY_HIGH, "Progress bar", |ui| {
+                grid(ui, "progress_grid", |ui| {
+                    label(ui, "Min");
+                    opt_f32(ui, &mut p.min, default.min, -1e6..=1e6, 0.1);
+                    ui.end_row();
+                    label(ui, "Max");
+                    opt_f32(ui, &mut p.max, default.max, -1e6..=1e6, 0.1);
+                    ui.end_row();
+                    let (min, max) = (p.min.unwrap_or(default.min), p.max.unwrap_or(default.max));
+                    label(ui, "Value");
+                    slider(ui, &mut p.value, default.value, min.min(max)..=max.max(min));
+                    ui.end_row();
+                    colors(ui, "Fill", &mut p.fill_color, default.fill.color);
+                    colors(
+                        ui,
+                        "Background",
+                        &mut p.background_color,
+                        default.background.color,
+                    );
+                    label(ui, "Show percentage");
+                    opt_bool(ui, &mut p.show_percentage, false);
+                    ui.end_row();
+                });
+            });
+        }
+        ui_class::VBOX_CONTAINER | ui_class::HBOX_CONTAINER => {
+            let b = desc.box_container.get_or_insert_with(BoxDesc::default);
+            section(ui, "box", icon::ROWS, "Container", |ui| {
+                grid(ui, "box_grid", |ui| {
+                    label(ui, "Separation");
+                    opt_f32(ui, &mut b.separation, 6.0, 0.0..=500.0, 0.2);
+                    ui.end_row();
+                    label(ui, "Alignment");
+                    choice(
+                        ui,
+                        "box_align",
+                        &mut b.alignment,
+                        "begin",
+                        &[("begin", "Begin"), ("center", "Center"), ("end", "End")],
+                    );
+                    ui.end_row();
+                });
+            });
+        }
+        ui_class::TEXTURE_RECT => {
+            let image = desc.image.get_or_insert_with(ImageDesc::default);
+            section(ui, "image", icon::IMAGE, "Image", |ui| {
+                grid(ui, "image_grid", |ui| {
+                    label(ui, "Texture");
+                    egui::ComboBox::from_id_salt("image_texture")
+                        .selected_text(image.texture.as_str())
+                        .width(ui.available_width() - 4.0)
+                        .show_ui(ui, |ui| {
+                            for asset in editor.assets.of_kind(AssetKind::Image) {
+                                if ui
+                                    .selectable_label(image.texture == asset.path, &asset.path)
+                                    .clicked()
+                                {
+                                    image.texture = asset.path.clone();
+                                }
+                            }
+                        });
+                    ui.end_row();
+                    label(ui, "Stretch");
+                    choice(
+                        ui,
+                        "image_stretch",
+                        &mut image.stretch,
+                        "scale",
+                        &[
+                            ("scale", "Fill"),
+                            ("keep_aspect", "Keep aspect"),
+                            ("cover", "Cover"),
+                        ],
+                    );
+                    ui.end_row();
+                    colors(ui, "Tint", &mut image.tint, Color::WHITE);
+                });
+            });
+        }
+        _ => {}
+    }
+    if desc.panel == Some(PanelDesc::default()) {
+        desc.panel = None;
+    }
+    if desc.progress == Some(ProgressDesc::default()) {
+        desc.progress = None;
+    }
+    if desc.box_container == Some(BoxDesc::default()) {
+        desc.box_container = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,6 +1927,22 @@ mod tests {
         }
     }
 
+    /// Every UI control and screen of the Create menu.
+    #[test]
+    fn looking_at_ui_nodes_changes_nothing() {
+        let assets = crate::projects::engine_root().unwrap().join("assets");
+        let mut editor = Editor::new(assets, None, ab_engine::audio::AudioOutput::Silent);
+        for template in crate::create::UI.iter().chain(crate::create::UI_SCREENS) {
+            let scene = crate::create::place_ui(&mut editor, template.scene());
+            editor.add_scene(scene, None);
+        }
+        let scene = crate::create::image(&editor).unwrap();
+        let scene = crate::create::place_ui(&mut editor, scene);
+        editor.add_scene(scene, None);
+        editor.modified = false;
+        check_editor(editor, "UI");
+    }
+
     fn check_scene(assets: &std::path::Path, scene: &str) {
         let mut editor = Editor::new(
             assets.to_path_buf(),
@@ -1209,6 +1951,10 @@ mod tests {
         );
         editor.open_scene(scene);
         assert!(editor.scene_path.is_some(), "{scene} opened");
+        check_editor(editor, scene);
+    }
+
+    fn check_editor(mut editor: Editor, scene: &str) {
         let ctx = egui::Context::default();
         let mut panel = InspectorPanel::default();
         let nodes = editor.tree().subtree(editor.scene_root);
@@ -1218,7 +1964,7 @@ mod tests {
             }
             let before = editor.describe_node(node);
             let path = editor.relative_path(node);
-            editor.selection = Some(node);
+            editor.select(Some(node));
             for _ in 0..3 {
                 let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                     egui::CentralPanel::default().show(ui, |ui| panel.show(ui, &mut editor));

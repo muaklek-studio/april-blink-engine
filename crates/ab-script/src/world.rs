@@ -15,7 +15,7 @@ use ab_script_api as ffi;
 /// A one-shot particle effect: a preset with optional changes ([`Tree::spawn_effect`]).
 ///
 /// Presets: `smoke`, `fire`, `embers`, `sparks`, `dust`, `magic`, `wisps`, `explosion`,
-/// `rain`, `snow`, `heal`, `fireflies`, `splash`, `leaves`.
+/// `rain`, `snow`, `heal`, `fireflies`, `splash`, `leaves`, `blood`, `blood_mist`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParticleEffect {
     preset: String,
@@ -104,6 +104,44 @@ pub struct Explosion {
     pub shake: f32,
     /// Screen distortion kick (0 = none).
     pub distortion: f32,
+}
+
+/// Blood from a wound: droplets, a fine mist and splats where the droplets land
+/// ([`Tree::spawn_blood`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Blood {
+    /// Which way the blood leaves the wound: the hit's direction, or the surface normal.
+    pub direction: Vec3,
+    /// How much: 1 a normal hit, 2-3 a heavy one, 0.5 a graze.
+    pub amount: f32,
+    /// Splats left on nearby surfaces (0 = none).
+    pub splats: u32,
+    /// Seconds a splat stays before it dries away (`None`: the engine's 20 s).
+    pub splat_lifetime: Option<f32>,
+    /// Colour of fresh blood (`None`: dark red).
+    pub color: Option<Color>,
+}
+
+impl Blood {
+    /// Blood thrown along `direction`.
+    pub fn along(direction: Vec3) -> Self {
+        Self {
+            direction,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for Blood {
+    fn default() -> Self {
+        Self {
+            direction: Vec3::Y,
+            amount: 1.0,
+            splats: 4,
+            splat_lifetime: None,
+            color: None,
+        }
+    }
 }
 
 impl Default for Explosion {
@@ -322,6 +360,20 @@ impl<'a> Tree<'a> {
         self.created(method!("effects.spawn"), &args)
     }
 
+    /// Plays an effect scene made in the editor's Effect editor (`effects/blast.toml`) at
+    /// `position` under `parent`; freed once its one-shot layers and flashes are done.
+    pub fn spawn_effect_scene(
+        &mut self,
+        parent: Node,
+        position: Vec3,
+        path: &str,
+    ) -> Result<Node, Error> {
+        self.created(
+            method!("effects.spawn_scene"),
+            &[parent.to_value(), position.to_value(), path.to_value()],
+        )
+    }
+
     /// An explosion at `position` under `parent`; freed when done.
     pub fn spawn_explosion(
         &mut self,
@@ -338,6 +390,28 @@ impl<'a> Tree<'a> {
                 explosion.flash.to_value(),
                 explosion.shake.to_value(),
                 explosion.distortion.to_value(),
+            ],
+        )
+    }
+
+    /// Blood at `position` under `parent` (particles freed when done; splats on the
+    /// surfaces around fade on their own).
+    pub fn spawn_blood(
+        &mut self,
+        parent: Node,
+        position: Vec3,
+        blood: Blood,
+    ) -> Result<Node, Error> {
+        self.created(
+            method!("effects.blood"),
+            &[
+                parent.to_value(),
+                position.to_value(),
+                blood.direction.to_value(),
+                blood.amount.to_value(),
+                blood.splats.to_value(),
+                blood.splat_lifetime.to_value(),
+                blood.color.to_value(),
             ],
         )
     }
@@ -483,6 +557,73 @@ impl<'a> Tree<'a> {
         LightRef { tree: self, node }
     }
 
+    /// Sends `damage` (`amount`) to `target` like `emit_with(target, "damage", amount)`, and
+    /// records `source` as the attacker in the engine's damage trace (F9, the editor's Debug
+    /// panel).
+    pub fn deal_damage(
+        &mut self,
+        source: Option<Node>,
+        target: Node,
+        amount: f32,
+    ) -> Result<(), Error> {
+        self.run(
+            method!("trace.damage"),
+            &[source.to_value(), target.to_value(), amount.to_value()],
+        )
+    }
+
+    /// Sends `heal` (`amount`) to `target`, recording `source` as the healer.
+    pub fn heal(&mut self, source: Option<Node>, target: Node, amount: f32) -> Result<(), Error> {
+        self.run(
+            method!("trace.heal"),
+            &[source.to_value(), target.to_value(), amount.to_value()],
+        )
+    }
+
+    /// Adds a line to `node`'s history in the trace ("state: chasing", "reloading").
+    pub fn trace_note(&mut self, node: Node, text: &str) -> Result<(), Error> {
+        self.run(method!("trace.note"), &[node.to_value(), text.to_value()])
+    }
+
+    /// Follows `node` in the trace: its trail, speed and every signal it emits.
+    pub fn trace_watch(&mut self, node: Node, watch: bool) -> Result<(), Error> {
+        self.run(method!("trace.watch"), &[node.to_value(), watch.to_value()])
+    }
+
+    /// Reports `node`'s health to the trace (health scripts call it after every change).
+    pub fn report_health(&mut self, node: Node, current: f32, max: f32) -> Result<(), Error> {
+        self.run(
+            method!("trace.health"),
+            &[node.to_value(), current.to_value(), max.to_value()],
+        )
+    }
+
+    /// Makes the 3D node `node` (a pivot between the character and its camera) move like a
+    /// head: bobbing with the steps, swaying, tilting into strafes, dipping on landings,
+    /// from the character's real movement. `strength`: 1 natural, 0.5 subtle, 0 off.
+    /// `follow`: a head bone to ride on (full-body first person).
+    pub fn set_head_bob(
+        &mut self,
+        node: Node,
+        strength: f32,
+        follow: Option<Node>,
+    ) -> Result<(), Error> {
+        self.run(
+            method!("head_bob.set"),
+            &[node.to_value(), strength.to_value(), follow.to_value()],
+        )
+    }
+
+    /// The animations of the model at `node`: play, crossfade, stop.
+    pub fn animation(&mut self, node: Node) -> AnimationRef<'_, 'a> {
+        AnimationRef { tree: self, node }
+    }
+
+    /// The locomotion of the model at `node`: clips picked and blended from movement.
+    pub fn locomotion(&mut self, node: Node) -> LocomotionRef<'_, 'a> {
+        LocomotionRef { tree: self, node }
+    }
+
     /// The node's `Camera3D`.
     pub fn camera(&mut self, node: Node) -> CameraRef<'_, 'a> {
         CameraRef { tree: self, node }
@@ -544,6 +685,186 @@ impl TimerRef<'_, '_> {
 
     pub fn is_stopped(&self) -> bool {
         self.tree.get(self.node, "timer.stopped").unwrap_or(true)
+    }
+}
+
+/// A model's animations ([`Tree::animation`]): `node` is the model, or any node above its
+/// animation player.
+#[derive(Debug)]
+pub struct AnimationRef<'t, 'a> {
+    tree: &'t mut Tree<'a>,
+    node: Node,
+}
+
+impl AnimationRef<'_, '_> {
+    /// Plays the clip `name` from its start, looping.
+    pub fn play(&mut self, name: &str) -> Result<(), Error> {
+        self.crossfade(name, 0.0)
+    }
+
+    /// Plays the clip `name` once (it holds its last pose).
+    pub fn play_once(&mut self, name: &str) -> Result<(), Error> {
+        self.tree.run(
+            method!("animation.play"),
+            &[
+                self.node.to_value(),
+                name.to_value(),
+                0.0f32.to_value(),
+                false.to_value(),
+            ],
+        )
+    }
+
+    /// Plays the clip `name`, blending from the current pose over `seconds`.
+    pub fn crossfade(&mut self, name: &str, seconds: f32) -> Result<(), Error> {
+        self.tree.run(
+            method!("animation.play"),
+            &[
+                self.node.to_value(),
+                name.to_value(),
+                seconds.to_value(),
+                true.to_value(),
+            ],
+        )
+    }
+
+    pub fn stop(&mut self) -> Result<(), Error> {
+        self.tree
+            .run(method!("animation.stop"), &[self.node.to_value()])
+    }
+
+    /// Playback rate: 1 normal, 2 twice as fast, negative backwards.
+    pub fn set_speed(&mut self, speed: f32) -> Result<(), Error> {
+        self.tree.run(
+            method!("animation.set_speed"),
+            &[self.node.to_value(), speed.to_value()],
+        )
+    }
+
+    /// The clip playing.
+    pub fn current(&self) -> Option<String> {
+        self.tree
+            .query(method!("animation.current"), &[self.node.to_value()])
+    }
+
+    /// Whether a clip is playing (a clip played once has stopped at its end).
+    pub fn is_playing(&self) -> bool {
+        self.tree
+            .query(method!("animation.is_playing"), &[self.node.to_value()])
+            .unwrap_or(false)
+    }
+
+    /// The names of the model's clips.
+    pub fn clips(&self) -> Vec<String> {
+        self.tree
+            .query::<String>(method!("animation.clips"), &[self.node.to_value()])
+            .map(|list| {
+                list.split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// What a [`LocomotionRef`] is playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocomotionState {
+    Ground,
+    Jump,
+    Fall,
+    Climb,
+    Action,
+}
+
+/// A model's locomotion ([`Tree::locomotion`]): it picks and blends the model's clips from
+/// how the character moves. Call [`LocomotionRef::update`] every frame; the clips are the
+/// usual `Idle`, `Walk`, `Run`, `Jump`, `Fall`, `Climb` unless [`LocomotionRef::set_clips`]
+/// says otherwise.
+#[derive(Debug)]
+pub struct LocomotionRef<'t, 'a> {
+    tree: &'t mut Tree<'a>,
+    node: Node,
+}
+
+impl LocomotionRef<'_, '_> {
+    /// How the character moves this frame: horizontal speed (m/s), on the ground, vertical
+    /// speed (m/s; along the wall when climbing), climbing.
+    pub fn update(
+        &mut self,
+        speed: f32,
+        grounded: bool,
+        vertical_speed: f32,
+        climbing: bool,
+    ) -> Result<(), Error> {
+        self.tree.run(
+            method!("locomotion.update"),
+            &[
+                self.node.to_value(),
+                speed.to_value(),
+                grounded.to_value(),
+                vertical_speed.to_value(),
+                climbing.to_value(),
+            ],
+        )
+    }
+
+    /// Plays `clip` once over the movement (attack, reload, dodge), then goes back to it.
+    pub fn play_action(&mut self, clip: &str) -> Result<(), Error> {
+        self.tree.run(
+            method!("locomotion.action"),
+            &[self.node.to_value(), clip.to_value()],
+        )
+    }
+
+    pub fn is_action_playing(&self) -> bool {
+        self.tree
+            .query(
+                method!("locomotion.action_playing"),
+                &[self.node.to_value()],
+            )
+            .unwrap_or(false)
+    }
+
+    pub fn state(&self) -> LocomotionState {
+        let state: Option<String> = self
+            .tree
+            .query(method!("locomotion.state"), &[self.node.to_value()]);
+        match state.as_deref() {
+            Some("jump") => LocomotionState::Jump,
+            Some("fall") => LocomotionState::Fall,
+            Some("climb") => LocomotionState::Climb,
+            Some("action") => LocomotionState::Action,
+            _ => LocomotionState::Ground,
+        }
+    }
+
+    /// The clips to use: ground clips with the speed (m/s) each was made for
+    /// (`&[("Idle", 0.0), ("Walk", 1.5), ("Run", 4.2)]`), and the jump, fall and climb clips
+    /// (`None`: not used).
+    pub fn set_clips(
+        &mut self,
+        ground: &[(&str, f32)],
+        jump: Option<&str>,
+        fall: Option<&str>,
+        climb: Option<&str>,
+    ) -> Result<(), Error> {
+        let ground: Vec<String> = ground
+            .iter()
+            .map(|(name, speed)| format!("{name}:{speed}"))
+            .collect();
+        let or_empty = |s: Option<&str>| s.unwrap_or("").to_owned();
+        self.tree.run(
+            method!("locomotion.set_clips"),
+            &[
+                self.node.to_value(),
+                ground.join(",").as_str().to_value(),
+                or_empty(jump).as_str().to_value(),
+                or_empty(fall).as_str().to_value(),
+                or_empty(climb).as_str().to_value(),
+            ],
+        )
     }
 }
 

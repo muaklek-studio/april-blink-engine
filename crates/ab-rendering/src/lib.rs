@@ -15,6 +15,7 @@
 //! [`Environment`] resource and creates nodes through [`RenderNodes`].
 
 mod assets;
+mod bounds;
 mod camera;
 mod components;
 mod debug_draw;
@@ -30,19 +31,22 @@ mod texture;
 mod ui;
 
 pub use assets::{MaterialHandle, MeshHandle, RenderAssets, TextureHandle};
+pub use bounds::{entity_mesh_bounds, for_each_mesh_bounds, posed_bounds, Bounds, MeshBounds};
 pub use camera::{CameraView, Frustum};
 pub use components::{
     Camera3D, DirectionalLight3D, MeshInstance3D, OmniLight3D, Skin, SpotLight3D,
 };
 pub use debug_draw::{debug_draw_system, DebugBrush, DebugDraw, DebugLine, MAX_DEBUG_LINES};
-pub use environment::{Bloom, Environment, Fog, PostProcess, ScreenOverlay, ShadowSettings};
+pub use environment::{
+    Bloom, Environment, Fog, LightShafts, PostProcess, ScreenOverlay, ShadowSettings,
+};
 pub use extract::{
     extract, CameraOverride, DirectionalLightData, DrawItem, OmniLightData, RenderList,
     SpotLightData,
 };
 pub use gpu::{
-    instance_flags, test_gpu_context, FrameStats, GpuContext, OffscreenTarget, RenderError,
-    RendererConfig, SceneRenderer, WindowRenderer,
+    backend_name, instance_flags, test_gpu_context, AdapterCandidate, FrameStats, GpuContext,
+    OffscreenTarget, RenderError, RendererConfig, SceneRenderer, WindowRenderer,
 };
 pub use material::Material;
 pub use mesh::{Aabb, Mesh, MeshError, SkinWeights, Vertex};

@@ -1,6 +1,6 @@
 //! Global look of the scene (Godot's `WorldEnvironment`), stored as an ECS resource.
 
-use ab_core::Color;
+use ab_core::{Color, Vec3};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Environment {
@@ -9,6 +9,7 @@ pub struct Environment {
     pub ambient_color: Color,
     pub ambient_energy: f32,
     pub fog: Fog,
+    pub light_shafts: LightShafts,
     pub post: PostProcess,
     pub shadows: ShadowSettings,
 }
@@ -20,13 +21,44 @@ impl Default for Environment {
             ambient_color: Color::WHITE,
             ambient_energy: 0.15,
             fog: Fog::default(),
+            light_shafts: LightShafts::default(),
             post: PostProcess::default(),
             shadows: ShadowSettings::default(),
         }
     }
 }
 
-/// Exponential height fog: thickest below `height`, thinning above it.
+/// Volumetric light: beams where the sun and spot lights shine through openings (windows,
+/// gaps between trees, a flashlight's cone in dusty air), shadowed by everything that casts
+/// shadows. Traced through the shadow maps at half resolution; lights without shadows light
+/// the air evenly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightShafts {
+    pub enabled: bool,
+    /// Brightness of the beams.
+    pub intensity: f32,
+    /// How thick the air is, per metre. With fog on, the fog's density adds to it.
+    pub density: f32,
+    /// How much light scatters forwards: 0 every way, 0.8 bright looking towards the light.
+    pub anisotropy: f32,
+    /// How far from the camera the beams are traced, in metres.
+    pub max_distance: f32,
+}
+
+impl Default for LightShafts {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 1.0,
+            density: 0.03,
+            anisotropy: 0.6,
+            max_distance: 60.0,
+        }
+    }
+}
+
+/// Exponential height fog: thickest below `height`, thinning above it, glowing towards the
+/// sun, and broken into patches that the wind blows along.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fog {
     pub enabled: bool,
@@ -39,6 +71,16 @@ pub struct Fog {
     pub height_falloff: f32,
     /// Upper bound on fog opacity (keeps distant silhouettes faintly visible).
     pub max_opacity: f32,
+    /// Brightness of the sun's light scattered by the fog towards the camera (0 = none).
+    pub sun_scattering: f32,
+    /// How tightly that glow gathers around the sun: 0 even, 0.9 a tight halo.
+    pub sun_scattering_anisotropy: f32,
+    /// How uneven the fog is near the camera: 0 even, 1 clear gaps between thick banks.
+    pub patchiness: f32,
+    /// Size of the patches in metres.
+    pub patch_size: f32,
+    /// Wind that blows the patches along, in metres per second.
+    pub wind: Vec3,
 }
 
 impl Default for Fog {
@@ -50,6 +92,11 @@ impl Default for Fog {
             height: 0.0,
             height_falloff: 0.0,
             max_opacity: 1.0,
+            sun_scattering: 0.35,
+            sun_scattering_anisotropy: 0.65,
+            patchiness: 0.0,
+            patch_size: 14.0,
+            wind: Vec3::new(1.2, 0.0, 0.5),
         }
     }
 }

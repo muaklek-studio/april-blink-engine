@@ -229,6 +229,139 @@ fn fog_and_vignette_change_the_image() {
 }
 
 #[test]
+fn fog_patches_drift_with_the_wind_and_the_sun_lights_the_fog() {
+    let Some(gpu) = gpu() else { return };
+    let mut scene = scene();
+    let set_time = |tree: &mut SceneTree, seconds: f64| {
+        let mut time = ab_core::Time::new(1.0 / 60.0);
+        time.elapsed = seconds;
+        tree.world_mut().insert_resource(time);
+    };
+    {
+        let mut env = scene.tree.world().resource_mut::<Environment>().unwrap();
+        env.fog.enabled = true;
+        env.fog.color = Color::rgb(0.8, 0.8, 0.8);
+        env.fog.density = 0.25;
+        env.fog.sun_scattering = 0.0;
+    }
+    set_time(&mut scene.tree, 0.0);
+    let even = render(&gpu, &scene.tree, 1);
+    {
+        let mut env = scene.tree.world().resource_mut::<Environment>().unwrap();
+        env.fog.patchiness = 1.0;
+        env.fog.patch_size = 1.5;
+        env.fog.wind = Vec3::new(4.0, 0.0, 1.0);
+    }
+    let patchy = render(&gpu, &scene.tree, 1);
+    // How much the floor's brightness varies across the lower half of the image.
+    let spread = |p: &[[u8; 4]]| {
+        let row: Vec<f32> = (SIZE / 2..SIZE)
+            .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+            .map(|(x, y)| f32::from(pixel(p, x, y)[1]))
+            .collect();
+        let mean = row.iter().sum::<f32>() / row.len() as f32;
+        (row.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / row.len() as f32).sqrt()
+    };
+    assert!(
+        spread(&patchy) > spread(&even) + 2.0,
+        "patches make the fog uneven: {} vs {}",
+        spread(&patchy),
+        spread(&even)
+    );
+    set_time(&mut scene.tree, 0.7);
+    let later = render(&gpu, &scene.tree, 1);
+    let changed = later.iter().zip(&patchy).filter(|(a, b)| a != b).count();
+    assert!(
+        changed > (SIZE * SIZE / 10) as usize,
+        "the wind moves them: {changed}"
+    );
+
+    {
+        let mut env = scene.tree.world().resource_mut::<Environment>().unwrap();
+        env.fog.patchiness = 0.0;
+        env.fog.sun_scattering = 3.0;
+        env.fog.sun_scattering_anisotropy = 0.0;
+    }
+    let lit = render(&gpu, &scene.tree, 1);
+    assert!(
+        mean_luma(&lit) > mean_luma(&even) + 5.0,
+        "sunlight scattered in the fog brightens it: {} vs {}",
+        mean_luma(&lit),
+        mean_luma(&even)
+    );
+}
+
+#[test]
+fn light_shafts_light_the_air_but_not_in_shadow() {
+    let Some(gpu) = gpu() else { return };
+    let scene = scene();
+    let base = render(&gpu, &scene.tree, 1);
+    {
+        let mut env = scene.tree.world().resource_mut::<Environment>().unwrap();
+        env.light_shafts.enabled = true;
+        env.light_shafts.density = 0.3;
+        env.light_shafts.anisotropy = 0.0;
+        env.light_shafts.intensity = 2.0;
+    }
+    let shafts = render(&gpu, &scene.tree, 4);
+    assert!(
+        mean_luma(&shafts) > mean_luma(&base) + 4.0,
+        "lit air brightens the view: {} vs {}",
+        mean_luma(&shafts),
+        mean_luma(&base)
+    );
+    // A roof above the camera shadows all the air in view: the beams are gone.
+    let mut scene = scene;
+    {
+        let tree = &mut scene.tree;
+        let mesh = tree
+            .world()
+            .resource_mut::<RenderAssets>()
+            .unwrap()
+            .add_mesh(Mesh::cube(1.0))
+            .unwrap();
+        let material = tree
+            .world()
+            .resource_mut::<RenderAssets>()
+            .unwrap()
+            .add_material(Material::default());
+        let roof = tree.create_mesh_instance3d("Roof", MeshInstance3D::new(mesh, material));
+        tree.set_transform(
+            roof,
+            Transform3D::from_trs(
+                Vec3::new(0.0, 7.0, 0.0),
+                Default::default(),
+                Vec3::new(60.0, 0.2, 60.0),
+            ),
+        )
+        .unwrap();
+        let root = tree.root();
+        tree.add_child(root, roof).unwrap();
+        tree.update_transforms();
+    }
+    let roofed_base = {
+        let mut env = scene.tree.world().resource_mut::<Environment>().unwrap();
+        env.light_shafts.enabled = false;
+        drop(env);
+        render(&gpu, &scene.tree, 4)
+    };
+    scene
+        .tree
+        .world()
+        .resource_mut::<Environment>()
+        .unwrap()
+        .light_shafts
+        .enabled = true;
+    let roofed = render(&gpu, &scene.tree, 4);
+    let open_gain = mean_luma(&shafts) - mean_luma(&base);
+    let roofed_gain = mean_luma(&roofed) - mean_luma(&roofed_base);
+    assert!(
+        roofed_gain < open_gain * 0.25,
+        "shadowed air stays dark: {roofed_gain} vs {open_gain}"
+    );
+}
+
+#[test]
 fn bloom_spreads_bright_light_into_its_surroundings() {
     let Some(gpu) = gpu() else { return };
     let scene = scene();

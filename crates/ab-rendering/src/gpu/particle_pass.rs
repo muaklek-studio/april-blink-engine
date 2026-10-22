@@ -74,7 +74,13 @@ impl ParticlePass {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("particles.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/particles.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/fog.wgsl"),
+                    include_str!("../shaders/particles.wgsl")
+                )
+                .into(),
+            ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle pipeline layout"),
@@ -116,7 +122,8 @@ impl ParticlePass {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    // Alpha holds the distance from the camera (light shafts).
+                    write_mask: wgpu::ColorWrites::COLOR,
                 })],
             }),
             multiview_mask: None,

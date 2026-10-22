@@ -37,11 +37,16 @@ pub struct SceneTreePanel {
     last_selection: Option<NodeHandle>,
     /// Double-clicked: the viewport should frame the selection.
     pub frame_request: bool,
+    /// The rows drawn this frame, top to bottom (Shift+click selects a range of them).
+    rows: Vec<NodeHandle>,
 }
 
 /// Deferred edits, applied after drawing (the tree is borrowed while drawing).
 enum Action {
+    /// A click (with the modifiers of this frame: Ctrl toggles, Shift selects a range).
     Select(NodeHandle),
+    /// A right-click, before the context menu acts.
+    SelectForMenu(NodeHandle),
     Rename(NodeHandle, String),
     Delete(NodeHandle),
     Duplicate(NodeHandle),
@@ -100,6 +105,7 @@ impl SceneTreePanel {
         ui.add_space(2.0);
 
         let mut actions = Vec::new();
+        let previous_rows = std::mem::take(&mut self.rows);
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -122,24 +128,47 @@ impl SceneTreePanel {
                     actions.push(Action::Instance(path.0.clone(), editor.scene_root));
                 }
                 if rest.clicked() {
-                    editor.selection = None;
+                    editor.select(None);
                 }
             });
         self.reveal = None;
 
+        let modifiers = ui.input(|i| i.modifiers);
         for action in actions {
             match action {
-                Action::Select(node) => editor.selection = Some(node),
+                Action::Select(node) => select_row(editor, node, modifiers, &previous_rows),
+                Action::SelectForMenu(node) => {
+                    // Right-clicking inside a multi-selection keeps it.
+                    if !editor.is_selected(node) {
+                        editor.select(Some(node));
+                    }
+                }
                 Action::Rename(node, name) => {
                     editor.rename(node, &name);
                     editor.end_gesture();
                 }
+                Action::Delete(node) if editor.is_selected(node) => editor.delete_selected(),
                 Action::Delete(node) => editor.delete(node),
+                Action::Duplicate(node) if editor.is_selected(node) => {
+                    editor.duplicate_selected();
+                }
                 Action::Duplicate(node) => editor.duplicate(node),
                 Action::Move(node, step) => editor.move_sibling(node, step),
-                Action::Drop(node, target, at) => drop_node(editor, node, target, at),
+                Action::Drop(node, target, at) => {
+                    // Dragging a selected node moves the whole selection.
+                    let nodes = if editor.is_selected(node) {
+                        let mut roots = editor.selected_roots();
+                        // In tree order, so they keep their order at the drop.
+                        let order = editor.tree().subtree(editor.scene_root);
+                        roots.sort_by_key(|n| order.iter().position(|o| o == n));
+                        roots
+                    } else {
+                        vec![node]
+                    };
+                    drop_nodes(editor, &nodes, target, at);
+                }
                 Action::Instance(path, parent) => {
-                    editor.selection = Some(parent);
+                    editor.select(Some(parent));
                     crate::app::instance_asset(editor, &path, None);
                 }
                 Action::AttachScript(node, name) => editor.attach_script(node, &name),
@@ -181,7 +210,8 @@ impl SceneTreePanel {
                 continue;
             }
             any = true;
-            let selected = editor.selection == Some(node);
+            self.rows.push(node);
+            let selected = editor.is_selected(node);
             let path = editor.relative_path(node).unwrap_or_default();
             let (rect, response) = ui
                 .allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
@@ -239,7 +269,9 @@ impl SceneTreePanel {
             tree.children(node)
         };
         let open = !self.collapsed.contains(&path);
-        let selected = editor.selection == Some(node);
+        let selected = editor.is_selected(node);
+        let active = editor.selection == Some(node);
+        self.rows.push(node);
         let visible = tree.is_visible(node);
         // The first script, and how many more.
         let scripts = tree.script_names(node);
@@ -256,6 +288,14 @@ impl SceneTreePanel {
             response.scroll_to_me(Some(egui::Align::Center));
         }
         paint_row_background(ui, rect, selected, response.hovered());
+        if active && editor.selected.len() > 1 {
+            // The active node of a multi-selection (shown in the inspector).
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+                1.0,
+                theme::ACCENT,
+            );
+        }
 
         // Drop target feedback.
         let mut drop_at = None;
@@ -434,6 +474,9 @@ impl SceneTreePanel {
             actions.push(Action::Select(node));
             self.frame_request = true;
         }
+        if response.secondary_clicked() {
+            actions.push(Action::SelectForMenu(node));
+        }
         if node != editor.scene_root && !editor.is_playing() {
             response.dnd_set_drag_payload(NodeDrag(node));
         }
@@ -450,7 +493,6 @@ impl SceneTreePanel {
         }
 
         response.context_menu(|ui| {
-            actions.push(Action::Select(node));
             let editable = !editor.is_playing();
             ui.add_enabled_ui(editable, |ui| {
                 if ui
@@ -559,5 +601,54 @@ fn drop_node(editor: &mut Editor, node: NodeHandle, target: NodeHandle, at: Drop
             editor.reparent(node, parent, Some(index));
         }
     }
-    editor.selection = Some(node);
+}
+
+/// Drops `nodes` on `target` as one undo step, keeping their order, and selects them.
+fn drop_nodes(editor: &mut Editor, nodes: &[NodeHandle], target: NodeHandle, at: DropAt) {
+    // A node cannot go into itself or into one of its own children.
+    let nodes: Vec<NodeHandle> = nodes
+        .iter()
+        .copied()
+        .filter(|&n| n != target && !editor.tree().is_ancestor_of(n, target))
+        .collect();
+    let active = editor.selection;
+    editor.as_one_step(|editor| {
+        let (mut target, mut at) = (target, at);
+        for &node in &nodes {
+            drop_node(editor, node, target, at);
+            // The next ones follow it.
+            if at != DropAt::Into {
+                target = node;
+                at = DropAt::After;
+            }
+        }
+    });
+    editor.set_selection(nodes, active);
+}
+
+/// A click on a row: selects it; Ctrl adds or removes it, Shift selects every row from the
+/// active one to it.
+fn select_row(
+    editor: &mut Editor,
+    node: NodeHandle,
+    modifiers: egui::Modifiers,
+    rows: &[NodeHandle],
+) {
+    if modifiers.command {
+        editor.toggle_selected(node);
+    } else if modifiers.shift {
+        let anchor = editor
+            .selection
+            .and_then(|a| rows.iter().position(|&r| r == a));
+        match (anchor, rows.iter().position(|&r| r == node)) {
+            (Some(a), Some(b)) => {
+                let range = rows[a.min(b)..=a.max(b)].to_vec();
+                editor.add_to_selection(&range);
+                editor.set_selection(editor.selected.clone(), Some(node));
+            }
+            _ => editor.add_to_selection(&[node]),
+        }
+    } else {
+        editor.select(Some(node));
+    }
 }

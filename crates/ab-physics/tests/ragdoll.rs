@@ -350,3 +350,225 @@ fn debug_lines_cover_shapes_and_joints() {
     );
     assert_eq!(none, 0);
 }
+
+/// A Mixamo-style character skeleton in T-pose (facing +Z, 1.8 m tall), as bone nodes under
+/// an `Armature` node. Returns the armature and the bones.
+fn mixamo_skeleton(tree: &mut SceneTree) -> (NodeHandle, Vec<NodeHandle>) {
+    // (name, parent, global position)
+    let rig: &[(&str, &str, [f32; 3])] = &[
+        ("mixamorig:Hips", "", [0.0, 1.0, 0.0]),
+        ("mixamorig:Spine", "mixamorig:Hips", [0.0, 1.1, 0.0]),
+        ("mixamorig:Spine1", "mixamorig:Spine", [0.0, 1.22, 0.0]),
+        ("mixamorig:Spine2", "mixamorig:Spine1", [0.0, 1.35, 0.0]),
+        ("mixamorig:Neck", "mixamorig:Spine2", [0.0, 1.55, 0.0]),
+        ("mixamorig:Head", "mixamorig:Neck", [0.0, 1.63, 0.0]),
+        (
+            "mixamorig:LeftShoulder",
+            "mixamorig:Spine2",
+            [0.07, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:LeftArm",
+            "mixamorig:LeftShoulder",
+            [0.18, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:LeftForeArm",
+            "mixamorig:LeftArm",
+            [0.45, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:LeftHand",
+            "mixamorig:LeftForeArm",
+            [0.7, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:LeftHandIndex1",
+            "mixamorig:LeftHand",
+            [0.78, 1.48, 0.02],
+        ),
+        (
+            "mixamorig:RightShoulder",
+            "mixamorig:Spine2",
+            [-0.07, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:RightArm",
+            "mixamorig:RightShoulder",
+            [-0.18, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:RightForeArm",
+            "mixamorig:RightArm",
+            [-0.45, 1.48, 0.0],
+        ),
+        (
+            "mixamorig:RightHand",
+            "mixamorig:RightForeArm",
+            [-0.7, 1.48, 0.0],
+        ),
+        ("mixamorig:LeftUpLeg", "mixamorig:Hips", [0.09, 0.95, 0.0]),
+        (
+            "mixamorig:LeftLeg",
+            "mixamorig:LeftUpLeg",
+            [0.09, 0.52, 0.0],
+        ),
+        ("mixamorig:LeftFoot", "mixamorig:LeftLeg", [0.09, 0.09, 0.0]),
+        (
+            "mixamorig:LeftToeBase",
+            "mixamorig:LeftFoot",
+            [0.09, 0.02, 0.14],
+        ),
+        ("mixamorig:RightUpLeg", "mixamorig:Hips", [-0.09, 0.95, 0.0]),
+        (
+            "mixamorig:RightLeg",
+            "mixamorig:RightUpLeg",
+            [-0.09, 0.52, 0.0],
+        ),
+        (
+            "mixamorig:RightFoot",
+            "mixamorig:RightLeg",
+            [-0.09, 0.09, 0.0],
+        ),
+        (
+            "mixamorig:RightToeBase",
+            "mixamorig:RightFoot",
+            [-0.09, 0.02, 0.14],
+        ),
+    ];
+    let armature = tree.create_node3d("Armature");
+    tree.add_child(tree.root(), armature).unwrap();
+    let mut bones: Vec<NodeHandle> = Vec::new();
+    for (name, parent, at) in rig {
+        let node = tree.create_node3d(name);
+        let parent = rig
+            .iter()
+            .position(|(n, ..)| n == parent)
+            .map_or(armature, |i| bones[i]);
+        tree.add_child(parent, node).unwrap();
+        tree.update_transforms();
+        tree.set_global_position(node, Vec3::from(*at)).unwrap();
+        bones.push(node);
+    }
+    tree.update_transforms();
+    (armature, bones)
+}
+
+#[test]
+fn a_humanoid_ragdoll_maps_any_rig_and_falls_in_one_piece() {
+    use ab_physics::{create_humanoid_ragdoll, HumanBone, HumanoidMap, HumanoidRagdollSettings};
+    let mut tree = new_tree();
+    floor(&mut tree);
+    let (armature, bones) = mixamo_skeleton(&mut tree);
+    let map = HumanoidMap::detect(&tree, &bones);
+    assert!(map.is_complete(), "missing {:?}", map.missing());
+    assert_eq!(map.iter().count(), 17);
+    assert_eq!(
+        map.get(HumanBone::LeftUpperArm)
+            .and_then(|b| tree.name(b).map(|n| n.to_owned()))
+            .as_deref(),
+        Some("mixamorig_LeftArm"),
+        "node names have `_` for `:`"
+    );
+
+    let settings = HumanoidRagdollSettings {
+        active: true,
+        ..Default::default()
+    };
+    let doll = create_humanoid_ragdoll(&mut tree, armature, "Ragdoll", &map, &settings).unwrap();
+    let parts = tree.ragdoll_parts(doll);
+    assert_eq!(
+        parts.len(),
+        14,
+        "pelvis, belly, chest, head, 2 × (2 arm + 2 leg + foot)"
+    );
+    let total: f32 = parts
+        .iter()
+        .map(|&p| tree.component::<PhysicsBody3D>(p).unwrap().mass)
+        .sum();
+    assert!((total - 70.0).abs() < 0.01, "{total}");
+    let joints = tree
+        .children(doll)
+        .into_iter()
+        .filter(|&n| tree.component::<Joint3D>(n).is_some())
+        .count();
+    assert_eq!(
+        joints, 13,
+        "waist, spine, neck, 2 × (shoulder, elbow, hip, knee, ankle)"
+    );
+
+    let head_bone = map.get(HumanBone::Head).unwrap();
+    let start = tree.global_position(head_bone).unwrap();
+    steps(&mut tree, 300);
+    // Down on the floor, in one piece: every part near the others, nothing under the floor
+    // or flung away.
+    let head = tree.global_position(head_bone).unwrap();
+    assert!(head.y < start.y - 0.8, "the head fell: {head}");
+    let centre = tree.global_position(parts[0]).unwrap();
+    for &part in &parts {
+        let at = tree.global_position(part).unwrap();
+        assert!(at.is_finite() && at.y > -0.05, "{at}");
+        assert!(
+            at.distance(centre) < 1.3,
+            "{} drifted to {at}",
+            tree.name(part).unwrap()
+        );
+    }
+    // The bones went with their bodies.
+    let hips = tree
+        .global_position(map.get(HumanBone::Hips).unwrap())
+        .unwrap();
+    assert!(hips.distance(centre) < 0.3, "{hips} vs {centre}");
+}
+
+#[test]
+fn an_inactive_humanoid_ragdoll_follows_the_animation() {
+    use ab_physics::{create_humanoid_ragdoll, HumanBone, HumanoidMap, HumanoidRagdollSettings};
+    let mut tree = new_tree();
+    let (armature, bones) = mixamo_skeleton(&mut tree);
+    let map = HumanoidMap::detect(&tree, &bones);
+    let doll = create_humanoid_ragdoll(
+        &mut tree,
+        armature,
+        "Ragdoll",
+        &map,
+        &HumanoidRagdollSettings::default(),
+    )
+    .unwrap();
+    steps(&mut tree, 2);
+    let forearm = map.get(HumanBone::LeftLowerArm).unwrap();
+    let part = tree
+        .ragdoll_parts(doll)
+        .into_iter()
+        .find(|&p| {
+            tree.component::<RagdollBone>(p)
+                .is_some_and(|b| b.bone == forearm)
+        })
+        .unwrap();
+    let before = tree.global_position(part).unwrap();
+    // "Animate" the elbow: the hit box follows.
+    tree.set_rotation(forearm, Quat::from_rotation_z(-1.2))
+        .unwrap();
+    steps(&mut tree, 2);
+    let after = tree.global_position(part).unwrap();
+    assert!(after.distance(before) > 0.05, "{before} → {after}");
+    assert!(!tree.is_ragdoll_active(doll));
+}
+
+#[test]
+fn a_rig_missing_a_limb_is_refused_with_its_name() {
+    use ab_physics::{create_humanoid_ragdoll, HumanBone, HumanoidRagdollSettings};
+    let mut tree = new_tree();
+    let (armature, bones) = mixamo_skeleton(&mut tree);
+    let mut map = ab_physics::HumanoidMap::detect(&tree, &bones);
+    map.set(HumanBone::RightLowerLeg, None);
+    let err = create_humanoid_ragdoll(
+        &mut tree,
+        armature,
+        "Ragdoll",
+        &map,
+        &HumanoidRagdollSettings::default(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("right_lower_leg"), "{err}");
+}

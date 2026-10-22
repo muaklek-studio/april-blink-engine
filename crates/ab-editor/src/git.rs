@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -271,7 +271,7 @@ pub type GitError = String;
 
 /// Runs `git -C dir args…` without any prompt and returns its standard output.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    let mut command = Command::new("git");
+    let mut command = ab_project::process::command("git");
     command
         .arg("-C")
         .arg(dir)
@@ -932,7 +932,7 @@ mod tests {
     }
 
     fn git_available() -> bool {
-        Command::new("git")
+        std::process::Command::new("git")
             .arg("--version")
             .output()
             .is_ok_and(|o| o.status.success())

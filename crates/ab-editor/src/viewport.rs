@@ -4,11 +4,11 @@
 use crate::state::{Editor, Mode};
 use crate::theme;
 use ab_engine::core::{Affine3A, Color, EulerRot, Mat4, Quat, Transform3D, Vec3, Vec4};
-use ab_engine::physics::{CollisionShape3D, Shape};
+use ab_engine::physics::{CollisionShape3D, PhysicsBody3D, Shape};
 use ab_engine::platform::PlatformEvent;
 use ab_engine::rendering::{
-    Camera3D, CameraOverride, CameraView, Environment, FrameStats, GpuContext, MeshInstance3D,
-    OffscreenTarget, RenderAssets, RendererConfig, SceneRenderer,
+    Aabb, Bounds, Camera3D, CameraOverride, CameraView, Environment, FrameStats, GpuContext,
+    MeshInstance3D, OffscreenTarget, RenderAssets, RendererConfig, SceneRenderer, Skin,
 };
 use ab_engine::scene::NodeHandle;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
@@ -40,6 +40,8 @@ pub struct ViewOptions {
     pub free_camera_in_play: bool,
     /// While editing: brighter ambient light and no fog, so dark levels stay workable.
     pub editor_lighting: bool,
+    /// While editing: select, move and resize UI controls in the view.
+    pub ui: bool,
 }
 
 impl Default for ViewOptions {
@@ -53,6 +55,7 @@ impl Default for ViewOptions {
             stats: true,
             free_camera_in_play: false,
             editor_lighting: true,
+            ui: true,
         }
     }
 }
@@ -273,6 +276,17 @@ enum Handle {
     Center,
 }
 
+/// What a gizmo drag does to each dragged node, relative to where it started.
+#[derive(Debug, Clone, Copy)]
+enum Change {
+    /// World offset.
+    Move(Vec3),
+    /// World rotation about the active node's origin.
+    Turn(Affine3A),
+    /// Scale factors along each node's own axes.
+    Scale(Vec3),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct GizmoDrag {
     node: NodeHandle,
@@ -292,6 +306,12 @@ pub struct Viewport {
     pub options: ViewOptions,
     renderer: Option<ViewportRenderer>,
     drag: Option<GizmoDrag>,
+    /// What the gizmo drag moves: each selected root with its transforms at the start.
+    drag_group: Vec<(NodeHandle, Affine3A, Transform3D)>,
+    /// A box selection in progress: where the drag started (screen).
+    marquee: Option<Pos2>,
+    /// A UI control being moved or resized.
+    ui_drag: Option<crate::ui_edit::UiDrag>,
     /// Play mode: the game receives keyboard and mouse input.
     pub game_focus: bool,
     cursor_grabbed: bool,
@@ -309,6 +329,9 @@ impl Viewport {
             options: ViewOptions::default(),
             renderer: state.map(ViewportRenderer::new),
             drag: None,
+            drag_group: Vec::new(),
+            marquee: None,
+            ui_drag: None,
             game_focus: false,
             cursor_grabbed: false,
             forwarding: false,
@@ -323,13 +346,26 @@ impl Viewport {
 
     /// Frames the selection (or the whole scene).
     pub fn frame_selection(&mut self, editor: &Editor) {
-        let node = editor.selection.unwrap_or(editor.scene_root);
-        let (center, radius) = match subtree_bounds(editor, node) {
-            Some((min, max)) => ((min + max) * 0.5, (max - min).length() * 0.5),
-            None => (
-                editor.tree().global_position(node).unwrap_or(Vec3::ZERO),
-                1.0,
-            ),
+        let mut nodes = editor.selected_nodes();
+        if nodes.is_empty() {
+            nodes.push(editor.scene_root);
+        }
+        let tree = editor.tree();
+        // Meshes by their bounds, other nodes (lights, cameras) by their position.
+        let bounds = nodes
+            .iter()
+            .filter_map(|&n| {
+                tree.subtree_bounds(n).or_else(|| {
+                    tree.global_position(n).map(|p| Aabb {
+                        min: p - Vec3::splat(0.5),
+                        max: p + Vec3::splat(0.5),
+                    })
+                })
+            })
+            .reduce(|a, b| a.union(&b));
+        let (center, radius) = match bounds {
+            Some(bounds) => (bounds.center(), bounds.size().length() * 0.5),
+            None => (Vec3::ZERO, 1.0),
         };
         self.camera.frame(center, radius);
     }
@@ -438,19 +474,72 @@ impl Viewport {
             if self.options.icons && !editor.is_playing() {
                 draw_icons(&painter, &projector, editor);
             }
-            if let Some(selected) = editor.selection {
-                draw_selection(&painter, &projector, editor, selected);
+            // While playing, the engine draws them in 3D itself.
+            let bounds_view = editor
+                .tree()
+                .world()
+                .resource::<ab_engine::DebugSettings>()
+                .is_some_and(|s| s.bounds);
+            if bounds_view && !editor.is_playing() {
+                draw_mesh_bounds(&painter, &projector, editor);
+            }
+            for node in editor.selected_nodes() {
+                let active = editor.selection == Some(node);
+                draw_selection(&painter, &projector, editor, node, active);
             }
         }
 
         let mut gizmo_hovered = false;
         if editor.mode == Mode::Edit {
-            gizmo_hovered = self.gizmo(ui, &response, &painter, &projector, editor);
+            // The gizmo first (it is drawn on top), then the UI controls over the scene.
+            if self.ui_drag.is_none() {
+                gizmo_hovered = self.gizmo(ui, &response, &painter, &projector, editor);
+            }
+            let ui_view = self
+                .options
+                .ui
+                .then(|| crate::ui_edit::UiView::new(editor, rect, ppp))
+                .flatten();
+            let mut ui_busy = false;
+            if let Some(view) = ui_view
+                .as_ref()
+                .filter(|_| self.drag.is_none() && !gizmo_hovered)
+            {
+                let snapping = self.options.snap || ui.input(|i| i.modifiers.command);
+                ui_busy = crate::ui_edit::edit(
+                    &mut self.ui_drag,
+                    ui,
+                    &response,
+                    &painter,
+                    view,
+                    editor,
+                    snapping,
+                );
+            }
             if response.clicked() && !gizmo_hovered {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    editor.selection = pick(editor, &projector, pos);
+                    let modifiers = ui.input(|i| i.modifiers);
+                    let control = ui_view.as_ref().and_then(|view| {
+                        let controls = crate::ui_edit::controls(editor);
+                        crate::ui_edit::pick(&controls, view, pos, editor)
+                    });
+                    match control.or_else(|| pick(editor, &projector, pos)) {
+                        Some(node) if modifiers.command => editor.toggle_selected(node),
+                        Some(node) if modifiers.shift => editor.add_to_selection(&[node]),
+                        // A click on nothing with a modifier keeps the selection.
+                        None if modifiers.command || modifiers.shift => {}
+                        node => editor.select(node),
+                    }
                 }
             }
+            self.marquee(
+                ui,
+                &response,
+                &painter,
+                &projector,
+                editor,
+                gizmo_hovered || ui_busy,
+            );
             if let Some(path) = response.dnd_release_payload::<AssetDrag>() {
                 let at = response
                     .hover_pos()
@@ -477,7 +566,7 @@ impl Viewport {
                 response.hover_pos(),
             ) {
                 if let Some(node) = pick(editor, &projector, pos) {
-                    draw_selection(&painter, &projector, editor, node);
+                    draw_selection(&painter, &projector, editor, node, true);
                 }
             }
         } else {
@@ -491,6 +580,61 @@ impl Viewport {
         let _ = gizmo_hovered;
         // Keep animating (effects preview, play mode).
         ui.ctx().request_repaint();
+    }
+
+    // =========================================================================================
+    // Box selection
+    // =========================================================================================
+
+    /// Dragging with the left button on empty space selects what is inside the box: every
+    /// object whose centre is in it. Shift or Ctrl adds to the selection.
+    fn marquee(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        projector: &Projector,
+        editor: &mut Editor,
+        gizmo_hovered: bool,
+    ) {
+        let alt = ui.input(|i| i.modifiers.alt);
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && !gizmo_hovered
+            && self.drag.is_none()
+            && !alt
+        {
+            self.marquee = ui.input(|i| i.pointer.press_origin());
+        }
+        let Some(start) = self.marquee else {
+            return;
+        };
+        let Some(now) = ui.input(|i| i.pointer.interact_pos()) else {
+            return;
+        };
+        let rect = Rect::from_two_pos(start, now).intersect(projector.rect);
+        painter.rect(
+            rect,
+            2.0,
+            theme::SELECTION.gamma_multiply(0.12),
+            Stroke::new(1.0_f32, theme::SELECTION),
+            egui::StrokeKind::Inside,
+        );
+        if response.dragged_by(egui::PointerButton::Primary) {
+            return;
+        }
+        // Released.
+        self.marquee = None;
+        let found = marquee_nodes(editor, projector, rect);
+        let modifiers = ui.input(|i| i.modifiers);
+        if modifiers.shift || modifiers.command {
+            editor.add_to_selection(&found);
+        } else {
+            editor.set_selection(found, None);
+        }
+        let count = editor.selected.len();
+        if count > 1 {
+            editor.info(format!("{count} nodes selected"));
+        }
     }
 
     // =========================================================================================
@@ -648,6 +792,14 @@ impl Viewport {
                     Handle::Center => (Vec2::X, projector.pixels_per_unit(origin, Vec3::X)),
                 };
                 let to_mouse = start - center;
+                // Every selected root moves; children follow their parent.
+                let tree = editor.tree();
+                self.drag_group = editor
+                    .selected_roots()
+                    .into_iter()
+                    .filter(|&n| n != editor.scene_root && editor.is_editable(n))
+                    .filter_map(|n| Some((n, tree.global_transform(n)?, tree.transform(n)?)))
+                    .collect();
                 self.drag = Some(GizmoDrag {
                     node,
                     handle,
@@ -761,9 +913,7 @@ impl Viewport {
                         offset
                     }
                 };
-                let mut global = drag.start_global;
-                global.translation = (start_origin + offset).into();
-                editor.set_global_transform(drag.node, global);
+                self.apply_change(editor, Change::Move(offset));
             }
             (GizmoMode::Rotate, Handle::Axis(i)) => {
                 let to_mouse = mouse - center;
@@ -780,33 +930,54 @@ impl Viewport {
                 let rotation = Affine3A::from_translation(start_origin)
                     * Affine3A::from_axis_angle(axes[i], angle)
                     * Affine3A::from_translation(-start_origin);
-                editor.set_global_transform(drag.node, rotation * drag.start_global);
+                self.apply_change(editor, Change::Turn(rotation));
             }
             (GizmoMode::Scale, handle) => {
-                let mut transform = drag.start_local;
-                match handle {
+                // Factors along the nodes' own axes, worked out on the active node.
+                let factors = match handle {
                     Handle::Axis(i) => {
                         let mut factor =
                             (1.0 + delta.dot(drag.axis_screen) / drag.pixels_per_unit).max(0.01);
-                        let mut value = drag.start_local.scale[i] * factor;
+                        let start = drag.start_local.scale[i];
                         if snap {
-                            value = ((value / SCALE_SNAP).round() * SCALE_SNAP).max(SCALE_SNAP);
-                            factor = value / drag.start_local.scale[i];
+                            let value = ((start * factor / SCALE_SNAP).round() * SCALE_SNAP)
+                                .max(SCALE_SNAP);
+                            factor = value / start;
                         }
-                        let _ = factor;
-                        transform.scale[i] = value;
+                        let mut factors = Vec3::ONE;
+                        factors[i] = factor;
+                        factors
                     }
                     Handle::Center => {
                         let mut factor = (1.0 + (delta.x - delta.y) / 120.0).max(0.01);
                         if snap {
                             factor = ((factor / SCALE_SNAP).round() * SCALE_SNAP).max(SCALE_SNAP);
                         }
-                        transform.scale = drag.start_local.scale * factor;
+                        Vec3::splat(factor)
                     }
-                }
-                editor.set_transform(drag.node, transform);
+                };
+                self.apply_change(editor, Change::Scale(factors));
             }
             _ => {}
+        }
+    }
+
+    /// Applies a gizmo change to every node of the drag, from where each one started.
+    fn apply_change(&self, editor: &mut Editor, change: Change) {
+        for &(node, global, local) in &self.drag_group {
+            match change {
+                Change::Move(offset) => {
+                    let mut moved = global;
+                    moved.translation = (Vec3::from(global.translation) + offset).into();
+                    editor.set_global_transform(node, moved);
+                }
+                Change::Turn(rotation) => editor.set_global_transform(node, rotation * global),
+                Change::Scale(factors) => {
+                    let mut scaled = local;
+                    scaled.scale = local.scale * factors;
+                    editor.set_transform(node, scaled);
+                }
+            }
         }
     }
 
@@ -867,6 +1038,7 @@ impl Viewport {
                                     ui.checkbox(&mut self.options.grid, "Grid");
                                     ui.checkbox(&mut self.options.icons, "Node icons");
                                     ui.checkbox(&mut self.options.collision, "Collision shapes");
+                                    ui.checkbox(&mut self.options.ui, "Edit UI in the view");
                                     ui.checkbox(&mut self.options.stats, "Statistics");
                                     ui.checkbox(
                                         &mut self.options.editor_lighting,
@@ -1196,29 +1368,6 @@ fn brighten(world: &ab_engine::ecs::World) -> Option<Environment> {
 // Scene queries
 // =============================================================================================
 
-/// Union of the world bounds of the meshes under `node`.
-pub fn subtree_bounds(editor: &Editor, node: NodeHandle) -> Option<(Vec3, Vec3)> {
-    let tree = editor.tree();
-    let world = tree.world();
-    let assets = world.resource::<RenderAssets>()?;
-    let mut bounds: Option<(Vec3, Vec3)> = None;
-    for n in tree.subtree(node) {
-        let Some(mesh) = tree.component::<MeshInstance3D>(n).map(|m| *m) else {
-            continue;
-        };
-        let (Some(aabb), Some(global)) = (assets.mesh_aabb(mesh.mesh), tree.global_transform(n))
-        else {
-            continue;
-        };
-        let aabb = aabb.transformed(&global);
-        bounds = Some(match bounds {
-            Some((min, max)) => (min.min(aabb.min), max.max(aabb.max)),
-            None => (aabb.min, aabb.max),
-        });
-    }
-    bounds
-}
-
 /// Ray / box slab test; distance along the ray.
 fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     let inv = dir.recip();
@@ -1281,6 +1430,18 @@ fn pick(editor: &Editor, projector: &Projector, pos: Pos2) -> Option<NodeHandle>
             continue;
         };
         if !tree.is_visible_in_tree(node) {
+            continue;
+        }
+        // A skinned mesh is wherever its joints put it: test its posed world box.
+        if tree.component::<Skin>(node).is_some() {
+            if let Some(t) = tree
+                .mesh_bounds(node)
+                .and_then(|b| ray_aabb(origin, dir, b.min, b.max))
+            {
+                if best.is_none_or(|(d, _)| t < d) {
+                    best = Some((t, node));
+                }
+            }
             continue;
         }
         let (Some(aabb), Some(global)) = (assets.mesh_aabb(mesh.mesh), tree.global_transform(node))
@@ -1501,6 +1662,50 @@ fn draw_box(painter: &egui::Painter, projector: &Projector, corners: &[Vec3; 8],
     }
 }
 
+/// The objects whose screen centre is inside `rect`, in tree order: meshes by the centre of
+/// their bounds, lights, cameras and other icon nodes by their position. A mesh or collision
+/// shape of a physics body stands for the body, so a box around crates selects the crates.
+fn marquee_nodes(editor: &Editor, projector: &Projector, rect: Rect) -> Vec<NodeHandle> {
+    let tree = editor.tree();
+    let mut found = Vec::new();
+    for node in tree.subtree(editor.scene_root) {
+        if node == editor.scene_root || !tree.is_visible_in_tree(node) {
+            continue;
+        }
+        let center = if tree.component::<MeshInstance3D>(node).is_some() {
+            tree.mesh_bounds(node).map(|b| b.center())
+        } else if tree
+            .class_name(node)
+            .is_some_and(|c| icon_shown(editor, node, c))
+        {
+            tree.global_position(node)
+        } else {
+            None
+        };
+        let Some(at) = center.and_then(|c| projector.project(c)) else {
+            continue;
+        };
+        if !rect.contains(at) {
+            continue;
+        }
+        let Some(mut owner) = editor.instance_owner(node) else {
+            continue;
+        };
+        if let Some(parent) = tree.parent(owner) {
+            if parent != editor.scene_root
+                && tree.component::<PhysicsBody3D>(parent).is_some()
+                && editor.is_editable(parent)
+            {
+                owner = parent;
+            }
+        }
+        if !found.contains(&owner) {
+            found.push(owner);
+        }
+    }
+    found
+}
+
 fn box_corners(transform: &Affine3A, min: Vec3, max: Vec3) -> [Vec3; 8] {
     std::array::from_fn(|i| {
         transform.transform_point3(Vec3::new(
@@ -1511,33 +1716,42 @@ fn box_corners(transform: &Affine3A, min: Vec3, max: Vec3) -> [Vec3; 8] {
     })
 }
 
+/// Outlines `node`'s meshes; the active node of a selection is drawn brighter.
 fn draw_selection(
     painter: &egui::Painter,
     projector: &Projector,
     editor: &Editor,
     node: NodeHandle,
+    active: bool,
 ) {
     let tree = editor.tree();
     let world = tree.world();
     let Some(assets) = world.resource::<RenderAssets>() else {
         return;
     };
-    let stroke = Stroke::new(1.5_f32, theme::SELECTION);
+    let stroke = if active {
+        Stroke::new(1.5_f32, theme::SELECTION)
+    } else {
+        Stroke::new(1.0_f32, theme::SELECTION.gamma_multiply(0.6))
+    };
     let mut any = false;
     for n in tree.subtree(node) {
         let Some(mesh) = tree.component::<MeshInstance3D>(n).map(|m| *m) else {
             continue;
         };
-        let (Some(aabb), Some(global)) = (assets.mesh_aabb(mesh.mesh), tree.global_transform(n))
-        else {
+        // Skinned meshes: their posed world box. Others: their own box, turned with them.
+        let corners = if tree.component::<Skin>(n).is_some() {
+            tree.mesh_bounds(n).map(|b| b.corners())
+        } else {
+            assets
+                .mesh_aabb(mesh.mesh)
+                .zip(tree.global_transform(n))
+                .map(|(aabb, global)| box_corners(&global, aabb.min, aabb.max))
+        };
+        let Some(corners) = corners else {
             continue;
         };
-        draw_box(
-            painter,
-            projector,
-            &box_corners(&global, aabb.min, aabb.max),
-            stroke,
-        );
+        draw_box(painter, projector, &corners, stroke);
         any = true;
     }
     if !any {
@@ -1548,6 +1762,26 @@ fn draw_selection(
             painter.circle_stroke(at, 14.0, stroke);
         }
     }
+}
+
+/// The Debug panel's mesh bounds view while editing: every visible mesh's world box.
+fn draw_mesh_bounds(painter: &egui::Painter, projector: &Projector, editor: &Editor) {
+    let color32 = |c: Color| {
+        Color32::from_rgb(
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8,
+        )
+    };
+    ab_engine::rendering::for_each_mesh_bounds(editor.tree().world(), |mesh| {
+        let color = if mesh.skinned {
+            ab_engine::SKINNED_BOUNDS_COLOR
+        } else {
+            ab_engine::BOUNDS_COLOR
+        };
+        let stroke = Stroke::new(1.0_f32, color32(color).gamma_multiply(0.8));
+        draw_box(painter, projector, &mesh.bounds.corners(), stroke);
+    });
 }
 
 fn draw_collision(painter: &egui::Painter, projector: &Projector, editor: &Editor) {
@@ -1622,6 +1856,34 @@ mod tests {
         );
         assert_eq!(ray_aabb(Vec3::new(0.0, 0.0, 5.0), Vec3::Z, min, max), None);
         assert_eq!(ray_aabb(Vec3::ZERO, Vec3::X, min, max), Some(0.0), "inside");
+    }
+
+    #[test]
+    fn box_selection_takes_bodies_inside_the_box() {
+        let project =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
+        editor.open_scene("slice/level.toml");
+        let mut camera = EditorCamera::default();
+        let scene = editor.tree().subtree_bounds(editor.scene_root).unwrap();
+        camera.frame(scene.center(), scene.size().length() * 0.5);
+        let view = CameraView::new(&camera.global(), 60f32.to_radians(), 1.6, 0.05, 2000.0);
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0));
+        let projector = Projector::new(&view, rect);
+
+        let everything = marquee_nodes(&editor, &projector, rect);
+        let pillar = editor.node_at("Geometry/Pillar0").unwrap();
+        assert!(everything.contains(&pillar), "a body, not its Mesh child");
+        assert!(!everything.contains(&editor.node_at("Geometry/Pillar0/Mesh").unwrap()));
+
+        // A small box around the pillar's centre takes the pillar only.
+        let center = projector
+            .project(editor.tree().subtree_bounds(pillar).unwrap().center())
+            .unwrap();
+        let small = Rect::from_center_size(center, Vec2::splat(6.0));
+        assert_eq!(marquee_nodes(&editor, &projector, small), [pillar]);
+        let empty = Rect::from_min_size(Pos2::new(-50.0, -50.0), Vec2::splat(10.0));
+        assert!(marquee_nodes(&editor, &projector, empty).is_empty());
     }
 
     #[test]

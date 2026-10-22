@@ -1,5 +1,6 @@
 // Camera-facing particle quads in the HDR pass. Output is premultiplied: alpha particles
-// cover what is behind them, additive ones (alpha output 0) only add light.
+// cover what is behind them, additive ones (alpha output 0) only add light. Fogged like the
+// scene (`fog.wgsl`, prepended).
 
 struct Frame {
     view_proj: mat4x4<f32>,
@@ -7,6 +8,10 @@ struct Frame {
     ambient: vec4<f32>,
     fog_color: vec4<f32>,       // rgb, w: enabled
     fog_params: vec4<f32>,      // density, height, height falloff, max opacity
+    fog_scatter: vec4<f32>,     // sun scattering, anisotropy, camera height term, patchiness
+    fog_wind: vec4<f32>,        // noise offset (wind × time), 1 / patch size
+    sun_direction: vec4<f32>,   // xyz: travel direction, w: enabled
+    sun_radiance: vec4<f32>,    // rgb
 };
 
 struct View {
@@ -72,28 +77,6 @@ fn vs_particle(@builtin(vertex_index) vertex: u32, instance: Instance) -> VsOut 
     return out;
 }
 
-fn fog_amount(world_position: vec3<f32>) -> f32 {
-    if frame.fog_color.w < 0.5 {
-        return 0.0;
-    }
-    let density = frame.fog_params.x;
-    let base = frame.fog_params.y;
-    let falloff = frame.fog_params.z;
-    let camera = frame.camera_position.xyz;
-    let distance = length(world_position - camera);
-    var optical_depth = density * distance;
-    if falloff > 0.0 {
-        let start = exp(clamp(-falloff * (camera.y - base), -80.0, 80.0));
-        let dh = world_position.y - camera.y;
-        var scale = start;
-        if abs(falloff * dh) > 1e-4 {
-            scale = start * (1.0 - exp(clamp(-falloff * dh, -80.0, 80.0))) / (falloff * dh);
-        }
-        optical_depth = density * distance * scale;
-    }
-    return min(1.0 - exp(-max(optical_depth, 0.0)), frame.fog_params.w);
-}
-
 @fragment
 fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
     let hardness = clamp(in.params.y, 0.0, 0.98);
@@ -110,6 +93,9 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         // Additive: fog hides the light it adds.
         return vec4(in.color.rgb * alpha * (1.0 - fog), 0.0);
     }
-    let rgb = mix(in.color.rgb, frame.fog_color.rgb, fog);
+    var rgb = in.color.rgb;
+    if fog > 0.0 {
+        rgb = mix(rgb, fog_light(in.world), fog);
+    }
     return vec4(rgb * alpha, alpha);
 }

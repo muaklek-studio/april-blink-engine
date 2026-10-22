@@ -10,6 +10,7 @@ use crate::theme;
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use eframe::egui_wgpu;
 use egui_phosphor::regular as icon;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -443,7 +444,10 @@ fn check_graphics(state: Option<&egui_wgpu::RenderState>) -> Outcome {
         return Outcome::fail("No GPU device: the 3D viewport needs wgpu");
     };
     let info = state.adapter.get_info();
-    let summary = format!("{} · {:?}", info.name.trim(), info.backend);
+    // Picked automatically: the best GPU, on the API that suits this OS (see the log for
+    // the others found).
+    let summary =
+        ab_engine::rendering::AdapterCandidate::of(&state.adapter, None, None).to_string();
     let limits = state.adapter.limits();
     if limits.max_texture_dimension_2d < 4096 {
         return Outcome::warn(format!(
@@ -509,7 +513,7 @@ fn check_toolchain() -> Outcome {
 
 /// `program --version`, when the program runs.
 fn program_version(program: &std::ffi::OsStr) -> Option<String> {
-    std::process::Command::new(program)
+    ab_project::process::command(program)
         .arg("--version")
         .output()
         .ok()
@@ -559,11 +563,21 @@ fn parse_version(text: &str) -> Option<Version> {
     })
 }
 
+/// The script SDK new projects build against: the engine checkout's (development builds),
+/// else the copy shipped next to the editor. (The projects folder needs no check: it is
+/// created with the first project.)
 fn check_engine() -> Outcome {
-    match projects::projects_dir() {
-        Some(dir) if dir.is_dir() => Outcome::ok(dir.display().to_string()),
-        Some(dir) => Outcome::warn(format!("{} is missing", dir.display())),
-        None => Outcome::warn("Not found: new projects cannot be created"),
+    engine_outcome(projects::engine_root(), ab_project::sdk_dir())
+}
+
+fn engine_outcome(engine: Option<PathBuf>, sdk: Option<PathBuf>) -> Outcome {
+    match (engine, sdk) {
+        (Some(engine), Some(_)) => Outcome::ok(engine.display().to_string()),
+        (None, Some(sdk)) => Outcome::ok(format!("SDK shipped with the editor: {}", sdk.display())),
+        (_, None) => Outcome::warn(
+            "Not found: new projects use the published ab-script crate (downloaded when \
+             their scripts first build). Set AB_ENGINE_ROOT to an engine checkout to use it.",
+        ),
     }
 }
 
@@ -611,6 +625,23 @@ fn load_projects() -> (Outcome, RecentProjects) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_engine_check_looks_for_the_sdk_not_the_projects_folder() {
+        // This checkout: found, whether or not ~/April Blink Projects exists yet.
+        let here = check_engine();
+        assert_eq!(here.level, Level::Ok, "{}", here.detail);
+        let engine = PathBuf::from("/engine");
+        let sdk = PathBuf::from("/editor/sdk/ab-script");
+        assert_eq!(
+            engine_outcome(Some(engine.clone()), Some(sdk.clone())).detail,
+            engine.display().to_string()
+        );
+        let shipped = engine_outcome(None, Some(sdk));
+        assert_eq!(shipped.level, Level::Ok);
+        assert!(shipped.detail.starts_with("SDK shipped with the editor"));
+        assert_eq!(engine_outcome(Some(engine), None).level, Level::Warn);
+    }
 
     #[test]
     fn versions() {

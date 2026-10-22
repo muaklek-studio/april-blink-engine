@@ -1,9 +1,9 @@
 //! Building a project's script library in the background.
 
-use crate::{Profile, Project};
+use crate::{process, Profile, Project};
 use anyhow::{Context as _, Result};
 use std::io::{BufRead as _, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ impl ScriptBuild {
             anyhow::bail!("the project has no Cargo.toml");
         }
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
+        let mut command = process::command(cargo);
         command
             .args(["build", "--lib", "--color", "never"])
             .current_dir(&project.root)

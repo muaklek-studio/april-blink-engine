@@ -1,10 +1,12 @@
 //! Ready-made nodes for the Create menu: plain nodes, primitives, physics objects with
-//! their mesh and shape, lights, cameras, sounds and every particle effect preset.
+//! their mesh and shape, lights, cameras, sounds, every particle effect preset, and UI
+//! controls and screens.
 
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::core::Vec3;
 use ab_engine::effects::ParticleSettings;
+use ab_engine::scene::NodeHandle;
 use ab_engine::scene_file::SceneFile;
 use eframe::egui;
 
@@ -139,6 +141,224 @@ pub const PHYSICS: &[Template] = &[
     ),
 ];
 
+pub const UI: &[Template] = &[
+    t(
+        "Canvas Layer",
+        "CanvasLayer",
+        "[[node]]\nname = \"UI\"\ntype = \"CanvasLayer\"\n",
+    ),
+    t(
+        "Control",
+        "Control",
+        "[[node]]\nname = \"Control\"\ntype = \"Control\"\ncontrol = { preset = \"full_rect\" }\n",
+    ),
+    t(
+        "Panel",
+        "Panel",
+        "[[node]]\nname = \"Panel\"\ntype = \"Panel\"\ncontrol = { preset = \"center\", size = [400.0, 300.0] }\n",
+    ),
+    t(
+        "Label",
+        "Label",
+        "[[node]]\nname = \"Label\"\ntype = \"Label\"\ncontrol = { preset = \"center\", size = [300.0, 40.0] }\nlabel = { text = \"Label\", align = \"center\" }\n",
+    ),
+    t(
+        "Button",
+        "Button",
+        "[[node]]\nname = \"Button\"\ntype = \"Button\"\ncontrol = { preset = \"center\", size = [220.0, 56.0] }\nbutton = { text = \"Button\" }\n",
+    ),
+    t(
+        "Progress Bar",
+        "ProgressBar",
+        "[[node]]\nname = \"ProgressBar\"\ntype = \"ProgressBar\"\ncontrol = { preset = \"center\", size = [360.0, 28.0] }\nprogress = { value = 60.0 }\n",
+    ),
+    t(
+        "Vertical Box",
+        "VBoxContainer",
+        "[[node]]\nname = \"VBox\"\ntype = \"VBoxContainer\"\ncontrol = { preset = \"center\", size = [300.0, 240.0] }\n",
+    ),
+    t(
+        "Horizontal Box",
+        "HBoxContainer",
+        "[[node]]\nname = \"HBox\"\ntype = \"HBoxContainer\"\ncontrol = { preset = \"center\", size = [480.0, 64.0] }\n",
+    ),
+];
+
+/// Whole screens to start from.
+pub const UI_SCREENS: &[Template] = &[
+    t(
+        "HUD (health, score, crosshair)",
+        "Control",
+        r##"[[node]]
+name = "Hud"
+type = "Control"
+control = { preset = "full_rect" }
+
+[[node]]
+name = "Health"
+parent = "."
+type = "ProgressBar"
+control = { preset = "top_left", size = [360.0, 28.0], margin = 32.0 }
+progress = { value = 100.0, fill_color = "#d23c3c" }
+
+[[node]]
+name = "Score"
+parent = "."
+type = "Label"
+control = { preset = "top_right", size = [320.0, 44.0], margin = 32.0 }
+label = { text = "Score: 0", size = 32.0, align = "right", outline = 2.0 }
+
+[[node]]
+name = "Crosshair"
+parent = "."
+type = "Label"
+control = { preset = "center", size = [40.0, 40.0] }
+label = { text = "+", size = 36.0, align = "center", valign = "center", outline = 2.0 }
+"##,
+    ),
+    t(
+        "Pause menu",
+        "Panel",
+        r##"[[node]]
+name = "PauseMenu"
+type = "Control"
+control = { preset = "full_rect" }
+
+[[node]]
+name = "Dim"
+parent = "."
+type = "Panel"
+control = { preset = "full_rect" }
+panel = { color = "#00000099", corner_radius = 0.0 }
+
+[[node]]
+name = "Window"
+parent = "."
+type = "Panel"
+control = { preset = "center", size = [440.0, 380.0] }
+panel = { color = "#141a24f0", corner_radius = 12.0, border_width = 1.0, border_color = "#ffffff30" }
+
+[[node]]
+name = "Items"
+parent = "Window"
+type = "VBoxContainer"
+control = { preset = "full_rect", margin = 32.0 }
+box = { separation = 14.0 }
+
+[[node]]
+name = "Title"
+parent = "Window/Items"
+type = "Label"
+control = { min_size = [0.0, 64.0] }
+label = { text = "Paused", size = 44.0, align = "center" }
+
+[[node]]
+name = "Resume"
+parent = "Window/Items"
+type = "Button"
+control = { min_size = [0.0, 56.0] }
+button = { text = "Resume" }
+
+[[node]]
+name = "Settings"
+parent = "Window/Items"
+type = "Button"
+control = { min_size = [0.0, 56.0] }
+button = { text = "Settings" }
+
+[[node]]
+name = "Quit"
+parent = "Window/Items"
+type = "Button"
+control = { min_size = [0.0, 56.0] }
+button = { text = "Quit", color = "#8a2f2f" }
+"##,
+    ),
+    t(
+        "Dialogue box",
+        "Panel",
+        r##"[[node]]
+name = "Dialogue"
+type = "Panel"
+control = { preset = "bottom_wide", size = [0.0, 220.0], margin = 40.0 }
+panel = { color = "#0c1018e6", corner_radius = 10.0 }
+
+[[node]]
+name = "Speaker"
+parent = "."
+type = "Label"
+control = { anchors = [0.0, 0.0, 1.0, 0.0], offsets = [28.0, 20.0, -28.0, 64.0] }
+label = { text = "Speaker", size = 30.0, color = "#ffcc66" }
+
+[[node]]
+name = "Text"
+parent = "."
+type = "Label"
+control = { anchors = [0.0, 0.0, 1.0, 1.0], offsets = [28.0, 72.0, -28.0, -20.0] }
+label = { text = "What they say goes here.", size = 26.0, autowrap = true }
+"##,
+    ),
+];
+
+/// An image showing the project's first picture (empty texture path when it has none).
+pub fn image(editor: &Editor) -> Option<SceneFile> {
+    let texture = editor
+        .assets
+        .of_kind(crate::project::AssetKind::Image)
+        .next()?
+        .path
+        .clone();
+    let mut scene = SceneFile::from_toml(
+        "[[node]]\nname = \"Image\"\ntype = \"TextureRect\"\ncontrol = { preset = \"center\", size = [256.0, 256.0] }\nimage = { texture = \"\", stretch = \"keep_aspect\" }\n",
+    )
+    .expect("the image template parses");
+    if let Some(image) = scene.nodes[0].image.as_mut() {
+        image.texture = texture;
+    }
+    Some(scene)
+}
+
+fn is_ui(editor: &Editor, node: NodeHandle) -> bool {
+    let tree = editor.tree();
+    tree.component::<ab_engine::ui::Control>(node).is_some()
+        || tree.class_name(node) == Some(ab_engine::ui::class::CANVAS_LAYER)
+}
+
+/// Controls go under a UI node: the selected one, else the scene's first canvas layer
+/// (selected for that), else a new `UI` canvas layer wrapping them.
+pub fn place_ui(editor: &mut Editor, mut scene: SceneFile) -> SceneFile {
+    let class = scene.nodes[0].kind.as_deref().unwrap_or_default();
+    if class == ab_engine::ui::class::CANVAS_LAYER {
+        return scene;
+    }
+    let selected_ui = editor
+        .selection
+        .is_some_and(|n| is_ui(editor, n) && editor.is_editable(n) && !editor.is_instance(n));
+    if selected_ui {
+        return scene;
+    }
+    let tree = editor.tree();
+    let layer = tree
+        .children(editor.scene_root)
+        .into_iter()
+        .find(|&c| tree.class_name(c) == Some(ab_engine::ui::class::CANVAS_LAYER));
+    if let Some(layer) = layer {
+        editor.select(Some(layer));
+        return scene;
+    }
+    let root = scene.nodes[0].name.clone();
+    for node in &mut scene.nodes {
+        node.parent = Some(match node.parent.take().as_deref() {
+            None => ".".to_owned(),
+            Some(".") => root.clone(),
+            Some(path) => format!("{root}/{path}"),
+        });
+    }
+    let mut layer = UI[0].scene();
+    layer.nodes.append(&mut scene.nodes);
+    layer
+}
+
 /// The humanoid ragdoll prefab: limp from the start, or standing frozen until activated.
 pub fn ragdoll(active: bool) -> SceneFile {
     ab_engine::ragdoll::humanoid_ragdoll(&ab_engine::ragdoll::HumanoidRagdoll {
@@ -156,6 +376,18 @@ pub fn effect(preset: &str) -> SceneFile {
         "[[node]]\nname = \"{name}\"\ntype = \"Particles3D\"\nparticles = {{ preset = \"{preset}\" }}\n"
     ))
     .expect("effect templates parse")
+}
+
+/// An effect with layers (a campfire: fire, smoke, embers) to edit in the Effect editor and
+/// save under effects/.
+pub fn layered_effect() -> SceneFile {
+    SceneFile::from_toml(
+        "[[node]]\nname = \"Effect\"\ntype = \"Node3D\"\n\n\
+         [[node]]\nname = \"Fire\"\nparent = \".\"\ntype = \"Particles3D\"\nparticles = { preset = \"fire\" }\n\n\
+         [[node]]\nname = \"Smoke\"\nparent = \".\"\ntype = \"Particles3D\"\nposition = [0.0, 0.6, 0.0]\nparticles = { preset = \"smoke\" }\n\n\
+         [[node]]\nname = \"Embers\"\nparent = \".\"\ntype = \"Particles3D\"\nparticles = { preset = \"embers\" }\n",
+    )
+    .expect("the layered effect template parses")
 }
 
 /// A positional sound playing the first sound file of the project, if any.
@@ -209,7 +441,39 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
     section(ui, "Light", LIGHTS);
     section(ui, "Camera", CAMERAS);
     section(ui, "Physics", PHYSICS);
+    if entry(ui, "AnimationPlayer", "Animation Player") {
+        chosen = Some(SceneFile {
+            environment: None,
+            nodes: vec![crate::panels::animation::new_player()],
+        });
+        ui.close();
+    }
+    // A rigged character selected: a ragdoll made from its skeleton.
+    let character = editor
+        .selection
+        .filter(|&n| editor.is_instance(n))
+        .filter(|&n| {
+            let tree = editor.tree();
+            tree.subtree(n)
+                .into_iter()
+                .any(|m| tree.component::<ab_engine::rendering::Skin>(m).is_some())
+        })
+        .and_then(|n| editor.tree().name(n).map(|name| name.to_owned()));
     ui.menu_button("Ragdoll", |ui| {
+        if let Some(name) = &character {
+            if entry(ui, "Ragdoll", &format!("For {name} (from its skeleton)")) {
+                let mut node = ab_engine::ragdoll::ragdoll_node("Ragdoll", false);
+                if let Some(desc) = node.ragdoll.as_mut() {
+                    desc.skeleton = Some(format!("../{name}"));
+                }
+                chosen = Some(SceneFile {
+                    environment: None,
+                    nodes: vec![node],
+                });
+                ui.close();
+            }
+            ui.separator();
+        }
         if entry(ui, "Ragdoll", "Humanoid (falls on Play)") {
             chosen = Some(ragdoll(true));
             ui.close();
@@ -227,9 +491,14 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
         }
     });
     ui.menu_button("Effect", |ui| {
+        if entry(ui, "Node3D", "Layered effect (edit in Effects)") {
+            chosen = Some(layered_effect());
+            ui.close();
+        }
+        ui.separator();
         for preset in ParticleSettings::PRESETS {
             let mut label: String = preset[..1].to_uppercase();
-            label.push_str(&preset[1..]);
+            label.push_str(&preset[1..].replace('_', " "));
             if entry(ui, "Particles3D", &label) {
                 chosen = Some(effect(preset));
                 ui.close();
@@ -240,7 +509,38 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
         chosen = Some(sound(editor));
         ui.close();
     }
-    if let Some(scene) = chosen {
+    let mut chosen_ui: Option<SceneFile> = None;
+    ui.menu_button("UI", |ui| {
+        for template in UI {
+            if entry(ui, template.class, template.label) {
+                chosen_ui = Some(template.scene());
+                ui.close();
+            }
+        }
+        let picture = image(editor);
+        if ui
+            .add_enabled(
+                picture.is_some(),
+                egui::Button::new(format!("{}  Image", theme::class_icon("TextureRect"))),
+            )
+            .on_disabled_hover_text("Add a PNG or JPEG to the project first")
+            .clicked()
+        {
+            chosen_ui = picture;
+            ui.close();
+        }
+        ui.separator();
+        for template in UI_SCREENS {
+            if entry(ui, template.class, template.label) {
+                chosen_ui = Some(template.scene());
+                ui.close();
+            }
+        }
+    });
+    if let Some(scene) = chosen_ui {
+        let scene = place_ui(editor, scene);
+        editor.add_scene(scene, None);
+    } else if let Some(scene) = chosen {
         editor.add_scene(scene, Some(at));
     }
 }
@@ -254,18 +554,20 @@ mod tests {
         let project =
             std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
-        let all: Vec<&Template> = [BASIC, MESHES, LIGHTS, CAMERAS, PHYSICS]
+        let all: Vec<&Template> = [BASIC, MESHES, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS]
             .iter()
             .flat_map(|group| group.iter())
             .collect();
         let mut scenes: Vec<SceneFile> = all.iter().map(|t| t.scene()).collect();
         scenes.extend(ParticleSettings::PRESETS.iter().map(|p| effect(p)));
+        scenes.push(layered_effect());
         scenes.push(sound(&editor));
         scenes.push(ragdoll(true));
         scenes.push(ragdoll(false));
+        scenes.extend(image(&editor));
         for scene in scenes {
             let name = scene.nodes[0].name.clone();
-            editor.selection = None;
+            editor.select(None);
             editor.add_scene(scene, Some(Vec3::ZERO));
             assert_eq!(
                 editor.status.as_ref().map(|s| s.error),
@@ -274,5 +576,40 @@ mod tests {
                 editor.status.as_ref().map(|s| &s.text)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    fn editor() -> Editor {
+        let project =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        Editor::new(project, None, ab_engine::audio::AudioOutput::Silent)
+    }
+
+    #[test]
+    fn controls_get_a_canvas_layer_then_share_it() {
+        let mut editor = editor();
+        editor.select(None);
+        let scene = place_ui(&mut editor, UI[3].scene());
+        assert_eq!(scene.nodes[0].kind.as_deref(), Some("CanvasLayer"));
+        editor.add_scene(scene, None);
+        let layer = editor.selection.unwrap();
+        assert_eq!(editor.tree().children(layer).len(), 1);
+
+        // The next control joins that layer, even with a 3D node selected.
+        editor.select(Some(editor.scene_root));
+        let screen = place_ui(&mut editor, UI_SCREENS[1].scene());
+        editor.add_scene(screen, None);
+        let menu = editor.selection.unwrap();
+        assert_eq!(editor.tree().parent(menu), Some(layer));
+        let window = editor.tree().get_node(menu, "Window/Items/Quit");
+        assert!(window.is_some());
+
+        // Inside a selected control: straight in.
+        let label = place_ui(&mut editor, UI[3].scene());
+        assert_eq!(label.nodes.len(), 1);
     }
 }

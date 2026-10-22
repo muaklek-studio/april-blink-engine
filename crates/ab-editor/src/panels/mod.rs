@@ -1,8 +1,10 @@
 //! Dockable panels and the small widgets they share.
 
+pub mod animation;
 pub mod assets;
 pub mod console;
 pub mod debug;
+pub mod effects;
 pub mod git;
 pub mod inspector;
 pub mod profiler;

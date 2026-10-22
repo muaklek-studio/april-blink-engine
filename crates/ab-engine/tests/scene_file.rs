@@ -61,6 +61,9 @@ const LEVEL: &str = r##"
 [environment]
 background = "#102030"
 fog_density = 0.04
+fog_patchiness = 0.6
+fog_wind = [2.0, 0.0, -1.0]
+fog_sun_scattering = 0.8
 exposure = 1.5
 bloom = 0.2
 bloom_threshold = 0.8
@@ -288,6 +291,10 @@ fn loads_every_node_type() {
     {
         let environment = tree.world().resource::<Environment>().unwrap();
         assert!(environment.fog.enabled && environment.fog.density == 0.04);
+        let fog = &environment.fog;
+        assert_eq!((fog.patchiness, fog.sun_scattering), (0.6, 0.8));
+        assert_eq!(fog.wind, Vec3::new(2.0, 0.0, -1.0));
+        assert_eq!(fog.patch_size, 14.0, "unset fields keep their defaults");
         assert_eq!(environment.post.exposure, 1.5);
         let post = &environment.post;
         assert!(post.bloom.is_enabled() && post.bloom.threshold == 0.8);
@@ -453,4 +460,149 @@ fn errors_name_the_file_and_node_and_leave_nothing_behind() {
         nodes,
         "failed loads free what they built"
     );
+}
+
+#[test]
+fn animation_players_play_clip_files_and_save_back() {
+    use ab_engine::scene_file::save_scene;
+    let dir = std::env::temp_dir().join(format!("ab-anim-scene-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("anims")).unwrap();
+    std::fs::write(
+        dir.join("anims/lift.toml"),
+        "name = \"Lift\"\n\n[[track]]\ntarget = \"Platform\"\nproperty = \"position\"\nkeys = [[0.0, [0.0, 0.0, 0.0]], [2.0, [0.0, 4.0, 0.0]]]\n",
+    )
+    .unwrap();
+    let config = EngineConfig {
+        asset_root: dir.clone(),
+        audio_output: ab_engine::audio::AudioOutput::Silent,
+        ..Default::default()
+    };
+    let mut engine = Engine::new(&config);
+    let scene = SceneFile::from_toml(
+        "[[node]]\nname = \"Level\"\ntype = \"Node3D\"\n\n\
+         [[node]]\nname = \"Platform\"\nparent = \".\"\ntype = \"Node3D\"\n\n\
+         [[node]]\nname = \"Animator\"\nparent = \".\"\ntype = \"AnimationPlayer\"\nanimation = { clips = [\"anims/lift.toml\"], autoplay = \"Lift\", looping = false }\n",
+    )
+    .unwrap();
+    let tree = engine.tree_mut();
+    let level = instantiate_scene(tree, &scene, "test").unwrap();
+    tree.add_child(tree.root(), level).unwrap();
+    for _ in 0..60 {
+        engine.update(1.0 / 60.0);
+    }
+    let platform = engine.tree().get_node(level, "Platform").unwrap();
+    let y = engine.tree().position(platform).unwrap().y;
+    assert!((y - 2.0).abs() < 0.1, "half way up after a second: {y}");
+    for _ in 0..90 {
+        engine.update(1.0 / 60.0);
+    }
+    let y = engine.tree().position(platform).unwrap().y;
+    assert!((y - 4.0).abs() < 1e-3, "stops at the top: {y}");
+    let saved = save_scene(engine.tree(), level);
+    let animator = saved.nodes.iter().find(|n| n.name == "Animator").unwrap();
+    assert_eq!(animator.kind.as_deref(), Some("AnimationPlayer"));
+    let animation = animator.animation.as_ref().unwrap();
+    assert_eq!(animation.clips, ["anims/lift.toml"]);
+    assert_eq!(animation.autoplay.as_deref(), Some("Lift"));
+    // A missing clip file is a clear error.
+    let broken = SceneFile::from_toml(
+        "[[node]]\nname = \"A\"\ntype = \"AnimationPlayer\"\nanimation = { clips = [\"anims/none.toml\"] }\n",
+    )
+    .unwrap();
+    let err = instantiate_scene(engine.tree_mut(), &broken, "broken").unwrap_err();
+    assert!(err.to_string().contains("anims/none.toml"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const HUD: &str = r##"
+[[node]]
+name = "Hud"
+type = "CanvasLayer"
+canvas = { layer = 2 }
+
+[[node]]
+name = "Health"
+parent = "."
+type = "ProgressBar"
+control = { preset = "top_left", size = [360, 28], margin = 32 }
+progress = { value = 75, fill_color = "#d23c3c", show_percentage = true }
+
+[[node]]
+name = "Menu"
+parent = "."
+type = "Panel"
+control = { preset = "center", size = [400, 300] }
+panel = { color = "#101820e0", corner_radius = 12, border_width = 2, border_color = "#ffffff40" }
+
+[[node]]
+name = "Items"
+parent = "Menu"
+type = "VBoxContainer"
+control = { preset = "full_rect", margin = 24 }
+box = { separation = 12, alignment = "center" }
+
+[[node]]
+name = "Title"
+parent = "Menu/Items"
+type = "Label"
+label = { text = "Paused", size = 48, align = "center", outline = 3 }
+
+[[node]]
+name = "Resume"
+parent = "Menu/Items"
+type = "Button"
+control = { min_size = [0, 56] }
+button = { text = "Resume", color = "#2f6fd0" }
+
+[[node]]
+name = "Logo"
+parent = "."
+type = "TextureRect"
+control = { preset = "bottom_right", size = [128, 128], margin = 16, mouse = "stop" }
+image = { texture = "logo.png", stretch = "keep_aspect", tint = "#ffffffc0" }
+"##;
+
+#[test]
+fn ui_scenes_load_lay_out_and_save_back() {
+    let (mut engine, assets) = engine_with(&[("hud.toml", HUD)]);
+    let logo =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/totem_albedo.png");
+    std::fs::copy(logo, assets.0.join("logo.png")).unwrap();
+    let tree = engine.tree_mut();
+    let hud = load_scene(tree, "hud.toml").unwrap();
+    tree.add_child(tree.root(), hud).unwrap();
+    let tree = engine.tree();
+    ab_engine::ui::prepare_ui(tree.world(), 1920, 1080);
+    let rect = |path: &str| {
+        let node = tree.get_node(hud, path).unwrap();
+        tree.component::<ab_engine::ui::Control>(node)
+            .unwrap()
+            .rect()
+    };
+    assert_eq!(rect("Health").position, Vec2::new(32.0, 32.0));
+    assert_eq!(rect("Health").size, Vec2::new(360.0, 28.0));
+    let menu = rect("Menu");
+    assert_eq!(menu.center(), Vec2::new(960.0, 540.0));
+    let title = rect("Menu/Items/Title");
+    assert!(menu.contains(title.position) && title.size.x > 300.0);
+    let resume = tree.get_node(hud, "Menu/Items/Resume").unwrap();
+    assert_eq!(
+        tree.component::<ab_engine::ui::Button>(resume)
+            .unwrap()
+            .text,
+        "Resume"
+    );
+    assert!(rect("Menu/Items/Resume").size.y >= 56.0);
+
+    let first = save_scene(tree, hud);
+    let text = first.to_toml();
+    assert_eq!(first.nodes.len(), 7, "saved:\n{text}");
+    let reparsed = SceneFile::from_toml(&text).unwrap();
+    let tree = engine.tree_mut();
+    let again = instantiate_scene(tree, &reparsed, "saved").unwrap();
+    assert_eq!(first, save_scene(tree, again), "saved:\n{text}");
+    assert!(text.contains("type = \"TextureRect\""));
+    assert!(text.contains("texture = \"logo.png\""));
+    assert!(text.contains("text = \"Paused\""));
 }

@@ -35,17 +35,21 @@ enum Tab {
     Profiler,
     Debug,
     SourceControl,
+    Effects,
+    Animation,
 }
 
 impl Tab {
-    const ALL: [Tab; 9] = [
+    const ALL: [Tab; 11] = [
         Tab::Scene,
         Tab::SourceControl,
         Tab::Viewport,
         Tab::Inspector,
         Tab::Environment,
         Tab::Debug,
+        Tab::Effects,
         Tab::Assets,
+        Tab::Animation,
         Tab::Console,
         Tab::Profiler,
     ];
@@ -61,6 +65,8 @@ impl Tab {
             Tab::Profiler => (icon::CHART_LINE, "Profiler"),
             Tab::Debug => (icon::BUG_BEETLE, "Debug"),
             Tab::SourceControl => (icon::GIT_BRANCH, "Source Control"),
+            Tab::Effects => (icon::SPARKLE, "Effects"),
+            Tab::Animation => (icon::FILM_STRIP, "Animation"),
         };
         format!("{glyph}  {name}")
     }
@@ -72,11 +78,14 @@ fn default_layout() -> DockState<Tab> {
     let [center, _right] = surface.split_right(
         NodeIndex::root(),
         0.77,
-        vec![Tab::Inspector, Tab::Environment, Tab::Debug],
+        vec![Tab::Inspector, Tab::Environment, Tab::Effects, Tab::Debug],
     );
     let [center, _left] = surface.split_left(center, 0.22, vec![Tab::Scene, Tab::SourceControl]);
-    let [_center, _bottom] =
-        surface.split_below(center, 0.70, vec![Tab::Assets, Tab::Console, Tab::Profiler]);
+    let [_center, _bottom] = surface.split_below(
+        center,
+        0.70,
+        vec![Tab::Assets, Tab::Animation, Tab::Console, Tab::Profiler],
+    );
     dock
 }
 
@@ -141,6 +150,8 @@ pub struct EditorApp {
     dock: DockState<Tab>,
     scene_tree: SceneTreePanel,
     inspector: InspectorPanel,
+    effects: crate::panels::effects::EffectsPanel,
+    animation: crate::panels::animation::AnimationPanel,
     assets: AssetsPanel,
     console: ConsolePanel,
     profiler: ProfilerPanel,
@@ -243,8 +254,12 @@ impl EditorApp {
         if let Some(scene) = &options.scene {
             editor.open_scene(scene);
         }
-        if let Some(path) = &options.select {
-            editor.selection = editor.node_at(path);
+        if let Some(paths) = &options.select {
+            let nodes = paths
+                .split(',')
+                .filter_map(|path| editor.node_at(path.trim()))
+                .collect();
+            editor.set_selection(nodes, None);
         }
         let mut viewport = Viewport::new(render_state);
         if options.scene.is_some() {
@@ -282,6 +297,8 @@ impl EditorApp {
             dock,
             scene_tree: SceneTreePanel::default(),
             inspector: InspectorPanel::default(),
+            effects: Default::default(),
+            animation: Default::default(),
             assets: AssetsPanel::default(),
             console: ConsolePanel::new(logs),
             profiler: ProfilerPanel::default(),
@@ -415,14 +432,24 @@ impl EditorApp {
             return;
         }
         if shortcut(ctrl, Key::D) {
-            if let Some(node) = self.editor.selection {
-                self.editor.duplicate(node);
-            }
+            self.editor.duplicate_selected();
         }
         if shortcut(Modifiers::NONE, Key::Delete) {
-            if let Some(node) = self.editor.selection {
-                self.editor.delete(node);
-            }
+            self.editor.delete_selected();
+        }
+        if shortcut(ctrl, Key::A) {
+            let scene = self.editor.scene_root;
+            let all: Vec<_> = self
+                .editor
+                .tree()
+                .children(scene)
+                .into_iter()
+                .filter(|&n| self.editor.is_editable(n))
+                .collect();
+            self.editor.set_selection(all, None);
+        }
+        if shortcut(Modifiers::NONE, Key::Escape) && self.editor.mode == crate::state::Mode::Edit {
+            self.editor.select(None);
         }
         if shortcut(Modifiers::NONE, Key::F2) {
             self.scene_tree.start_rename(&self.editor);
@@ -544,14 +571,21 @@ impl EditorApp {
                 self.scene_tree.start_rename(&self.editor);
             }
             if menu_item(ui, icon::COPY, "Duplicate", "Ctrl+D", selection.is_some()) {
-                if let Some(node) = selection {
-                    self.editor.duplicate(node);
-                }
+                self.editor.duplicate_selected();
             }
             if menu_item(ui, icon::TRASH, "Delete", "Del", selection.is_some()) {
-                if let Some(node) = selection {
-                    self.editor.delete(node);
-                }
+                self.editor.delete_selected();
+            }
+            if menu_item(ui, icon::SELECTION_ALL, "Select All", "Ctrl+A", editing) {
+                let scene = self.editor.scene_root;
+                let all: Vec<_> = self
+                    .editor
+                    .tree()
+                    .children(scene)
+                    .into_iter()
+                    .filter(|&n| self.editor.is_editable(n))
+                    .collect();
+                self.editor.set_selection(all, None);
             }
             ui.separator();
             if menu_item(ui, icon::CROSSHAIR, "Frame Selection", "F", true) {
@@ -584,6 +618,7 @@ impl EditorApp {
             ui.checkbox(&mut options.grid, "Grid");
             ui.checkbox(&mut options.icons, "Node icons");
             ui.checkbox(&mut options.collision, "Collision shapes");
+            ui.checkbox(&mut options.ui, "Edit UI in the view");
             ui.checkbox(&mut options.stats, "Statistics");
             ui.checkbox(&mut options.editor_lighting, "Editor lighting");
             ui.checkbox(&mut self.editor.preview_effects, "Preview effects");
@@ -833,9 +868,13 @@ impl EditorApp {
                     .selection
                     .and_then(|n| self.editor.relative_path(n))
                 {
-                    ui.label(
-                        RichText::new(format!("{} {path}", icon::CURSOR)).color(theme::TEXT_DIM),
-                    );
+                    let more = self.editor.selected.len().saturating_sub(1);
+                    let text = if more > 0 {
+                        format!("{} {path} +{more}", icon::CURSOR)
+                    } else {
+                        format!("{} {path}", icon::CURSOR)
+                    };
+                    ui.label(RichText::new(text).color(theme::TEXT_DIM));
                 }
             });
         });
@@ -953,12 +992,16 @@ impl EditorApp {
                             ("F5 / Shift+F5 / F6", "Play / Stop / Pause"),
                             ("F7 (paused)", "Step one frame"),
                             ("F3 / F4 (playing)", "Stats overlay / physics view"),
+                            ("F8 / F9 (playing)", "Input view / damage and object trace"),
                             ("Ctrl+S, Ctrl+Shift+S", "Save, Save As"),
                             ("Ctrl+Shift+E", "Export the game (Windows / Linux)"),
                             ("Ctrl+N, Ctrl+O", "New scene, Open scene"),
                             ("Ctrl+Z, Ctrl+Y", "Undo, Redo"),
                             ("Ctrl+D, Del, F2", "Duplicate, Delete, Rename"),
                             ("Q W E R", "Select, Move, Rotate, Scale"),
+                            ("Ctrl+click, Shift+click", "Add to / remove from the selection"),
+                            ("Drag on empty space", "Box select (Shift/Ctrl: add)"),
+                            ("Ctrl+A, Esc", "Select all, Select none"),
                             ("Hold Ctrl while dragging", "Snap (0.5 m, 15°, 0.1)"),
                             ("F / double-click in tree", "Frame selection"),
                             ("Right mouse + WASD/QE", "Fly (Shift: faster, wheel: speed)"),
@@ -1034,6 +1077,8 @@ struct Tabs<'a> {
     viewport: &'a mut Viewport,
     scene_tree: &'a mut SceneTreePanel,
     inspector: &'a mut InspectorPanel,
+    effects: &'a mut crate::panels::effects::EffectsPanel,
+    animation: &'a mut crate::panels::animation::AnimationPanel,
     assets: &'a mut AssetsPanel,
     console: &'a mut ConsolePanel,
     profiler: &'a mut ProfilerPanel,
@@ -1069,6 +1114,8 @@ impl TabViewer for Tabs<'_> {
             Tab::Console => self.console.show(ui),
             Tab::Profiler => self.profiler.show(ui, self.editor),
             Tab::Debug => crate::panels::debug::show(ui, self.editor),
+            Tab::Effects => self.effects.show(ui, self.editor),
+            Tab::Animation => self.animation.show(ui, self.editor),
             Tab::SourceControl => match self.git.as_deref_mut() {
                 Some(git) => self.git_panel.show(ui, git, self.editor.project()),
                 None => {
@@ -1243,6 +1290,8 @@ impl EditorApp {
                     viewport: &mut self.viewport,
                     scene_tree: &mut self.scene_tree,
                     inspector: &mut self.inspector,
+                    effects: &mut self.effects,
+                    animation: &mut self.animation,
                     assets: &mut self.assets,
                     console: &mut self.console,
                     profiler: &mut self.profiler,

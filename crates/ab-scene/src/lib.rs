@@ -36,7 +36,7 @@ pub use scene_tree::SceneTree;
 pub use script::panic_message;
 pub use script::{AsAny, NodeScript};
 pub use scripting::{Groups, Timer};
-pub use signal::{ConnectionId, Signal, SignalQueue};
+pub use signal::{ConnectionId, Signal, SignalQueue, SignalTap, TappedSignal, SIGNAL_TAP_CAPACITY};
 pub use systems::propagate_transforms;
 
 /// Class names of the built-in node types.

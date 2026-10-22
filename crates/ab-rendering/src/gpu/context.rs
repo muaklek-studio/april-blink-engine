@@ -1,6 +1,7 @@
+use super::adapter;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Validation errors logged in full before they are only counted (one bad draw repeats every
 /// frame).
@@ -29,7 +30,7 @@ impl Default for RendererConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
-    #[error("no compatible GPU adapter found (is a Vulkan/DX12/Metal driver installed?)")]
+    #[error("no compatible GPU adapter found (is a Vulkan, DirectX 12, Metal or OpenGL driver installed?)")]
     NoAdapter,
     #[error("failed to open the GPU device: {0}")]
     RequestDevice(#[from] wgpu::RequestDeviceError),
@@ -63,50 +64,69 @@ impl GpuContext {
     pub(crate) fn create_instance() -> wgpu::Instance {
         // Surfaces are created from winit windows, which bring their own display handle.
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
+        descriptor.backends = adapter::backends();
         descriptor.flags = instance_flags();
         wgpu::Instance::new(descriptor)
     }
 
-    /// Opens the best high-performance adapter, compatible with `surface` when given.
+    /// Opens the best adapter of any backend (see [`adapter`](super::adapter)), compatible
+    /// with `surface` when given; the next best when a device cannot be opened on it.
     pub async fn new(
         instance: wgpu::Instance,
         surface: Option<&wgpu::Surface<'_>>,
     ) -> Result<Self, RenderError> {
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: surface,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })
-            .await
-            .map_err(|_| RenderError::NoAdapter)?;
-        let adapter_info = adapter.get_info();
-        info!(
-            name = adapter_info.name,
-            backend = ?adapter_info.backend,
-            driver = adapter_info.driver,
-            "GPU adapter selected"
-        );
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("ab-rendering device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-                memory_hints: wgpu::MemoryHints::Performance,
-                ..Default::default()
-            })
-            .await?;
-        let lost = Arc::new(AtomicBool::new(false));
-        install_error_handlers(&device, &lost);
-        Ok(Self {
-            instance: Some(instance),
-            adapter,
-            device,
-            queue,
-            lost,
-        })
+        let adapters = instance.enumerate_adapters(adapter::backends()).await;
+        let ranked = adapter::rank(adapters, surface);
+        for (n, (_, candidate)) in ranked.iter().enumerate() {
+            info!(
+                rank = n + 1,
+                score = candidate.score(),
+                "GPU found: {candidate}"
+            );
+        }
+        let mut last_error = None;
+        for (adapter, candidate) in ranked {
+            let limits = adapter::required_limits(&adapter.limits());
+            let opened = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("ab-rendering device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    memory_hints: wgpu::MemoryHints::Performance,
+                    ..Default::default()
+                })
+                .await;
+            match opened {
+                Ok((device, queue)) => {
+                    let adapter_info = adapter.get_info();
+                    info!(
+                        name = adapter_info.name,
+                        backend = ?adapter_info.backend,
+                        driver = adapter_info.driver,
+                        "GPU adapter selected: {candidate}"
+                    );
+                    let lost = Arc::new(AtomicBool::new(false));
+                    install_error_handlers(&device, &lost);
+                    return Ok(Self {
+                        instance: Some(instance),
+                        adapter,
+                        device,
+                        queue,
+                        lost,
+                    });
+                }
+                Err(err) => {
+                    warn!("cannot open {candidate}: {err}; trying the next GPU");
+                    last_error = Some(err);
+                }
+            }
+        }
+        Err(last_error.map_or(RenderError::NoAdapter, RenderError::RequestDevice))
+    }
+
+    /// The adapter in words: `NVIDIA GeForce RTX 3060 · Vulkan · dedicated GPU`.
+    pub fn adapter_summary(&self) -> String {
+        adapter::Candidate::of(&self.adapter, None, None).to_string()
     }
 
     /// True once the driver reported the device lost; the renderer must be recreated.

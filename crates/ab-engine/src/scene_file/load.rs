@@ -2,6 +2,7 @@
 
 use super::format::*;
 use super::{SceneInstance, SceneOrigin};
+use ab_animation::AnimationPlayer;
 use ab_asset::{spawn_gltf, AssetError, AssetServer};
 use ab_audio::{Attenuation, AudioNodes, AudioPlayer};
 use ab_core::{EulerRot, Quat, Transform3D, Vec3};
@@ -183,7 +184,19 @@ fn instantiate_at_depth(
                 component.body_b = b;
             }
         }
-        Ok(root.expect("the first node is the root"))
+        let root = root.expect("the first node is the root");
+        for (desc, &node) in scene.nodes.iter().zip(&created) {
+            if let Some(animation) = &desc.animation {
+                load_animations(tree, node, animation)
+                    .map_err(|reason| error(&desc.name, reason))?;
+            }
+        }
+        // Humanoid ragdolls need their characters' skeletons: built last.
+        for (node, err) in crate::ragdoll::build_rigs(tree, root) {
+            let name = tree.name(node).map(|n| n.to_owned()).unwrap_or_default();
+            tracing::warn!("{origin}: ragdoll `{name}`: {err}");
+        }
+        Ok(root)
     })();
     if result.is_err() {
         // Free what was built: the first node holds everything attached so far.
@@ -198,6 +211,94 @@ fn instantiate_at_depth(
         }
     }
     result
+}
+
+/// Loads an `AnimationPlayer`'s clip files and points it at the nodes they animate (paths
+/// from the player's parent).
+pub fn load_animations(
+    tree: &mut SceneTree,
+    player: NodeHandle,
+    desc: &AnimationDesc,
+) -> Result<(), String> {
+    use crate::animation_file::ClipFile;
+    let mut files = Vec::new();
+    for path in &desc.clips {
+        let bytes = tree
+            .world()
+            .resource::<AssetServer>()
+            .ok_or("the AssetServer resource is missing")?
+            .read(path)
+            .map_err(|e| format!("animation `{path}`: {e}"))?;
+        let text = String::from_utf8_lossy(&bytes);
+        files.push(ClipFile::from_toml(&text).map_err(|e| format!("`{path}`: {e}"))?);
+    }
+    install_clips(tree, player, &files, desc)
+}
+
+/// Gives the `AnimationPlayer` node `player` these clips (as [`load_animations`] does from
+/// files): editors applying clips being edited.
+pub fn install_clips(
+    tree: &mut SceneTree,
+    player: NodeHandle,
+    files: &[crate::animation_file::ClipFile],
+    desc: &AnimationDesc,
+) -> Result<(), String> {
+    let mut targets: Vec<String> = Vec::new();
+    let mut clips = Vec::new();
+    for file in files {
+        let (mut clip, local) = file.build();
+        // One target list for all the player's clips.
+        for channel in &mut clip.channels {
+            let path = &local[channel.target];
+            channel.target = match targets.iter().position(|t| t == path) {
+                Some(i) => i,
+                None => {
+                    targets.push(path.clone());
+                    targets.len() - 1
+                }
+            };
+        }
+        clips.push(clip);
+    }
+    // Not placed yet (an editor rebuilding the node): set up once it is.
+    let Some(base) = tree.parent(player) else {
+        return Ok(());
+    };
+    let handles: Vec<NodeHandle> = targets
+        .iter()
+        .map(|path| {
+            let node = if path == "." {
+                Some(base)
+            } else {
+                tree.get_node(base, path)
+            };
+            node.unwrap_or_else(|| {
+                tracing::warn!("animation target `{path}` not found");
+                // Writes to a node without a transform are ignored.
+                player
+            })
+        })
+        .collect();
+    let library = tree
+        .world_mut()
+        .resource_or_insert_with(ab_animation::AnimationLibrary::new);
+    let named: Vec<(String, ab_animation::ClipHandle)> = clips
+        .into_iter()
+        .map(|clip| (clip.name.clone(), library.add(clip)))
+        .collect();
+    let mut player_component = tree
+        .component_mut::<AnimationPlayer>(player)
+        .ok_or("not an AnimationPlayer")?;
+    player_component.targets = handles;
+    player_component.clips = named;
+    player_component.looping = desc.looping.unwrap_or(true);
+    player_component.speed = desc.speed.unwrap_or(1.0);
+    if let Some(name) = &desc.autoplay {
+        if !player_component.play_named(name) {
+            return Err(format!("no clip named `{name}` to autoplay"));
+        }
+    }
+    Ok(())
 }
 
 /// Creates the node for `desc` (detached).
@@ -223,6 +324,9 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
         return Ok(node);
     }
     let kind = desc.kind.as_deref().unwrap_or("Node3D");
+    if let Some(node) = super::ui::create(tree, kind, desc) {
+        return node;
+    }
     let node = match kind {
         "Node" => tree.create_node(name),
         "Node3D" => tree.create_node3d(name),
@@ -273,14 +377,20 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
         "OmniLight3D" => {
             let l = desc.light.clone().unwrap_or_default();
             let default = OmniLight3D::default();
-            tree.create_omni_light3d(
+            let energy = l.energy.unwrap_or(default.energy);
+            let node = tree.create_omni_light3d(
                 name,
                 OmniLight3D {
                     color: color(&l.color)?,
-                    energy: l.energy.unwrap_or(default.energy),
+                    energy,
                     range: l.range.unwrap_or(default.range),
                 },
-            )
+            );
+            if let Some(seconds) = l.flash.filter(|s| *s > 0.0) {
+                tree.insert_component(node, ab_effects::LightFlash::new(energy, seconds))
+                    .map_err(|e| e.to_string())?;
+            }
+            node
         }
         "SpotLight3D" => {
             let l = desc.light.clone().unwrap_or_default();
@@ -373,12 +483,27 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
         }
         "AudioListener3D" => tree.create_audio_listener3d(name),
         "Ragdoll" => {
-            let active = desc
-                .ragdoll
-                .as_ref()
-                .and_then(|r| r.active)
-                .unwrap_or(false);
-            tree.create_ragdoll(name, Ragdoll { active })
+            let r = desc.ragdoll.clone().unwrap_or_default();
+            let node = tree.create_ragdoll(
+                name,
+                Ragdoll {
+                    active: r.active.unwrap_or(false),
+                },
+            );
+            if let Some(skeleton) = r.skeleton.filter(|s| !s.trim().is_empty()) {
+                // Bodies are built once the whole scene exists (`build_rigs`).
+                tree.insert_component(
+                    node,
+                    crate::ragdoll::RagdollRig {
+                        skeleton,
+                        bones: r.bones,
+                        mass: r.mass,
+                        thickness: r.thickness,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            node
         }
         "Joint3D" => {
             let j = desc
@@ -406,6 +531,23 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
             tree.create_joint3d(name, joint)
         }
         "CameraShake" => tree.create_camera_shake(name),
+        "AnimationPlayer" => {
+            // Its clips address nodes by path: set up once the hierarchy exists.
+            let node = tree.spawn_node(
+                name,
+                ab_asset::ANIMATION_PLAYER_CLASS,
+                (AnimationPlayer::new(Vec::new()),),
+            );
+            tree.insert_component(
+                node,
+                SceneOrigin {
+                    animation: Some(desc.animation.clone().unwrap_or_default()),
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            node
+        }
         "Particles3D" => {
             let p = desc.particles.clone().unwrap_or_default();
             let emitter = particle_emitter(&p)?;
@@ -436,7 +578,8 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
                  DirectionalLight3D, OmniLight3D, SpotLight3D, StaticBody3D, RigidBody3D, \
                  AnimatableBody3D, CharacterBody3D, Area3D, CollisionShape3D, Joint3D, Ragdoll, \
                  AudioStreamPlayer, AudioStreamPlayer3D, AudioListener3D, Timer, \
-                 Particles3D, CameraShake)"
+                 Particles3D, CameraShake, AnimationPlayer, CanvasLayer, Control, Panel, Label, \
+                 Button, ProgressBar, VBoxContainer, HBoxContainer, TextureRect)"
             ))
         }
     };
@@ -526,6 +669,39 @@ pub fn particle_emitter(p: &ParticlesDesc) -> Result<ParticleEmitter, String> {
     if let Some(lifetime) = p.lifetime {
         settings.lifetime = lifetime;
     }
+    if let Some(v) = p.lifetime_random {
+        settings.lifetime_random = v.clamp(0.0, 1.0);
+    }
+    if let Some(shape) = p.shape {
+        settings.shape = shape;
+    }
+    if let Some(v) = p.direction {
+        settings.direction = v.into();
+    }
+    if let Some(v) = p.spread {
+        settings.spread = v.clamp(0.0, 180.0);
+    }
+    if let Some(v) = p.gravity {
+        settings.gravity = v.into();
+    }
+    if let Some(v) = p.damping {
+        settings.damping = v.max(0.0);
+    }
+    if let Some(v) = p.turbulence {
+        settings.turbulence = v.max(0.0);
+    }
+    if let Some(v) = p.size_random {
+        settings.size_random = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = p.spin {
+        settings.spin = v;
+    }
+    if let Some(v) = p.hardness {
+        settings.hardness = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = p.stretch {
+        settings.stretch = v.max(0.0);
+    }
     if let Some(size) = p.size {
         settings.size = size;
     }
@@ -539,6 +715,15 @@ pub fn particle_emitter(p: &ParticlesDesc) -> Result<ParticleEmitter, String> {
             None => ab_core::Color::rgba(start.r, start.g, start.b, 0.0),
         };
         settings.color = ColorRamp::two(start, end);
+    }
+    if !p.colors.is_empty() {
+        let mut stops = p
+            .colors
+            .iter()
+            .map(|(t, c)| Ok((t.clamp(0.0, 1.0), c.to_color()?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        settings.color = ColorRamp(stops);
     }
     if let Some(emission) = p.emission {
         settings.emission = emission;
@@ -652,10 +837,6 @@ pub fn apply_environment(tree: &mut SceneTree, desc: &EnvironmentDesc) -> Result
     if let Some(f) = desc.fog_height_falloff {
         environment.fog.height_falloff = f;
     }
-    let post = &mut environment.post;
-    if let Some(e) = desc.exposure {
-        post.exposure = e;
-    }
     let finite = |key: &str, v: f32| {
         if v.is_finite() {
             Ok(v.max(0.0))
@@ -663,6 +844,46 @@ pub fn apply_environment(tree: &mut SceneTree, desc: &EnvironmentDesc) -> Result
             Err(format!("`{key}` must be a finite number"))
         }
     };
+    let fog = &mut environment.fog;
+    if let Some(v) = desc.fog_max_opacity {
+        fog.max_opacity = finite("fog_max_opacity", v)?.min(1.0);
+    }
+    if let Some(v) = desc.fog_sun_scattering {
+        fog.sun_scattering = finite("fog_sun_scattering", v)?;
+    }
+    if let Some(v) = desc.fog_sun_anisotropy {
+        fog.sun_scattering_anisotropy = finite("fog_sun_anisotropy", v)?.min(0.95);
+    }
+    if let Some(v) = desc.fog_patchiness {
+        fog.patchiness = finite("fog_patchiness", v)?.min(1.0);
+    }
+    if let Some(v) = desc.fog_patch_size {
+        fog.patch_size = finite("fog_patch_size", v)?.max(0.5);
+    }
+    if let Some(wind) = desc.fog_wind {
+        if !wind.iter().all(|v| v.is_finite()) {
+            return Err("`fog_wind` must be finite numbers".into());
+        }
+        fog.wind = wind.into();
+    }
+    let shafts = &mut environment.light_shafts;
+    if let Some(v) = desc.light_shafts {
+        shafts.intensity = finite("light_shafts", v)?;
+        shafts.enabled = shafts.intensity > 0.0;
+    }
+    if let Some(v) = desc.light_shafts_density {
+        shafts.density = finite("light_shafts_density", v)?;
+    }
+    if let Some(v) = desc.light_shafts_anisotropy {
+        shafts.anisotropy = finite("light_shafts_anisotropy", v)?.min(0.95);
+    }
+    if let Some(v) = desc.light_shafts_distance {
+        shafts.max_distance = finite("light_shafts_distance", v)?.max(1.0);
+    }
+    let post = &mut environment.post;
+    if let Some(e) = desc.exposure {
+        post.exposure = e;
+    }
     if let Some(v) = desc.contrast {
         post.contrast = finite("contrast", v)?;
     }

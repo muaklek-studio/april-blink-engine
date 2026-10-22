@@ -12,6 +12,11 @@
 //!     --scripts target/debug/libab_slice.so                      # with the game's scripts
 //! ```
 
+// Release builds are windowed programs on Windows (no console window next to the editor).
+// Started from a terminal, they print to it (see `attach_console`); an error that stops the
+// editor before its window opens is shown in a message box otherwise.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod chrome;
 mod console;
@@ -28,6 +33,7 @@ mod scripts;
 mod shell;
 mod state;
 mod theme;
+mod ui_edit;
 mod viewport;
 
 use anyhow::{bail, Context as _};
@@ -42,7 +48,7 @@ pub struct Options {
     pub scene: Option<String>,
     /// The game's script library (cdylib), for Play mode.
     pub scripts: Option<PathBuf>,
-    /// Node to select at start (path from the scene root).
+    /// Nodes to select at start (paths from the scene root, comma-separated).
     pub select: Option<String>,
     /// Start in Play mode.
     pub play: bool,
@@ -83,7 +89,7 @@ fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
             }
             let mut setup = WgpuSetupCreateNew::without_display_handle();
             setup.instance_descriptor.backends =
-                wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
+                wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL);
             setup.power_preference = wgpu::PowerPreference::HighPerformance;
             // The engine's renderer needs the same limits as in the game.
             setup.device_descriptor = std::sync::Arc::new(|adapter| wgpu::DeviceDescriptor {
@@ -158,7 +164,7 @@ fn parse() -> anyhow::Result<Options> {
             "-h" | "--help" => {
                 println!(
                     "usage: ab-editor [--project <asset dir>] [--scene <scene.toml>] \
-                     [--scripts <library>] [--select <node path>] [--play] [--physics-view] \
+                     [--scripts <library>] [--select <node path,...>] [--play] [--physics-view] \
                      [--show <panel,...>] [--system-titlebar] [--screenshot <file.png>] \
                      [--hold-loading]\n\n\
                      Without --project the project manager opens after the system check."
@@ -172,6 +178,44 @@ fn parse() -> anyhow::Result<Options> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let console = attach_console();
+    let result = run();
+    if let Err(err) = &result {
+        if !console {
+            ab_engine::crash::show_text("April Blink Editor", &format!("{err:#}"));
+        }
+    }
+    result
+}
+
+/// Whether the editor's output reaches someone: always outside Windows. A Windows release
+/// build has no console of its own, so it takes the one of the terminal it was started from
+/// (`--export`, `--help`…), unless its output is already piped (the Export window's job).
+#[cfg(windows)]
+fn attach_console() -> bool {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn AttachConsole(process: u32) -> i32;
+    }
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const INVALID_HANDLE_VALUE: *mut c_void = usize::MAX as *mut c_void;
+    // SAFETY: plain Win32 calls with constant arguments; the handle is only compared.
+    unsafe {
+        let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        (!stdout.is_null() && stdout != INVALID_HANDLE_VALUE)
+            || AttachConsole(ATTACH_PARENT_PROCESS) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() -> bool {
+    true
+}
+
+fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--export") => return export(&args[1..]),

@@ -306,3 +306,183 @@ fn the_ragdoll_sample_scene_is_current_and_plays() {
         "tumbled down the steps"
     );
 }
+
+/// A scene with a Mixamo-style character (plain bones, T-pose) and a humanoid ragdoll for it.
+fn character_scene(bones_override: &str) -> String {
+    let rig: &[(&str, &str, [f32; 3])] = &[
+        ("mixamorig_Hips", "", [0.0, 1.0, 0.0]),
+        ("mixamorig_Spine", "mixamorig_Hips", [0.0, 0.1, 0.0]),
+        ("mixamorig_Spine2", "mixamorig_Spine", [0.0, 0.25, 0.0]),
+        ("mixamorig_Neck", "mixamorig_Spine2", [0.0, 0.2, 0.0]),
+        ("mixamorig_Head", "mixamorig_Neck", [0.0, 0.08, 0.0]),
+        ("mixamorig_LeftArm", "mixamorig_Spine2", [0.18, 0.13, 0.0]),
+        (
+            "mixamorig_LeftForeArm",
+            "mixamorig_LeftArm",
+            [0.27, 0.0, 0.0],
+        ),
+        (
+            "mixamorig_LeftHand",
+            "mixamorig_LeftForeArm",
+            [0.25, 0.0, 0.0],
+        ),
+        ("mixamorig_RightArm", "mixamorig_Spine2", [-0.18, 0.13, 0.0]),
+        (
+            "mixamorig_RightForeArm",
+            "mixamorig_RightArm",
+            [-0.27, 0.0, 0.0],
+        ),
+        (
+            "mixamorig_RightHand",
+            "mixamorig_RightForeArm",
+            [-0.25, 0.0, 0.0],
+        ),
+        ("mixamorig_LeftUpLeg", "mixamorig_Hips", [0.09, -0.05, 0.0]),
+        (
+            "mixamorig_LeftLeg",
+            "mixamorig_LeftUpLeg",
+            [0.0, -0.43, 0.0],
+        ),
+        ("mixamorig_LeftFoot", "mixamorig_LeftLeg", [0.0, -0.43, 0.0]),
+        (
+            "mixamorig_RightUpLeg",
+            "mixamorig_Hips",
+            [-0.09, -0.05, 0.0],
+        ),
+        (
+            "mixamorig_RightLeg",
+            "mixamorig_RightUpLeg",
+            [0.0, -0.43, 0.0],
+        ),
+        (
+            "mixamorig_RightFoot",
+            "mixamorig_RightLeg",
+            [0.0, -0.43, 0.0],
+        ),
+    ];
+    let mut toml = String::from(
+        "[[node]]\nname = \"Level\"\ntype = \"Node3D\"\n\n\
+         [[node]]\nname = \"Hero\"\nparent = \".\"\ntype = \"Node3D\"\nposition = [3.0, 0.0, 0.0]\n\n\
+         [[node]]\nname = \"Model\"\nparent = \"Hero\"\ntype = \"Node3D\"\n",
+    );
+    let path_of = |name: &str| -> String {
+        let mut path = vec![name.to_owned()];
+        let mut current = name;
+        while let Some((_, parent, _)) = rig.iter().find(|(n, ..)| *n == current) {
+            if parent.is_empty() {
+                break;
+            }
+            path.push((*parent).to_owned());
+            current = parent;
+        }
+        path.reverse();
+        format!("Hero/Model/{}", path.join("/"))
+    };
+    for (name, parent, [x, y, z]) in rig {
+        let parent = if parent.is_empty() {
+            "Hero/Model".to_owned()
+        } else {
+            path_of(parent)
+        };
+        toml.push_str(&format!(
+            "\n[[node]]\nname = \"{name}\"\nparent = \"{parent}\"\ntype = \"Node3D\"\nposition = [{x}, {y}, {z}]\n"
+        ));
+    }
+    toml.push_str(&format!(
+        "\n[[node]]\nname = \"Ragdoll\"\nparent = \"Hero\"\ntype = \"Ragdoll\"\nragdoll = {{ skeleton = \"../Model\", mass = 80.0{bones_override} }}\n"
+    ));
+    toml
+}
+
+#[test]
+fn a_scene_file_maps_a_character_and_saves_only_the_rig() {
+    let mut engine = engine();
+    let scene = SceneFile::from_toml(&character_scene("")).unwrap();
+    let tree = engine.tree_mut();
+    let level = instantiate_scene(tree, &scene, "test").unwrap();
+    tree.add_child(tree.root(), level).unwrap();
+    let doll = tree.get_node(level, "Hero/Ragdoll").unwrap();
+    let parts = tree.ragdoll_parts(doll);
+    assert_eq!(parts.len(), 14);
+    let mass: f32 = parts
+        .iter()
+        .map(|&p| tree.component::<PhysicsBody3D>(p).unwrap().mass)
+        .sum();
+    assert!((mass - 80.0).abs() < 0.01);
+    // The bodies sit on the character, which stands 3 m along x.
+    let pelvis = tree.get_node(doll, "Pelvis").unwrap();
+    let at = tree.global_position(pelvis).unwrap();
+    assert!(
+        (at.x - 3.0).abs() < 0.05 && (at.y - 1.0).abs() < 0.2,
+        "{at}"
+    );
+
+    // Saved: the rig, not its bodies; loading again rebuilds them.
+    let saved = save_scene(tree, level);
+    let desc = saved.nodes.iter().find(|n| n.name == "Ragdoll").unwrap();
+    let rig = desc.ragdoll.as_ref().unwrap();
+    assert_eq!(rig.skeleton.as_deref(), Some("../Model"));
+    assert_eq!(rig.mass, Some(80.0));
+    assert!(!saved.nodes.iter().any(|n| n.name == "Pelvis"));
+    let again = instantiate_scene(
+        tree,
+        &SceneFile::from_toml(&saved.to_toml()).unwrap(),
+        "again",
+    )
+    .unwrap();
+    let doll = tree.get_node(again, "Hero/Ragdoll").unwrap();
+    assert_eq!(tree.ragdoll_parts(doll).len(), 14);
+
+    // Limp: it falls and carries the bones.
+    frames(&mut engine, 1);
+    let doll = engine.tree().get_node(level, "Hero/Ragdoll").unwrap();
+    ragdoll::go_limp(engine.tree_mut(), doll, None).unwrap();
+    let head = engine.tree().get_node(level, "Hero/Model/mixamorig_Hips/mixamorig_Spine/mixamorig_Spine2/mixamorig_Neck/mixamorig_Head").unwrap();
+    let start = engine.tree().global_position(head).unwrap();
+    frames(&mut engine, 180);
+    let end = engine.tree().global_position(head).unwrap();
+    assert!(end.y < start.y - 0.8, "{start} → {end}");
+}
+
+#[test]
+fn a_bone_set_by_hand_wins_and_a_missing_one_is_reported() {
+    let mut engine = engine();
+    // No left foot: still a ragdoll (feet are optional), with one foot body less.
+    let scene = SceneFile::from_toml(&character_scene(", bones = { left_foot = \"\" }")).unwrap();
+    let tree = engine.tree_mut();
+    let level = instantiate_scene(tree, &scene, "test").unwrap();
+    let doll = tree.get_node(level, "Hero/Ragdoll").unwrap();
+    assert_eq!(tree.ragdoll_parts(doll).len(), 13);
+    // Without a knee there is no ragdoll, and loading still succeeds.
+    let scene =
+        SceneFile::from_toml(&character_scene(", bones = { left_lower_leg = \"\" }")).unwrap();
+    let level = instantiate_scene(tree, &scene, "test").unwrap();
+    let doll = tree.get_node(level, "Hero/Ragdoll").unwrap();
+    assert!(tree.ragdoll_parts(doll).is_empty());
+}
+
+#[test]
+fn the_sample_mannequin_gets_a_full_humanoid_ragdoll() {
+    let mut engine = engine();
+    let tree = engine.tree_mut();
+    let model = spawn_gltf(tree, "models/mannequin.gltf").unwrap();
+    tree.add_child(tree.root(), model).unwrap();
+    tree.update_transforms();
+    let map = ragdoll::humanoid_map(tree, model, &Default::default());
+    assert!(map.is_complete(), "missing {:?}", map.missing());
+    assert_eq!(map.iter().count(), 17, "every bone, by its Mixamo name");
+    let doll = ragdoll::humanoid_ragdoll_for_model(
+        tree,
+        model,
+        &ab_engine::physics::HumanoidRagdollSettings::default(),
+    )
+    .unwrap();
+    assert_eq!(tree.ragdoll_parts(doll).len(), 14);
+    // It plays its clips as hit boxes, then falls when limp.
+    frames(&mut engine, 30);
+    ragdoll::go_limp(engine.tree_mut(), doll, None).unwrap();
+    frames(&mut engine, 120);
+    let parts = engine.tree().ragdoll_parts(doll);
+    let pelvis = engine.tree().global_position(parts[0]).unwrap();
+    assert!(pelvis.y < 0.6 && pelvis.is_finite(), "{pelvis}");
+}

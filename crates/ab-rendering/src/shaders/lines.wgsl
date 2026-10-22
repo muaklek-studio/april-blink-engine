@@ -1,4 +1,5 @@
-// Debug lines in the HDR pass: unlit, unfogged, premultiplied alpha.
+// Debug lines in the HDR pass: unlit, unfogged, premultiplied alpha. `Frame` is the start of
+// the forward pass's.
 
 struct Frame {
     view_proj: mat4x4<f32>,

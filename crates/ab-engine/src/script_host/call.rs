@@ -97,6 +97,14 @@ impl<'t> Call<'t> {
         }
     }
 
+    /// A node argument, or nil.
+    pub fn opt_node(&self, index: usize) -> Result<Option<NodeHandle>, CallError> {
+        if self.raw(index).is_nil() {
+            return Ok(None);
+        }
+        self.node(index).map(Some)
+    }
+
     pub fn str(&self, index: usize) -> Result<&'t str, CallError> {
         // SAFETY: arguments are valid for the duration of the call.
         unsafe { self.raw(index).as_str() }.ok_or_else(|| self.bad(index, "a string"))
@@ -106,6 +114,20 @@ impl<'t> Call<'t> {
         self.raw(index)
             .as_bool()
             .ok_or_else(|| self.bad(index, "a bool"))
+    }
+
+    pub fn opt_bool(&self, index: usize) -> Result<Option<bool>, CallError> {
+        if self.raw(index).is_nil() {
+            return Ok(None);
+        }
+        self.bool(index).map(Some)
+    }
+
+    pub fn opt_str(&self, index: usize) -> Result<Option<&'t str>, CallError> {
+        if self.raw(index).is_nil() {
+            return Ok(None);
+        }
+        self.str(index).map(Some)
     }
 
     pub fn f32(&self, index: usize) -> Result<f32, CallError> {

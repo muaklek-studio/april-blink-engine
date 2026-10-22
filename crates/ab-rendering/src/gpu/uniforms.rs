@@ -30,6 +30,10 @@ pub(crate) struct FrameGpu {
     pub ambient: [f32; 4],
     pub fog_color: [f32; 4],
     pub fog_params: [f32; 4],
+    /// sun scattering, anisotropy, camera height term, patchiness
+    pub fog_scatter: [f32; 4],
+    /// noise offset (wind × time, in patch units), 1 / patch size
+    pub fog_wind: [f32; 4],
     pub sun_direction: [f32; 4],
     pub sun_radiance: [f32; 4],
     pub shadow_params: [f32; 4],
@@ -37,6 +41,12 @@ pub(crate) struct FrameGpu {
     pub shadow_matrices: [Mat4; SHADOW_LAYERS],
     pub omni: [OmniGpu; MAX_OMNI_LIGHTS],
     pub spot: [SpotGpu; MAX_SPOT_LIGHTS],
+    /// For the fogged sky: clip space back to the world.
+    pub inverse_view_proj: Mat4,
+    /// rgb: the background colour
+    pub background: [f32; 4],
+    /// Light shafts: intensity, anisotropy, max distance, density
+    pub shafts: [f32; 4],
 }
 
 #[repr(C)]
@@ -93,8 +103,14 @@ mod tests {
         assert_eq!(std::mem::size_of::<MaterialGpu>(), 64);
         assert_eq!(std::mem::size_of::<PostGpu>(), 80);
         assert_eq!(std::mem::size_of::<BloomGpu>(), 16);
-        let header = 64 + 16 * 8;
-        let expected = header + 64 * SHADOW_LAYERS + 32 * MAX_OMNI_LIGHTS + 64 * MAX_SPOT_LIGHTS;
+        let header = 64 + 16 * 10;
+        let expected = header
+            + 64 * SHADOW_LAYERS
+            + 32 * MAX_OMNI_LIGHTS
+            + 64 * MAX_SPOT_LIGHTS
+            + 64
+            + 16
+            + 16;
         assert_eq!(std::mem::size_of::<FrameGpu>(), expected);
     }
 }

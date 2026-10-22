@@ -10,7 +10,10 @@ const LIMIT: usize = 100;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub scene: SceneFile,
+    /// The active node.
     pub selection: Option<String>,
+    /// Every selected node.
+    pub selected: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +48,16 @@ impl History {
         Some(next)
     }
 
+    /// Undo steps recorded.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Forgets the undo steps after the first `len` (they are replaced by one step).
+    pub fn truncate_undo(&mut self, len: usize) {
+        self.undo.truncate(len);
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -73,6 +86,7 @@ mod tests {
                 ..Default::default()
             },
             selection: None,
+            selected: Vec::new(),
         }
     }
 

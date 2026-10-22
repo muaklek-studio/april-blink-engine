@@ -254,6 +254,15 @@ name = "ab-script-api"
 version = "0.1.0"
 
 [[package]]
+name = "ab-script-templates"
+version = "0.1.0"
+dependencies = [
+ "ab-engine",
+ "ab-script",
+ "serde",
+]
+
+[[package]]
 name = "ab-slice"
 version = "0.1.0"
 dependencies = [

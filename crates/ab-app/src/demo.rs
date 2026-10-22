@@ -327,6 +327,11 @@ fn configure_environment(tree: &mut SceneTree) {
         height: 0.0,
         height_falloff: 0.35,
         max_opacity: 0.95,
+        // Low banks drifting through the ruin.
+        patchiness: 0.5,
+        patch_size: 8.0,
+        wind: Vec3::new(0.8, 0.0, 0.3),
+        ..Default::default()
     };
     environment.post.exposure = 1.3;
     environment.post.contrast = 1.08;

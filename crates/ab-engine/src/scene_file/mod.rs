@@ -70,21 +70,26 @@
 //! position = [0.0, 1.55, 0.0]
 //! joint = { kind = "cone", body_a = "../Chest", body_b = "../Head", swing = 35.0, twist = 40.0 }
 //! ```
-//! Colors are `"#rrggbb[aa]"` (sRGB) or `[r, g, b(, a)]` (linear). UI is built in code and
-//! is not part of scene files.
+//! Colors are `"#rrggbb[aa]"` (sRGB) or `[r, g, b(, a)]` (linear).
+//!
+//! UI nodes (`CanvasLayer`, `Control`, `Panel`, `Label`, `Button`, `ProgressBar`,
+//! `VBoxContainer`, `HBoxContainer`, `TextureRect`) place themselves with `control` and read
+//! `canvas`, `label`, `button`, `panel`, `progress`, `box` or `image`: see [`ui`].
 
 mod format;
 mod load;
 mod save;
+pub mod ui;
 
 pub use format::{
-    AudioDesc, BodyDesc, CameraDesc, CharacterDesc, ColorDesc, EnvironmentDesc, JointDesc,
-    LightDesc, MaterialDesc, MeshDesc, NodeDesc, ParticlesDesc, RagdollDesc, SceneFile, ShapeDesc,
-    TimerDesc,
+    AnimationDesc, AudioDesc, BodyDesc, BoxDesc, ButtonDesc, CameraDesc, CanvasDesc, CharacterDesc,
+    ColorDesc, ControlDesc, EnvironmentDesc, ImageDesc, JointDesc, LabelDesc, LightDesc,
+    MaterialDesc, MeshDesc, NodeDesc, PanelDesc, ParticlesDesc, ProgressDesc, RagdollDesc,
+    SceneFile, ShapeDesc, TimerDesc,
 };
 pub use load::{
-    apply_environment, instantiate_scene, load_scene, mesh_and_material, particle_emitter,
-    SceneAssetCache, SceneFileError,
+    apply_environment, install_clips, instantiate_scene, load_animations, load_scene,
+    mesh_and_material, particle_emitter, SceneAssetCache, SceneFileError,
 };
 pub use save::{relative_path, save_scene};
 
@@ -101,4 +106,7 @@ pub struct SceneOrigin {
     pub material: Option<MaterialDesc>,
     pub audio_stream: Option<String>,
     pub particles: Option<ParticlesDesc>,
+    pub animation: Option<AnimationDesc>,
+    /// A `TextureRect`'s image file.
+    pub image: Option<ImageDesc>,
 }

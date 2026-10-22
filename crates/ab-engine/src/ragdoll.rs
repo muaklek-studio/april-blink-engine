@@ -2,8 +2,11 @@
 //!
 //! * [`humanoid_ragdoll`] / [`spawn_humanoid_ragdoll`]: a ready-made jointed mannequin (a
 //!   scene you can also save, tweak in the editor and instance).
-//! * [`ragdoll_for_model`]: hit boxes + ragdoll for a skinned glTF character, following its
-//!   animation until [`go_limp`].
+//! * [`humanoid_ragdoll_for_model`]: a person-shaped ragdoll for any humanoid character
+//!   (Mixamo, Unreal, Unity, Blender, VRoid... rigs: the bones are found by name or by the
+//!   skeleton's shape), following its animation as hit boxes until [`go_limp`]. Scene files
+//!   do the same with `ragdoll = { skeleton = "../Knight" }` ([`RagdollRig`]).
+//! * [`ragdoll_for_model`]: a capsule per bone, for skeletons that are not humanoid.
 //! * [`go_limp`]: stop the character's animation, let physics take over, push it.
 //!
 //! ```no_run
@@ -22,9 +25,13 @@
 use crate::scene_file::{instantiate_scene, NodeDesc, SceneFile, SceneFileError};
 use ab_animation::AnimationPlayer;
 use ab_core::{Color, Vec3};
-use ab_physics::{PhysicsError, PhysicsNodes, SkeletonRagdoll};
+use ab_physics::{
+    fill_humanoid_ragdoll, HumanBone, HumanoidMap, HumanoidRagdollSettings, PhysicsError,
+    PhysicsNodes, Ragdoll, SkeletonRagdoll,
+};
 use ab_rendering::Skin;
 use ab_scene::{NodeHandle, SceneTree};
+use std::collections::BTreeMap;
 
 /// Options of [`humanoid_ragdoll`].
 #[derive(Debug, Clone, PartialEq)]
@@ -304,7 +311,132 @@ pub fn ragdoll_node(name: &str, active: bool) -> NodeDesc {
         kind: Some("Ragdoll".into()),
         ragdoll: Some(crate::scene_file::RagdollDesc {
             active: Some(active),
+            ..Default::default()
         }),
         ..Default::default()
     }
+}
+
+// =============================================================================================
+// Humanoid ragdolls for characters
+// =============================================================================================
+
+/// On a `Ragdoll` node: build a humanoid ragdoll for the character at `skeleton` (a path from
+/// this node). Its bodies are made when the scene loads and are not saved; the scene file
+/// keeps only this.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RagdollRig {
+    /// Path from the `Ragdoll` node to the character (its model instance).
+    pub skeleton: String,
+    /// Bones set by hand, by [`HumanBone::key`] (`left_upper_arm`): the bone node's name, or
+    /// `""` for none. The others are found automatically.
+    pub bones: BTreeMap<String, String>,
+    /// Total mass in kg (default 70).
+    pub mass: Option<f32>,
+    /// Body thickness, 1 = average build.
+    pub thickness: Option<f32>,
+}
+
+/// The bones of the character under `model`: the joints of its first skin, or every 3D node
+/// below it when it has no skin.
+pub fn skeleton_bones(tree: &SceneTree, model: NodeHandle) -> Vec<NodeHandle> {
+    let nodes = tree.subtree(model);
+    nodes
+        .iter()
+        .find_map(|&n| tree.component::<Skin>(n).map(|s| s.joints.clone()))
+        .unwrap_or_else(|| {
+            nodes
+                .into_iter()
+                .filter(|&n| n != model && tree.is_node3d(n))
+                .collect()
+        })
+}
+
+/// The humanoid bones of the character under `model`: detected, then `overrides`
+/// ([`RagdollRig::bones`]) applied.
+pub fn humanoid_map(
+    tree: &SceneTree,
+    model: NodeHandle,
+    overrides: &BTreeMap<String, String>,
+) -> HumanoidMap {
+    let bones = skeleton_bones(tree, model);
+    let mut map = HumanoidMap::detect(tree, &bones);
+    for (key, name) in overrides {
+        let Some(slot) = HumanBone::from_key(key) else {
+            tracing::warn!("ragdoll bones: unknown bone `{key}`");
+            continue;
+        };
+        let node = bones
+            .iter()
+            .copied()
+            .find(|&b| tree.name(b).is_some_and(|n| *n == **name));
+        if node.is_none() && !name.is_empty() {
+            tracing::warn!("ragdoll bones: no bone named `{name}` for {key}");
+        }
+        map.set(slot, node);
+    }
+    map
+}
+
+/// Builds a humanoid ragdoll for the character under `model` and adds it to the model. It
+/// follows the animation (its bodies work as hit boxes) until [`go_limp`] or
+/// `settings.active`.
+pub fn humanoid_ragdoll_for_model(
+    tree: &mut SceneTree,
+    model: NodeHandle,
+    settings: &HumanoidRagdollSettings,
+) -> Result<NodeHandle, PhysicsError> {
+    let map = humanoid_map(tree, model, &BTreeMap::new());
+    ab_physics::create_humanoid_ragdoll(tree, model, "Ragdoll", &map, settings)
+}
+
+/// Builds the bodies of every [`RagdollRig`] in `root`'s subtree that has none yet. Scene
+/// loading calls it; call it again after editing a rig (with its old bodies freed).
+/// Returns the rigs that could not be built, with why.
+pub fn build_rigs(tree: &mut SceneTree, root: NodeHandle) -> Vec<(NodeHandle, String)> {
+    let rigs: Vec<NodeHandle> = tree
+        .subtree(root)
+        .into_iter()
+        .filter(|&n| tree.component::<RagdollRig>(n).is_some() && tree.children(n).is_empty())
+        .collect();
+    if rigs.is_empty() {
+        return Vec::new();
+    }
+    // The bodies are sized from the bones' global poses: bring them up to date, also for a
+    // scene still being built off the tree.
+    let top = std::iter::successors(Some(root), |&n| tree.parent(n))
+        .last()
+        .unwrap_or(root);
+    ab_scene::propagate_transforms(tree.world(), top);
+    let mut errors = Vec::new();
+    for node in rigs {
+        let rig = tree
+            .component::<RagdollRig>(node)
+            .map(|r| r.clone())
+            .expect("filtered above");
+        let active = tree.component::<Ragdoll>(node).is_some_and(|r| r.active);
+        let Some(model) = tree.get_node(node, &rig.skeleton) else {
+            // A rig built on its own (the editor rebuilding it) is built once placed.
+            if tree.parent(node).is_some() {
+                errors.push((node, format!("skeleton `{}` not found", rig.skeleton)));
+            }
+            continue;
+        };
+        let map = humanoid_map(tree, model, &rig.bones);
+        let settings = HumanoidRagdollSettings {
+            total_mass: rig.mass.unwrap_or(70.0).max(1.0),
+            thickness: rig.thickness.unwrap_or(1.0),
+            active,
+            ..Default::default()
+        };
+        if let Err(err) = fill_humanoid_ragdoll(tree, node, &map, &settings) {
+            // Half-built bodies would only get in the way.
+            for child in tree.children(node) {
+                let _ = tree.queue_free(child);
+            }
+            tree.flush_deletions();
+            errors.push((node, err.to_string()));
+        }
+    }
+    errors
 }

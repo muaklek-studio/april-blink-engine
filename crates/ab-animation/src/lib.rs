@@ -8,13 +8,15 @@
 //! Busy scenes sample their players in parallel on the [`ab_core::jobs`] workers.
 
 mod clip;
+mod locomotion;
 mod player;
 
 pub use clip::Sample;
 pub use clip::{AnimationClip, Channel, Interpolation, Keyframes, Property};
+pub use locomotion::{locomotion_system, Locomotion, LocomotionState};
 pub use player::{
-    animation_system, apply_animations, AnimationLibrary, AnimationPlayer, AnimationPoses,
-    ClipHandle,
+    animation_system, apply_animations, apply_pose, AnimationLibrary, AnimationPlayer,
+    AnimationPoses, ClipHandle, Fade,
 };
 
 use ab_ecs::World;

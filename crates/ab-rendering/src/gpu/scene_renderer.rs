@@ -26,6 +26,9 @@ use tracing::{debug, warn};
 use wgpu::util::DeviceExt;
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Distance (alpha of the HDR target) of pixels where nothing was drawn; `FAR_DISTANCE` in
+/// forward.wgsl.
+const FAR_DISTANCE: f64 = 60000.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Per-layer slot in the shadow-pass uniform buffer (max `min_uniform_buffer_offset_alignment`).
@@ -80,6 +83,10 @@ struct MaterialBinding {
 struct FrameTargets {
     size: (u32, u32),
     hdr_view: wgpu::TextureView,
+    /// Light shafts, half resolution.
+    shafts_view: wgpu::TextureView,
+    /// The scene color for the light shafts pass.
+    shafts_bind_group: wgpu::BindGroup,
     msaa_view: Option<wgpu::TextureView>,
     depth_view: wgpu::TextureView,
     post_bind_group: wgpu::BindGroup,
@@ -94,6 +101,15 @@ pub struct SceneRenderer {
 
     /// Indexed by [`forward_variant`].
     forward_pipelines: [wgpu::RenderPipeline; 4],
+    /// The background through the fog (drawn when fog is on).
+    sky_pipeline: wgpu::RenderPipeline,
+    /// Whether this frame draws the fogged sky.
+    sky: bool,
+    /// Light shafts (volumetric light), traced at half resolution.
+    shafts_pipeline: wgpu::RenderPipeline,
+    shafts_layout: wgpu::BindGroupLayout,
+    /// Whether this frame traces light shafts.
+    shafts: bool,
     /// Static, skinned.
     shadow_pipelines: [wgpu::RenderPipeline; 2],
     post_pipeline: wgpu::RenderPipeline,
@@ -120,6 +136,8 @@ pub struct SceneRenderer {
     shadow_layer_views: Vec<wgpu::TextureView>,
     shadow_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
+    /// The fog patch volume and its repeating sampler.
+    fog_noise: (wgpu::TextureView, wgpu::Sampler),
     forward_bind_group: wgpu::BindGroup,
     shadow_bind_group: wgpu::BindGroup,
 
@@ -185,6 +203,23 @@ impl SceneRenderer {
                     count: None,
                 },
                 storage_entry(5, wgpu::ShaderStages::VERTEX),
+                // Fog patches (fog.wgsl).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let material_entries: Vec<_> = (0..MATERIAL_TEXTURE_SLOTS as u32)
@@ -227,13 +262,21 @@ impl SceneRenderer {
                 },
                 uniform_entry(2, wgpu::ShaderStages::FRAGMENT, false, size_of::<PostGpu>()),
                 texture_entry(3),
+                texture_entry(4),
             ],
+        });
+        let shafts_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("light shafts layout"),
+            entries: &[texture_entry(0)],
         });
 
         let forward_module = shader(
             device,
             "forward.wgsl",
-            include_str!("../shaders/forward.wgsl"),
+            concat!(
+                include_str!("../shaders/fog.wgsl"),
+                include_str!("../shaders/forward.wgsl")
+            ),
         );
         let forward_pipelines = [(false, false), (false, true), (true, false), (true, true)].map(
             |(skinned, double_sided)| {
@@ -247,6 +290,10 @@ impl SceneRenderer {
                 )
             },
         );
+        let sky_pipeline =
+            create_sky_pipeline(device, &forward_module, &forward_layout, msaa_samples);
+        let shafts_pipeline =
+            create_shafts_pipeline(device, &forward_module, &forward_layout, &shafts_layout);
         let shadow_module = shader(
             device,
             "shadow.wgsl",
@@ -323,6 +370,7 @@ impl SceneRenderer {
             ..Default::default()
         });
 
+        let fog_noise = super::fog_noise::create(device, &gpu.queue);
         let (forward_bind_group, shadow_bind_group) = create_scene_bind_groups(
             device,
             &forward_layout,
@@ -336,6 +384,7 @@ impl SceneRenderer {
             },
             &shadow_array_view,
             &shadow_sampler,
+            &fog_noise,
         );
 
         let default_textures = [
@@ -355,6 +404,11 @@ impl SceneRenderer {
             msaa_samples,
             shadow_map_size,
             forward_pipelines,
+            sky_pipeline,
+            sky: false,
+            shafts_pipeline,
+            shafts_layout,
+            shafts: false,
             shadow_pipelines,
             post_pipeline,
             bloom_pass: BloomPass::new(device, HDR_FORMAT),
@@ -384,6 +438,7 @@ impl SceneRenderer {
             shadow_layer_views,
             shadow_sampler,
             linear_sampler,
+            fog_noise,
             forward_bind_group,
             shadow_bind_group,
             default_textures,
@@ -465,7 +520,8 @@ impl SceneRenderer {
             culled: self.list.draws.iter().filter(|d| !d.in_view).count() as u32,
             ..Default::default()
         };
-        let (frame, active_layers) = self.build_frame_uniforms(&environment, &mut stats);
+        let seconds = world.resource::<Time>().map_or(0.0, |t| t.elapsed as f32);
+        let (frame, active_layers) = self.build_frame_uniforms(&environment, seconds, &mut stats);
         gpu.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
         gpu.queue.write_buffer(
@@ -497,6 +553,9 @@ impl SceneRenderer {
             .line_pass
             .prepare(gpu, world.resource::<DebugDraw>().as_deref());
         self.record_forward_pass(&mut encoder, environment.background, &mut stats);
+        if self.shafts {
+            self.record_shafts_pass(&mut encoder);
+        }
         if bloom {
             self.bloom_pass.record(&mut encoder);
         }
@@ -564,6 +623,31 @@ impl SceneRenderer {
         )
         .create_view(&Default::default());
         let bloom_view = self.bloom_pass.resize(device, &hdr_view, width, height);
+        let shafts_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("light shafts"),
+                size: wgpu::Extent3d {
+                    width: width.div_ceil(2),
+                    height: height.div_ceil(2),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let shafts_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("light shafts bind group"),
+            layout: &self.shafts_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&hdr_view),
+            }],
+        });
         let post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post bind group"),
             layout: &self.post_layout,
@@ -584,11 +668,17 @@ impl SceneRenderer {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(bloom_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&shafts_view),
+                },
             ],
         });
         self.targets = Some(FrameTargets {
             size: (width, height),
             hdr_view,
+            shafts_view,
+            shafts_bind_group,
             msaa_view,
             depth_view,
             post_bind_group,
@@ -774,6 +864,7 @@ impl SceneRenderer {
                 },
                 &self.shadow_array_view,
                 &self.shadow_sampler,
+                &self.fog_noise,
             );
         }
         if !self.objects.is_empty() {
@@ -801,6 +892,7 @@ impl SceneRenderer {
     fn build_frame_uniforms(
         &mut self,
         environment: &Environment,
+        seconds: f32,
         stats: &mut FrameStats,
     ) -> (FrameGpu, Vec<(usize, Mat4)>) {
         let mut frame = FrameGpu::zeroed();
@@ -823,11 +915,36 @@ impl SceneRenderer {
             fog.max_opacity.clamp(0.0, 1.0),
         ];
         frame.sun_radiance[3] = -1.0;
+        self.sky = false;
+        self.shafts = false;
 
         let Some(camera) = self.list.camera else {
             return (frame, layers);
         };
+        frame.fog_scatter = [
+            fog.sun_scattering.max(0.0),
+            fog.sun_scattering_anisotropy.clamp(-0.95, 0.95),
+            fog_camera_term(fog, camera.position.y),
+            fog.patchiness.clamp(0.0, 1.0),
+        ];
+        let patch_size = fog.patch_size.max(0.5);
+        // In patch units, wrapped: the volume repeats every unit, and small numbers keep
+        // their precision however long the game runs.
+        let offset = (fog.wind * seconds / patch_size).fract_gl();
+        frame.fog_wind = [offset.x, offset.y, offset.z, 1.0 / patch_size];
         frame.view_proj = camera.view_projection.to_cols_array_2d();
+        frame.inverse_view_proj = camera.view_projection.inverse().to_cols_array_2d();
+        frame.background = rgb(environment.background, 1.0);
+        self.sky = fog.enabled && fog.density > 0.0;
+        let shafts = &environment.light_shafts;
+        let lit = self.list.directional.is_some() || !self.list.spot_lights.is_empty();
+        self.shafts = shafts.enabled && shafts.intensity > 0.0 && lit;
+        frame.shafts = [
+            shafts.intensity.max(0.0),
+            shafts.anisotropy.clamp(-0.95, 0.95),
+            shafts.max_distance.clamp(1.0, 5000.0),
+            shafts.density.max(0.0),
+        ];
         frame.camera_position = camera.position.extend(1.0).into();
 
         let mut sun_normal_offset = 0.0;
@@ -934,7 +1051,7 @@ impl SceneRenderer {
                 post.vignette_intensity.clamp(0.0, 1.0),
                 post.vignette_smoothness,
                 (!self.target_format.is_srgb()) as u32 as f32,
-                0.0,
+                self.shafts as u32 as f32,
             ],
             effects: [
                 aberration.min(4.0),
@@ -1030,7 +1147,8 @@ impl SceneRenderer {
                         r: background.r as f64,
                         g: background.g as f64,
                         b: background.b as f64,
-                        a: 1.0,
+                        // Distance from the camera: nothing there.
+                        a: FAR_DISTANCE,
                     }),
                     store,
                 },
@@ -1075,10 +1193,38 @@ impl SceneRenderer {
                 stats.skinned += batch.instances.len() as u32;
             }
         }
+        if self.sky {
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.draw(0..3, 0..1);
+        }
         // Translucent effects over the opaque scene, depth-tested.
         self.particle_pass
             .record(&mut pass, &self.forward_bind_group);
         self.line_pass.record(&mut pass, &self.forward_bind_group);
+    }
+
+    fn record_shafts_pass(&self, encoder: &mut wgpu::CommandEncoder) {
+        let targets = self.targets.as_ref().expect("targets created in render()");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("light shafts pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &targets.shafts_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.shafts_pipeline);
+        pass.set_bind_group(0, &self.forward_bind_group, &[]);
+        pass.set_bind_group(2, &targets.shafts_bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     fn record_post_pass(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
@@ -1379,6 +1525,7 @@ fn create_scene_bind_groups(
     buffers: SceneBuffers<'_>,
     shadow_array_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
+    fog_noise: &(wgpu::TextureView, wgpu::Sampler),
 ) -> (wgpu::BindGroup, wgpu::BindGroup) {
     let forward = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("forward bind group"),
@@ -1407,6 +1554,14 @@ fn create_scene_bind_groups(
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: buffers.joints.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&fog_noise.0),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(&fog_noise.1),
             },
         ],
     });
@@ -1460,6 +1615,18 @@ fn vertex_layouts<'a>(
     layouts
 }
 
+/// The camera's part of the height-fog integral, `exp(-falloff × (camera height - fog
+/// height))`, the same for every pixel (1 for fog without falloff).
+fn fog_camera_term(fog: &crate::environment::Fog, camera_height: f32) -> f32 {
+    let falloff = fog.height_falloff.max(0.0);
+    if falloff == 0.0 {
+        return 1.0;
+    }
+    (-falloff * (camera_height - fog.height))
+        .clamp(-80.0, 80.0)
+        .exp()
+}
+
 fn shader(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -1509,6 +1676,94 @@ fn create_forward_pipeline(
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Light shafts: `fs_shafts` over a half resolution target (group 1 is unused).
+fn create_shafts_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    frame_layout: &wgpu::BindGroupLayout,
+    shafts_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("light shafts pipeline layout"),
+        bind_group_layouts: &[Some(frame_layout), None, Some(shafts_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("light shafts pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_sky"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_shafts"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The fogged sky: a full-screen triangle on the far plane, only where the depth buffer is
+/// still clear.
+fn create_sky_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    samples: u32,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("sky pipeline layout"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("sky pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_sky"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: samples,
+            ..Default::default()
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_sky"),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,

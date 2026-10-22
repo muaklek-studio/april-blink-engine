@@ -228,7 +228,11 @@ fn write_texts(dir: &Path, platform: Platform) -> Result<()> {
             "\nTo export Windows games from Linux, also install cargo-xwin, clang and lld:\n  \
              cargo install --locked cargo-xwin\n"
         }
-        Platform::Windows => "",
+        Platform::Windows => {
+            "On Windows, Rust needs Microsoft's C++ build tools for its linker: let rustup install\n\
+             them, or install \"Desktop development with C++\" from\n\
+             https://visualstudio.microsoft.com/visual-cpp-build-tools/\n"
+        }
     };
     let text = format!(
         "April Blink Editor {version}\n\n\

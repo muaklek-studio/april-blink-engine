@@ -50,7 +50,7 @@ mod settings;
 mod system;
 
 pub use emitter::{ParticleEmitter, MAX_PARTICLES};
-pub use nodes::{class, EffectNodes, ExplosionOptions};
+pub use nodes::{class, free_when_finished, EffectNodes, ExplosionOptions};
 pub use screen::{flash_screen, hit_stop, ScreenEffects};
 pub use settings::{ColorRamp, EmissionShape, ParticleSettings};
 pub use system::{effects_system, shake_cameras, CameraShake, LightFlash};

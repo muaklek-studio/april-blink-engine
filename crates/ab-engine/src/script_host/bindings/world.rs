@@ -2,8 +2,10 @@
 
 use super::ui::easing;
 use super::Builder;
+use crate::blood::{BloodNodes, BloodOptions};
 use crate::script_host::call::{Call, CallError};
 use crate::tween::{Repeat, TweenNodes};
+use ab_animation::{AnimationPlayer, Locomotion};
 use ab_asset::AssetServer;
 use ab_audio::{Audio, SoundOptions};
 use ab_core::{Quat, Vec3};
@@ -11,6 +13,7 @@ use ab_effects::{shake_cameras, EffectNodes, ExplosionOptions, ParticleEmitter, 
 use ab_navigation::{NavBakeSettings, NavGrid};
 use ab_physics::{PhysicsWorld, QueryOptions};
 use ab_scene::Timer;
+use ab_scene::{NodeHandle, SceneTree};
 use ab_ui::Easing;
 
 /// A step of `tween.start`, validated before anything is changed.
@@ -79,6 +82,24 @@ fn audio<R>(c: &Call<'_>, f: impl FnOnce(&mut Audio) -> R) -> Result<R, CallErro
     Ok(f(&mut audio))
 }
 
+/// The node with the `AnimationPlayer` of the model at `node`.
+fn player_node(tree: &SceneTree, node: NodeHandle) -> Result<NodeHandle, CallError> {
+    tree.subtree(node)
+        .into_iter()
+        .find(|&n| tree.component::<AnimationPlayer>(n).is_some())
+        .ok_or_else(|| CallError::Failed(format!("{node} has no animations")))
+}
+
+/// [`player_node`], with a humanoid [`Locomotion`] added there if it has none yet.
+fn locomotion_node(tree: &mut SceneTree, node: NodeHandle) -> Result<NodeHandle, CallError> {
+    let player = player_node(tree, node)?;
+    if tree.component::<Locomotion>(player).is_none() {
+        tree.insert_component(player, Locomotion::humanoid())
+            .map_err(CallError::failed)?;
+    }
+    Ok(player)
+}
+
 pub(super) fn add(b: &mut Builder) {
     b.add("effects.spawn", |c| {
         let (parent, position) = (c.node(0)?, c.vec3(1)?);
@@ -117,6 +138,207 @@ pub(super) fn add(b: &mut Builder) {
         };
         let node = c.tree.spawn_explosion(parent, position, options)?;
         c.push_node(node);
+        Ok(())
+    });
+    b.add("effects.blood", |c| {
+        let (parent, position) = (c.node(0)?, c.vec3(1)?);
+        let mut options = BloodOptions::along(c.vec3(2)?);
+        options.amount = c.f32(3)?.max(0.0);
+        options.splats = c.u32(4)?;
+        if let Some(lifetime) = c.opt_f32(5)? {
+            options.splat_lifetime = lifetime.max(0.0);
+        }
+        if let Some(color) = c.opt_color(6)? {
+            options.color = color;
+        }
+        let node = c.tree.spawn_blood(parent, position, options)?;
+        c.push_node(node);
+        Ok(())
+    });
+    // Animation: `node` is the model (or any node above its AnimationPlayer).
+    b.add("animation.play", |c| {
+        let node = player_node(c.tree, c.node(0)?)?;
+        let name = c.str(1)?.to_owned();
+        let fade = c.opt_f32(2)?.unwrap_or(0.0);
+        let looping = c.opt_bool(3)?;
+        let mut player = c
+            .tree
+            .component_mut::<AnimationPlayer>(node)
+            .expect("found above");
+        if !player.crossfade_named(&name, fade) {
+            let known: Vec<&str> = player.clip_names().collect();
+            return Err(CallError::Failed(format!(
+                "no animation `{name}` (the model has: {})",
+                known.join(", ")
+            )));
+        }
+        if let Some(looping) = looping {
+            player.looping = looping;
+        }
+        Ok(())
+    });
+    b.add("animation.stop", |c| {
+        let node = player_node(c.tree, c.node(0)?)?;
+        if let Some(mut player) = c.tree.component_mut::<AnimationPlayer>(node) {
+            player.stop();
+        }
+        Ok(())
+    });
+    b.add("animation.set_speed", |c| {
+        let node = player_node(c.tree, c.node(0)?)?;
+        let speed = c.f32(1)?;
+        if let Some(mut player) = c.tree.component_mut::<AnimationPlayer>(node) {
+            player.speed = speed;
+        }
+        Ok(())
+    });
+    b.add("animation.current", |c| {
+        let node = player_node(c.tree, c.node(0)?)?;
+        let player = c.tree.component::<AnimationPlayer>(node).expect("found");
+        if let Some(name) = player.current_name() {
+            c.push_str(name);
+        }
+        Ok(())
+    });
+    b.add("animation.is_playing", |c| {
+        let node = player_node(c.tree, c.node(0)?)?;
+        let playing = c
+            .tree
+            .component::<AnimationPlayer>(node)
+            .is_some_and(|p| p.playing);
+        c.push_bool(playing);
+        Ok(())
+    });
+    b.add("animation.clips", |c| {
+        let node = player_node(c.tree, c.node(0)?)?;
+        let player = c.tree.component::<AnimationPlayer>(node).expect("found");
+        let names: Vec<&str> = player.clip_names().collect();
+        c.push_str(&names.join(","));
+        Ok(())
+    });
+
+    b.add("trace.damage", |c| {
+        use crate::trace::Tracing;
+        let (source, target, amount) = (c.opt_node(0)?, c.node(1)?, c.f32(2)?);
+        c.tree.deal_damage(source, target, amount);
+        Ok(())
+    });
+    b.add("trace.heal", |c| {
+        use crate::trace::Tracing;
+        let (source, target, amount) = (c.opt_node(0)?, c.node(1)?, c.f32(2)?);
+        c.tree.heal(source, target, amount);
+        Ok(())
+    });
+    b.add("trace.note", |c| {
+        use crate::trace::Tracing;
+        let node = c.node(0)?;
+        let text = c.str(1)?.to_owned();
+        c.tree.trace_note(node, text);
+        Ok(())
+    });
+    b.add("trace.watch", |c| {
+        use crate::trace::Tracing;
+        let (node, watch) = (c.node(0)?, c.bool(1)?);
+        c.tree.trace_watch(node, watch);
+        Ok(())
+    });
+    b.add("trace.health", |c| {
+        use crate::trace::Tracing;
+        let (node, current, max) = (c.node(0)?, c.f32(1)?, c.f32(2)?);
+        c.tree.report_health(node, current, max);
+        Ok(())
+    });
+
+    b.add("head_bob.set", |c| {
+        let node = c.node(0)?;
+        let strength = c.f32(1)?.max(0.0);
+        let follow = c.opt_node(2)?;
+        let base = crate::head_bob::HeadBob::default();
+        let mut bob = c
+            .tree
+            .component::<crate::head_bob::HeadBob>(node)
+            .map(|b| b.clone())
+            .unwrap_or_default();
+        bob.height = base.height * strength;
+        bob.width = base.width * strength;
+        bob.roll = base.roll * strength;
+        bob.strafe_tilt = base.strafe_tilt * strength;
+        bob.landing_dip = base.landing_dip * strength;
+        bob.breathing = base.breathing * strength;
+        bob.follow = follow;
+        c.tree
+            .insert_component(node, bob)
+            .map_err(CallError::failed)?;
+        Ok(())
+    });
+
+    // Locomotion: added on the model's AnimationPlayer node on first use.
+    b.add("locomotion.update", |c| {
+        let node = locomotion_node(c.tree, c.node(0)?)?;
+        let mut loco = c.tree.component_mut::<Locomotion>(node).expect("added");
+        loco.speed = c.f32(1)?;
+        loco.grounded = c.bool(2)?;
+        loco.vertical_speed = c.f32(3)?;
+        loco.climbing = c.bool(4)?;
+        Ok(())
+    });
+    b.add("locomotion.action", |c| {
+        let node = locomotion_node(c.tree, c.node(0)?)?;
+        let name = c.str(1)?.to_owned();
+        let known = c
+            .tree
+            .component::<AnimationPlayer>(node)
+            .is_some_and(|p| p.clip_named(&name).is_some());
+        if !known {
+            return Err(CallError::Failed(format!("no animation `{name}`")));
+        }
+        c.tree
+            .component_mut::<Locomotion>(node)
+            .expect("added")
+            .play_action(&name);
+        Ok(())
+    });
+    b.add("locomotion.action_playing", |c| {
+        let node = locomotion_node(c.tree, c.node(0)?)?;
+        let playing = c
+            .tree
+            .component::<Locomotion>(node)
+            .is_some_and(|l| l.is_action_playing());
+        c.push_bool(playing);
+        Ok(())
+    });
+    b.add("locomotion.state", |c| {
+        let node = locomotion_node(c.tree, c.node(0)?)?;
+        let state = c.tree.component::<Locomotion>(node).map(|l| l.state());
+        c.push_str(&format!("{:?}", state.unwrap_or_default()).to_lowercase());
+        Ok(())
+    });
+    b.add("locomotion.set_clips", |c| {
+        let node = locomotion_node(c.tree, c.node(0)?)?;
+        // "Idle:0,Walk:1.5,Run:4.2"
+        let ground: Result<Vec<(String, f32)>, CallError> = c
+            .str(1)?
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|entry| {
+                let (name, speed) = entry.split_once(':').ok_or_else(|| {
+                    CallError::BadArguments(format!("`{entry}`: expected `Clip:speed`"))
+                })?;
+                let speed = speed.trim().parse::<f32>().map_err(|_| {
+                    CallError::BadArguments(format!("`{entry}`: the speed is not a number"))
+                })?;
+                Ok((name.trim().to_owned(), speed))
+            })
+            .collect();
+        let mut ground = ground?;
+        ground.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let (jump, fall, climb) = (c.opt_str(2)?, c.opt_str(3)?, c.opt_str(4)?);
+        let mut loco = c.tree.component_mut::<Locomotion>(node).expect("added");
+        loco.ground = ground;
+        let name = |s: Option<&str>| s.filter(|s| !s.is_empty()).map(str::to_owned);
+        loco.jump = name(jump);
+        loco.fall = name(fall);
+        loco.climb = name(climb);
         Ok(())
     });
     b.add("effects.shake_cameras", |c| {

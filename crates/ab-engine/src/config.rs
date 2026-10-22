@@ -28,6 +28,12 @@ pub struct EngineConfig {
     pub fullscreen_key: Option<KeyCode>,
     /// Key toggling the physics debug view ([`DebugSettings::physics`](crate::DebugSettings)).
     pub debug_physics_key: Option<KeyCode>,
+    /// Key toggling the [`InputOverlay`](crate::InputOverlay): keys, mouse, gamepads and
+    /// actions live (`None` disables it).
+    pub debug_input_key: Option<KeyCode>,
+    /// Key toggling the [`TraceOverlay`](crate::TraceOverlay): damage, kills, watched
+    /// objects, hit lines and damage numbers (`None` disables it).
+    pub debug_trace_key: Option<KeyCode>,
     /// Worker threads for parallel engine work ([`ab_core::jobs`]); `None` uses every
     /// logical core but one. The pool is process-wide: only the first engine's setting
     /// counts.
@@ -47,6 +53,8 @@ impl Default for EngineConfig {
             // Players do not get the developer views.
             debug_overlay_key: (!crate::SHIPPING).then_some(KeyCode::F3),
             debug_physics_key: (!crate::SHIPPING).then_some(KeyCode::F4),
+            debug_input_key: (!crate::SHIPPING).then_some(KeyCode::F8),
+            debug_trace_key: (!crate::SHIPPING).then_some(KeyCode::F9),
             fullscreen_key: Some(KeyCode::F11),
             worker_threads: None,
         }

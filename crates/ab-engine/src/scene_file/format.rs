@@ -157,6 +157,28 @@ pub struct NodeDesc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub particles: Option<ParticlesDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub animation: Option<AnimationDesc>,
+    /// UI: `CanvasLayer`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<CanvasDesc>,
+    /// UI: where any control sits in its parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<LabelDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub button: Option<ButtonDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel: Option<PanelDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProgressDesc>,
+    /// `VBoxContainer` / `HBoxContainer`.
+    #[serde(rename = "box", skip_serializing_if = "Option::is_none")]
+    pub box_container: Option<BoxDesc>,
+    /// `TextureRect`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub joint: Option<JointDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ragdoll: Option<RagdollDesc>,
@@ -187,11 +209,30 @@ pub struct JointDesc {
 }
 
 /// A `Ragdoll`: limp from the start (`active = true`) or kinematic until activated.
+///
+/// With `skeleton`, it is a humanoid ragdoll for a character, built when the scene loads:
+///
+/// ```toml
+/// ragdoll = { skeleton = "../Knight", mass = 80.0, bones = { left_hand = "hand_l_ik" } }
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RagdollDesc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
+    /// Path from the ragdoll to the character whose skeleton it is built on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skeleton: Option<String>,
+    /// Bones set by hand (`left_upper_arm = "bone name"`, `""` for none); the others are found
+    /// by name or by the skeleton's shape.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bones: std::collections::BTreeMap<String, String>,
+    /// Total mass in kg (default 70).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mass: Option<f32>,
+    /// Body thickness, 1 = average build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<f32>,
 }
 
 /// `"#rrggbb"` / `"#rrggbbaa"` in sRGB, or linear `[r, g, b]` / `[r, g, b, a]`.
@@ -339,6 +380,10 @@ pub struct LightDesc {
     pub softness: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadows: Option<bool>,
+    /// Omni lights: fade out over this many seconds (muzzle flashes, explosions in effect
+    /// scenes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flash: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -422,18 +467,209 @@ pub struct TimerDesc {
     pub autostart: Option<bool>,
 }
 
+/// A `CanvasLayer`: its controls draw above lower layers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CanvasDesc {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<i32>,
+}
+
+/// Where a control sits inside its parent (in UI units, 1920 × 1080 by default).
+///
+/// Either a preset with a size and a margin, `{ preset = "top_right", size = [300, 50],
+/// margin = 24 }`, or anchors and offsets as Godot has them (these win).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ControlDesc {
+    /// `top_left`, `top_right`, `bottom_left`, `bottom_right`, `center_left`, `center_top`,
+    /// `center_right`, `center_bottom`, `center`, `left_wide`, `top_wide`, `right_wide`,
+    /// `bottom_wide`, `vcenter_wide`, `hcenter_wide`, `full_rect`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin: Option<f32>,
+    /// Fractions of the parent's rect: left, top, right, bottom.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchors: Option<[f32; 4]>,
+    /// Edges' distances from the anchors: left, top, right, bottom.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offsets: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_size: Option<[f32; 2]>,
+    /// Takes a share of a box container's spare room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expand: Option<bool>,
+    /// `stop` (takes the pointer) or `ignore` (lets it through).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modulate: Option<ColorDesc>,
+    /// Children are cut to this control's rect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LabelDesc {
+    pub text: String,
+    /// Font size in UI units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorDesc>,
+    /// `left`, `center`, `right`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    /// `top`, `center`, `bottom`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valign: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline_color: Option<ColorDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autowrap: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ButtonDesc {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    /// Background (hover and press shades follow).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<ColorDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PanelDesc {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<ColorDesc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProgressDesc {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<ColorDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<ColorDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_percentage: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BoxDesc {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separation: Option<f32>,
+    /// `begin`, `center`, `end`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ImageDesc {
+    /// A PNG or JPEG under assets/.
+    pub texture: String,
+    /// `scale`, `keep_aspect`, `cover`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tint: Option<ColorDesc>,
+}
+
+/// An `AnimationPlayer` playing clip files (see [`crate::animation_file`]) on the nodes
+/// under its parent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AnimationDesc {
+    /// Clip files, e.g. `["anims/door_open.toml"]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<String>,
+    /// The clip to play when the scene starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autoplay: Option<String>,
+    /// Loop (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub looping: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+}
+
 /// A particle emitter: a preset plus overrides.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ParticlesDesc {
     /// `smoke`, `fire`, `embers`, `sparks`, `dust`, `magic`, `wisps`, `explosion`, `rain`,
-    /// `snow`, `heal`, `fireflies`, `splash`, `leaves` (default: a plain white emitter).
+    /// `snow`, `heal`, `fireflies`, `splash`, `leaves`, `blood`, `blood_mist` (default: a
+    /// plain white emitter).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<f32>,
+    /// 0..1: how much lifetimes vary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_random: Option<f32>,
+    /// Where particles start: `"point"`, `{ sphere = { radius = 0.2 } }`,
+    /// `{ box = { size = [1.0, 0.0, 1.0] } }`, `{ ring = { radius = 0.5 } }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ab_effects::EmissionShape>,
+    /// Initial direction, and the cone around it in degrees (180: every way).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread: Option<f32>,
+    /// Acceleration in m/s² (positive y rises).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gravity: Option<[f32; 3]>,
+    /// Air drag per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f32>,
+    /// Random swirling, m/s².
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turbulence: Option<f32>,
+    /// 0..1: how much sizes vary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_random: Option<f32>,
+    /// Color over the particles' life: `[[0.0, "#ffcc66"], [1.0, "#ff000000"]]`. Replaces
+    /// the preset's ramp and `color_start`/`color_end`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub colors: Vec<(f32, ColorDesc)>,
+    /// Spin in radians per second, `[min, max]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spin: Option<[f32; 2]>,
+    /// Edge: 0 soft (smoke), 1 hard dot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardness: Option<f32>,
+    /// Elongation along the velocity, per m/s (sparks, rain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<f32>,
     /// `[start, end]` in metres.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
@@ -499,6 +735,37 @@ pub struct EnvironmentDesc {
     pub fog_height: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fog_height_falloff: Option<f32>,
+    /// Most the fog can hide, 0..1 (default 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fog_max_opacity: Option<f32>,
+    /// Glow of sunlight in the fog (0 = none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fog_sun_scattering: Option<f32>,
+    /// How tightly the glow gathers around the sun: 0 even, 0.9 a tight halo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fog_sun_anisotropy: Option<f32>,
+    /// How uneven the fog is near the camera: 0 even, 1 clear gaps between thick banks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fog_patchiness: Option<f32>,
+    /// Size of the fog patches, in metres.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fog_patch_size: Option<f32>,
+    /// Wind blowing the fog patches along, in metres per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fog_wind: Option<[f32; 3]>,
+    /// Light shafts: beams where the sun and spot lights shine through openings. Setting an
+    /// intensity enables them (0 disables them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_shafts: Option<f32>,
+    /// How thick the air is for the shafts, per metre (the fog adds to it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_shafts_density: Option<f32>,
+    /// 0 lights the air evenly, 0.8 makes it bright looking towards the light.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_shafts_anisotropy: Option<f32>,
+    /// How far from the camera the shafts are traced, in metres.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_shafts_distance: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposure: Option<f32>,
     /// 1 = neutral.

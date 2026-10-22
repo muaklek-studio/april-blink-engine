@@ -25,7 +25,7 @@
 //! <platform> ===` starts a platform, `exported <title> to <folder>` and `archive: <path>`
 //! report results.
 
-use crate::{archive, engine_root, Platform, Profile, Project};
+use crate::{archive, engine_root, process, Platform, Profile, Project};
 use ab_vfs::{append_to_executable, Pack, PackWriter};
 use anyhow::{bail, Context as _, Result};
 use std::path::{Path, PathBuf};
@@ -452,7 +452,7 @@ fn export_one(
 }
 
 fn cargo_command() -> Command {
-    Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
+    process::command(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
 }
 
 fn succeeds(command: &mut Command) -> bool {
@@ -483,7 +483,7 @@ pub fn check_toolchain(build: &Build) -> Result<()> {
     if Platform::of_triple(triple) == Platform::Linux && cfg!(windows) {
         bail!("Linux builds cannot be made on Windows: export on Linux (WSL works) or in CI");
     }
-    let installed = Command::new("rustup")
+    let installed = process::command("rustup")
         .args(["target", "list", "--installed"])
         .output()
         .map(|o| {
@@ -825,7 +825,7 @@ fn verify_export(exe: &Path, pack_path: &Path, log: Log<'_>) -> Result<()> {
     let sandbox = std::env::temp_dir().join(format!("ab-export-check-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sandbox);
     std::fs::create_dir_all(&sandbox)?;
-    let output = Command::new(exe)
+    let output = process::command(exe)
         // `--overlay` proves a shipping build: it must be ignored, with a warning.
         .args(["--overlay", "--headless", "180"])
         .current_dir(&sandbox)

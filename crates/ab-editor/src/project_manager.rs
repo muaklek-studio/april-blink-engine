@@ -961,9 +961,9 @@ fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
-/// `~/x` → `$HOME/x`.
+/// `~/x` (or `~\x`) → `$HOME/x`.
 fn expand_home(path: &str) -> String {
-    match path.strip_prefix("~/") {
+    match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
         Some(rest) => std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map(|home| format!("{home}/{rest}"))
