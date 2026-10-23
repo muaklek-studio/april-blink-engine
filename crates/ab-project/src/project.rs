@@ -50,8 +50,7 @@ impl Project {
     /// A project of the first layout, with `game.toml` and the input map inside `assets/`, is
     /// moved to the current one: those are project files, not assets.
     pub fn open(path: &Path) -> Result<Self> {
-        let mut root = path
-            .canonicalize()
+        let mut root = crate::path::canonicalize(path)
             .with_context(|| format!("{} does not exist", path.display()))?;
         let is_project = |dir: &Path| {
             dir.join(GAME_FILE).is_file()

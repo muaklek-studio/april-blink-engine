@@ -147,7 +147,7 @@ pub fn engine_root() -> Option<PathBuf> {
 }
 
 fn canonical(dir: &Path) -> PathBuf {
-    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+    crate::path::canonicalize_lossy(dir)
 }
 
 #[cfg(test)]

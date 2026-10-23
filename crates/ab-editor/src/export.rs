@@ -34,7 +34,7 @@ pub struct ExportTarget {
 /// Which game `assets` (the editor's project folder) belongs to, if it can be exported:
 /// a project with scripts, or Night Relics from the engine's sources.
 pub fn export_target(assets: &Path) -> Option<ExportTarget> {
-    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let canonical = |p: &Path| ab_project::path::canonicalize_lossy(p);
     let assets = canonical(assets);
     if let Some(engine) = engine_root().filter(|e| canonical(&e.join("assets")) == assets) {
         let game = ab_project::export::Game::slice(&engine);

@@ -24,6 +24,7 @@
 pub mod archive;
 mod engine;
 pub mod export;
+pub mod path;
 mod platform;
 pub mod process;
 mod project;

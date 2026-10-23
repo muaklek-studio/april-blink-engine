@@ -309,7 +309,7 @@ impl EditorApp {
         watch: Option<ScriptWatch>,
     ) -> Self {
         let options = options.clone();
-        let project = std::fs::canonicalize(&project).unwrap_or(project);
+        let project = ab_project::path::canonicalize_lossy(&project);
         let project_dir = project.clone();
         let mut editor = Editor::new(project, options.scripts, Default::default());
         if let Some(scene) = &options.scene {

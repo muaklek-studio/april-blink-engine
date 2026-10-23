@@ -117,7 +117,7 @@ pub fn sdk_dir() -> Option<PathBuf> {
 fn sdk_dependency() -> String {
     match sdk_dir() {
         Some(path) => {
-            let path = toml::Value::String(path.to_string_lossy().replace('\\', "/"));
+            let path = toml::Value::String(crate::path::slash(&path));
             format!("{{ path = {path} }}")
         }
         None => format!("\"{}\"", env!("CARGO_PKG_VERSION")),
@@ -264,6 +264,10 @@ mod tests {
         let sdk = &manifest["dependencies"]["ab-script"];
         let sdk_path = sdk.get("path").and_then(|p| p.as_str()).unwrap();
         assert!(
+            !sdk_path.contains("//?/") && !sdk_path.contains(r"\\?\"),
+            "the SDK path keeps a Windows verbatim prefix: {sdk_path}"
+        );
+        assert!(
             Path::new(sdk_path).join("Cargo.toml").is_file(),
             "the engine's SDK in development: {sdk}"
         );
@@ -285,7 +289,7 @@ mod tests {
             ..new("Inside", &folder)
         };
         let project = create(&in_place).unwrap();
-        assert_eq!(project.root, folder.canonicalize().unwrap());
+        assert_eq!(project.root, crate::path::canonicalize(&folder).unwrap());
         assert!(create(&in_place).is_err(), "not empty any more");
         assert!(folder.join("game.toml").is_file(), "left as it was");
         std::fs::remove_dir_all(dir).unwrap();

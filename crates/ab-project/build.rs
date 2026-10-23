@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let template = manifest.join("template");
-    let template = template
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("{}: {e}", template.display()));
+    // Not `canonicalize`: on Windows it returns a verbatim `\\?\…` path, and the generated
+    // `include_bytes!` paths are better kept plain. `CARGO_MANIFEST_DIR` is already absolute.
+    let template =
+        std::path::absolute(&template).unwrap_or_else(|e| panic!("{}: {e}", template.display()));
     println!("cargo:rerun-if-changed={}", template.display());
 
     let mut files = Vec::new();

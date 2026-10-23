@@ -68,9 +68,7 @@ impl ScriptFile {
 /// The game crate behind a project's asset folder: `<game>/assets` → `<game>`, or Night
 /// Relics' crate for the engine's own `assets`.
 pub fn game_crate(assets: &Path) -> Option<PathBuf> {
-    let assets = assets
-        .canonicalize()
-        .unwrap_or_else(|_| assets.to_path_buf());
+    let assets = ab_project::path::canonicalize_lossy(assets);
     let parent = assets.parent()?;
     if parent.join("Cargo.toml").is_file() && parent.join("src/lib.rs").is_file() {
         return Some(parent.to_path_buf());
