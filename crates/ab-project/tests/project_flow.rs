@@ -38,7 +38,7 @@ fn a_new_project_builds_and_exports_with_the_player() {
          registry.register::<spinner::Spinner>(\"Spinner\");\n}\n",
     )
     .unwrap();
-    let scene = project.assets.join("scenes/main.toml");
+    let scene = project.assets.join("scenes/main.abscene");
     let mut text = std::fs::read_to_string(&scene).unwrap();
     text.push_str(
         "\n[[node]]\nname = \"Spinner\"\nparent = \".\"\ntype = \"Node3D\"\nscript = \"Spinner\"\n",

@@ -11,8 +11,8 @@ use ab_physics::{
     BodyKind, CharacterBody3D, Joint3D, JointKind, PhysicsBody3D, PhysicsNodes, Ragdoll, Shape,
 };
 use ab_rendering::{
-    Camera3D, DirectionalLight3D, Environment, Material, MaterialHandle, Mesh, MeshHandle,
-    MeshInstance3D, OmniLight3D, RenderAssets, RenderNodes, SpotLight3D,
+    Camera3D, ColorSpace, DirectionalLight3D, Environment, Material, MaterialHandle, Mesh,
+    MeshHandle, MeshInstance3D, OmniLight3D, RenderAssets, RenderNodes, SpotLight3D,
 };
 use ab_scene::{NodeHandle, SceneError, SceneTree, Timer};
 use std::collections::HashMap;
@@ -91,6 +91,48 @@ fn load_nested(
         }
     }
     instantiate_at_depth(tree, &scene, path, depth)
+}
+
+/// A prefab scene with an instance's overrides on top (see [`super::prefab`]).
+fn load_prefab(
+    tree: &mut SceneTree,
+    path: &str,
+    depth: u32,
+    overrides: &[toml::Table],
+) -> Result<NodeHandle, SceneFileError> {
+    let bytes = tree
+        .world()
+        .resource::<AssetServer>()
+        .ok_or_else(|| SceneFileError::Asset {
+            path: path.to_owned(),
+            source: AssetError::MissingResource("AssetServer"),
+        })?
+        .read(path)
+        .map_err(|source| SceneFileError::Asset {
+            path: path.to_owned(),
+            source,
+        })?;
+    let mut scene = SceneFile::from_toml(&String::from_utf8_lossy(&bytes)).map_err(|source| {
+        SceneFileError::Parse {
+            path: path.to_owned(),
+            source,
+        }
+    })?;
+    let unmatched = super::prefab::apply_overrides(&mut scene, overrides);
+    for (_, reason) in &unmatched {
+        tracing::warn!("instance of {path}: override not applied: {reason}");
+    }
+    let node = instantiate_at_depth(tree, &scene, path, depth)?;
+    if !unmatched.is_empty() {
+        let kept = unmatched.into_iter().map(|(o, _)| o).collect();
+        tree.insert_component(node, super::prefab::UnmatchedOverrides(kept))
+            .map_err(|e| SceneFileError::Node {
+                path: path.to_owned(),
+                node: String::new(),
+                reason: e.to_string(),
+            })?;
+    }
+    Ok(node)
 }
 
 /// Builds `scene` as a detached subtree (without applying its environment). `origin` names
@@ -195,6 +237,11 @@ fn instantiate_at_depth(
         for (node, err) in crate::ragdoll::build_rigs(tree, root) {
             let name = tree.name(node).map(|n| n.to_owned()).unwrap_or_default();
             tracing::warn!("{origin}: ragdoll `{name}`: {err}");
+        }
+        // Generators, once the whole scene is there (a scene instanced inside another is
+        // built with it).
+        if depth == 0 {
+            super::generator::build_all(tree, root);
         }
         Ok(root)
     })();
@@ -313,10 +360,32 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
                 "instances nested deeper than {MAX_DEPTH} (a cycle?)"
             ));
         }
-        let node = if path.ends_with(".toml") {
-            load_nested(tree, path, depth + 1, false).map_err(|e| e.to_string())?
+        let loaded = if super::is_scene_path(path) {
+            load_prefab(tree, path, depth + 1, &desc.overrides)
         } else {
-            spawn_gltf(tree, path).map_err(|e| e.to_string())?
+            spawn_gltf(tree, path).map_err(|source| SceneFileError::Asset {
+                path: path.clone(),
+                source,
+            })
+        };
+        let node = match loaded {
+            Ok(node) => node,
+            // The file is missing or unreadable: a placeholder keeps the instance (and
+            // what it overrides) in the scene, to be saved back as it was.
+            Err(err @ (SceneFileError::Asset { .. } | SceneFileError::Parse { .. })) => {
+                tracing::warn!("{name}: instance {path} not loaded: {err}");
+                let node = tree.create_node3d(name);
+                tree.insert_component(
+                    node,
+                    super::prefab::MissingInstance {
+                        error: err.to_string(),
+                        overrides: desc.overrides.clone(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                node
+            }
+            Err(err) => return Err(err.to_string()),
         };
         tree.set_name(node, name).map_err(|e| e.to_string())?;
         tree.insert_component(node, SceneInstance(path.clone()))
@@ -562,6 +631,8 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
             .map_err(|e| e.to_string())?;
             node
         }
+        super::path::PATH_3D => super::path::create(tree, name, desc)?,
+        super::generator::GENERATOR => super::generator::create(tree, name, desc)?,
         "Timer" => {
             let t = desc
                 .timer
@@ -747,6 +818,7 @@ pub fn mesh_and_material(
 ) -> Result<(MeshHandle, MaterialHandle), String> {
     let world = tree.world_mut();
     world.resource_or_insert_with(SceneAssetCache::default);
+    let mesh = {
     let world = tree.world();
     let mut cache = world
         .resource_mut::<SceneAssetCache>()
@@ -780,13 +852,56 @@ pub fn mesh_and_material(
             handle
         }
     };
-    let material_key = format!("{material:?}");
+    mesh
+    };
+    let material = material_handle(tree, material)?;
+    Ok((mesh, material))
+}
+
+/// The material `material` describes, made once and shared by every node that describes the
+/// same one (its `file` and textures read in).
+pub fn material_handle(tree: &mut SceneTree, material: &MaterialDesc) -> Result<MaterialHandle, String> {
+    let world = tree.world_mut();
+    world.resource_or_insert_with(SceneAssetCache::default);
+    let world = tree.world();
+    let mut cache = world
+        .resource_mut::<SceneAssetCache>()
+        .expect("inserted above");
+    let mut assets = world
+        .resource_mut::<RenderAssets>()
+        .ok_or("the RenderAssets resource is missing")?;
+    let mut server = world
+        .resource_mut::<AssetServer>()
+        .ok_or("the AssetServer resource is missing")?;
+    let resolved = resolve_material(&server, material)?;
+    let material_key = format!("{resolved:?}");
     let material = match cache.materials.get(&material_key) {
         Some(&handle) => handle,
         None => {
-            let m = material;
+            let m = &resolved;
             let default = Material::default();
+            let mut texture = |path: &Option<String>, space| -> Result<Option<_>, String> {
+                path.as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| {
+                        server
+                            .load_texture(&mut assets, p, space)
+                            .map_err(|e| e.to_string())
+                    })
+                    .transpose()
+            };
+            let albedo_texture = texture(&m.albedo_texture, ColorSpace::Srgb)?;
+            let normal_texture = texture(&m.normal_texture, ColorSpace::Linear)?;
+            let metallic_roughness_texture =
+                texture(&m.metallic_roughness_texture, ColorSpace::Linear)?;
+            let emission_texture = texture(&m.emission_texture, ColorSpace::Srgb)?;
             let built = Material {
+                albedo_texture,
+                normal_texture,
+                normal_scale: m.normal_scale.unwrap_or(default.normal_scale),
+                metallic_roughness_texture,
+                emission_texture,
+                alpha_cutoff: m.alpha_cutoff.or(default.alpha_cutoff),
                 albedo: color(&m.color)?,
                 roughness: m.roughness.unwrap_or(default.roughness),
                 metallic: m.metallic.unwrap_or(default.metallic),
@@ -794,21 +909,44 @@ pub fn mesh_and_material(
                     .emission
                     .as_ref()
                     .map_or(Ok(default.emission), ColorDesc::to_color)?,
-                emission_energy: m.emission_energy.unwrap_or(if m.emission.is_some() {
-                    1.0
-                } else {
-                    0.0
-                }),
+                emission_energy: m.emission_energy.unwrap_or(
+                    if m.emission.is_some() || m.emission_texture.is_some() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ),
                 unshaded: m.unshaded.unwrap_or(false),
                 double_sided: m.double_sided.unwrap_or(false),
-                ..default
             };
             let handle = assets.add_material(built);
             cache.materials.insert(material_key, handle);
             handle
         }
     };
-    Ok((mesh, material))
+    Ok(material)
+}
+
+/// `material` with its `file` (an `.abmat`) read in under its own keys. A file may not name
+/// another file.
+pub fn resolve_material(
+    assets: &AssetServer,
+    material: &MaterialDesc,
+) -> Result<MaterialDesc, String> {
+    let Some(path) = material.file.as_deref().filter(|p| !p.is_empty()) else {
+        return Ok(material.clone());
+    };
+    let bytes = assets
+        .read(path)
+        .map_err(|e| format!("material {path}: {e}"))?;
+    let base = MaterialDesc::from_toml(&String::from_utf8_lossy(&bytes))
+        .map_err(|e| format!("material {path}: {e}"))?;
+    if base.file.is_some() {
+        return Err(format!(
+            "material {path}: a material file cannot name another (`file`)"
+        ));
+    }
+    Ok(material.over(&base))
 }
 
 /// Applies an `[environment]` table to the `Environment` resource.

@@ -116,6 +116,10 @@ pub struct NodeDesc {
     /// Instead of `type`: a glTF model or another scene file to instance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// Changes to an instanced scene's nodes, kept with this instance (see
+    /// [`super::prefab`]): `[{ path = "Lamp", visible = false }]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<toml::Table>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<[f32; 3]>,
     /// Euler angles in degrees, applied Y, X, Z (Godot's `rotation_degrees`).
@@ -140,6 +144,12 @@ pub struct NodeDesc {
     pub mesh: Option<MeshDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialDesc>,
+    /// A `Path3D`'s points and what it builds (see [`crate::spline`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathDesc>,
+    /// A `Generator`'s kind, seed and parameters (see [`crate::procgen`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generator: Option<GeneratorDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,8 +344,28 @@ fn one_u32() -> u32 {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MaterialDesc {
+    /// A material file (`materials/brick.abmat`) to start from; the keys written here
+    /// override its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorDesc>,
+    /// Image multiplied with `color` (sRGB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub albedo_texture: Option<String>,
+    /// Tangent-space normal map (linear).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normal_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normal_scale: Option<f32>,
+    /// glTF layout: roughness in G, metallic in B (linear).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metallic_roughness_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emission_texture: Option<String>,
+    /// Pixels whose albedo alpha is below this are cut out (foliage, fences).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha_cutoff: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roughness: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,6 +378,90 @@ pub struct MaterialDesc {
     pub unshaded: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub double_sided: Option<bool>,
+}
+
+impl MaterialDesc {
+    /// A material file's contents (`.abmat`: the keys of a `material = { … }` table).
+    pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(text)
+    }
+
+    pub fn to_toml(&self) -> String {
+        toml::to_string(self).expect("material descriptions always serialize")
+    }
+
+    /// `self`'s keys over `base`'s (`file` excepted: the result stands alone).
+    pub fn over(&self, base: &MaterialDesc) -> MaterialDesc {
+        fn pick<T: Clone>(a: &Option<T>, b: &Option<T>) -> Option<T> {
+            a.clone().or_else(|| b.clone())
+        }
+        MaterialDesc {
+            file: None,
+            color: pick(&self.color, &base.color),
+            albedo_texture: pick(&self.albedo_texture, &base.albedo_texture),
+            normal_texture: pick(&self.normal_texture, &base.normal_texture),
+            normal_scale: pick(&self.normal_scale, &base.normal_scale),
+            metallic_roughness_texture: pick(
+                &self.metallic_roughness_texture,
+                &base.metallic_roughness_texture,
+            ),
+            emission_texture: pick(&self.emission_texture, &base.emission_texture),
+            alpha_cutoff: pick(&self.alpha_cutoff, &base.alpha_cutoff),
+            roughness: pick(&self.roughness, &base.roughness),
+            metallic: pick(&self.metallic, &base.metallic),
+            emission: pick(&self.emission, &base.emission),
+            emission_energy: pick(&self.emission_energy, &base.emission_energy),
+            unshaded: pick(&self.unshaded, &base.unshaded),
+            double_sided: pick(&self.double_sided, &base.double_sided),
+        }
+    }
+}
+
+/// `generator = { kind = "terrain", seed = 3, height = 20.0, ... }` of a `Generator`: its
+/// other keys are the generator's parameters.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GeneratorDesc {
+    pub kind: String,
+    #[serde(default)]
+    pub seed: u64,
+    #[serde(flatten)]
+    pub params: toml::Table,
+}
+
+/// `path = { points = [...], mode = "ribbon", ... }` of a `Path3D`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PathDesc {
+    /// Control points, in the node's space.
+    pub points: Vec<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    /// `none` (a path only), `ribbon`, `tube` or `instances`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Ribbon width (m).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    /// Tube radius (m).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sides: Option<u32>,
+    /// How far a tube's middle hangs (m): cables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sag: Option<f32>,
+    /// What `instances` places: a model or prefab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub piece: Option<String>,
+    /// Metres between instances.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spacing: Option<f32>,
+    /// Instances face along the path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<bool>,
+    /// A ribbon or tube gets a collision mesh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collide: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -516,6 +630,10 @@ pub struct ControlDesc {
 #[serde(deny_unknown_fields, default)]
 pub struct LabelDesc {
     pub text: String,
+    /// Translation key: the text shown in the game's language (see
+    /// [`crate::localization`]); `text` is what shows without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     /// Font size in UI units.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
@@ -539,6 +657,9 @@ pub struct LabelDesc {
 #[serde(deny_unknown_fields, default)]
 pub struct ButtonDesc {
     pub text: String,
+    /// Translation key (see [`LabelDesc::key`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
     /// Background (hover and press shades follow).

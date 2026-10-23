@@ -4,22 +4,6 @@ use crate::Platform;
 use anyhow::{bail, Context as _, Result};
 use std::path::{Path, PathBuf};
 
-/// The engine's source tree this was built from, if it is still there (development
-/// builds): new projects then use its SDK, and players can be built from it.
-///
-/// `AB_ENGINE_ROOT` overrides it: another checkout, or empty to ignore the sources (as on a
-/// game maker's machine).
-pub fn engine_root() -> Option<PathBuf> {
-    let root = match std::env::var_os("AB_ENGINE_ROOT") {
-        Some(dir) if dir.is_empty() => return None,
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
-    };
-    root.join("crates/ab-engine/Cargo.toml")
-        .is_file()
-        .then(|| root.canonicalize().unwrap_or_else(|_| root.clone()))
-}
-
 /// How a script library is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Profile {
@@ -54,6 +38,8 @@ pub struct Project {
     pub main_scene: Option<String>,
     /// The input map, relative to the project folder (`input.toml`).
     pub input: Option<String>,
+    /// The game's named values, relative to the project folder (`config.toml`).
+    pub config: Option<String>,
     /// Cargo package of the scripts (`None` for a project without scripts).
     pub package: Option<String>,
 }
@@ -110,6 +96,7 @@ impl Project {
             title: text("title").unwrap_or(folder),
             main_scene: text("main_scene"),
             input: text("input"),
+            config: text("config"),
             package,
             root,
         })
@@ -120,6 +107,7 @@ impl Project {
     pub fn project_files(&self) -> Vec<(String, PathBuf)> {
         std::iter::once(GAME_FILE.to_owned())
             .chain(self.input.clone())
+            .chain(self.config.clone())
             .map(|name| (name.replace('\\', "/"), self.root.join(&name)))
             .collect()
     }

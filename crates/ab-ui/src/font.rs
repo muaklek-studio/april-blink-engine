@@ -17,6 +17,18 @@ use std::fmt;
 use std::sync::Arc;
 use tracing::warn;
 
+/// Characters that belong to the character before them (combining marks, joiners,
+/// variation selectors) or fit any font (spaces): they never start a new font run.
+fn attaches(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(c,
+            '\u{0300}'..='\u{036F}'
+            | '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}'
+            | '\u{200C}' | '\u{200D}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{1AB0}'..='\u{1AFF}' | '\u{20D0}'..='\u{20FF}')
+}
+
 /// The built-in font (Prompt Regular, Latin + Thai, SIL Open Font License 1.1).
 const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/Prompt-Regular.ttf");
 
@@ -55,6 +67,8 @@ pub struct LineMetrics {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapedGlyph {
     pub glyph: u16,
+    /// The font the glyph is from: the run's, or a fallback for characters it lacks.
+    pub font: FontId,
     /// Byte offset of the first character of the cluster this glyph belongs to. Marks
     /// (Thai vowels and tone marks) share the cluster of their base consonant.
     pub cluster: usize,
@@ -118,6 +132,8 @@ impl FontData {
 /// them sharp at any on-screen size.
 pub struct Fonts {
     fonts: Vec<FontData>,
+    /// Tried in order for characters a run's font lacks (see [`Fonts::set_fallbacks`]).
+    fallbacks: Vec<FontId>,
     glyphs: HashMap<(FontId, u16), Option<GlyphEntry>>,
     packer: ShelfPacker,
     pixels: Vec<u8>,
@@ -131,6 +147,7 @@ impl Fonts {
         let size = INITIAL_ATLAS_SIZE;
         Self {
             fonts: vec![FontData::parse(DEFAULT_FONT.into()).expect("built-in font is valid")],
+            fallbacks: Vec::new(),
             glyphs: HashMap::new(),
             packer: ShelfPacker::new(size),
             pixels: vec![0; (size * size * 4) as usize],
@@ -144,6 +161,24 @@ impl Fonts {
         let data = FontData::parse(bytes.into().into_boxed_slice())?;
         self.fonts.push(data);
         Ok(FontId(self.fonts.len() as u32 - 1))
+    }
+
+    /// Fonts for the characters a run's font lacks, tried in order (the built-in font comes
+    /// last on its own): a CJK font for Chinese, Japanese and Korean text, say.
+    pub fn set_fallbacks(&mut self, fallbacks: Vec<FontId>) {
+        self.fallbacks = fallbacks
+            .into_iter()
+            .filter(|f| (f.0 as usize) < self.fonts.len())
+            .collect();
+    }
+
+    pub fn fallbacks(&self) -> &[FontId] {
+        &self.fallbacks
+    }
+
+    /// Whether `font` draws `c`.
+    pub fn has_glyph(&self, font: FontId, c: char) -> bool {
+        self.font(font).face().glyph_index(c).is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -175,10 +210,76 @@ impl Fonts {
     /// Shapes one line of text at `size` pixels per em: applies kerning, ligatures and mark
     /// positioning (so Thai vowels and tone marks stack correctly above and below their
     /// consonant). Line breaks are the caller's job.
+    ///
+    /// Characters `font` lacks are drawn with the first fallback that has them
+    /// ([`Fonts::set_fallbacks`], then the built-in font); the text is split into runs per
+    /// font, each shaped on its own.
     pub fn shape(&self, font: FontId, text: &str, size: f32) -> ShapedRun {
         if text.is_empty() {
             return ShapedRun::default();
         }
+        let font = if (font.0 as usize) < self.fonts.len() {
+            font
+        } else {
+            FontId::DEFAULT
+        };
+        let mut glyphs = Vec::new();
+        let mut pen = 0.0;
+        for (start, end, run_font) in self.font_runs(font, text) {
+            pen = self.shape_run(run_font, &text[start..end], start, size, pen, &mut glyphs);
+        }
+        ShapedRun { glyphs, width: pen }
+    }
+
+    /// Splits `text` into (start, end, font) runs: a character stays in the current run
+    /// while its font has it (marks, spaces and joiners always stay), else goes to the
+    /// first font of the chain that has it.
+    fn font_runs(&self, font: FontId, text: &str) -> Vec<(usize, usize, FontId)> {
+        let mut chain = vec![font];
+        for &fallback in self.fallbacks.iter().chain([&FontId::DEFAULT]) {
+            if !chain.contains(&fallback) {
+                chain.push(fallback);
+            }
+        }
+        if chain.len() == 1 {
+            return vec![(0, text.len(), font)];
+        }
+        let faces: Vec<rustybuzz::Face<'_>> = chain.iter().map(|&f| self.font(f).face()).collect();
+        let mut runs: Vec<(usize, usize, FontId)> = Vec::new();
+        for (index, c) in text.char_indices() {
+            let end = index + c.len_utf8();
+            let current = runs.last().map(|&(_, _, f)| f);
+            let sticks = |f: FontId| {
+                let face = &faces[chain.iter().position(|&x| x == f).unwrap_or(0)];
+                face.glyph_index(c).is_some() || attaches(c)
+            };
+            let chosen = match current {
+                Some(f) if sticks(f) => f,
+                _ => chain
+                    .iter()
+                    .zip(&faces)
+                    .find(|(_, face)| face.glyph_index(c).is_some())
+                    .map_or(current.unwrap_or(font), |(&f, _)| f),
+            };
+            match runs.last_mut() {
+                Some(run) if run.2 == chosen => run.1 = end,
+                _ => runs.push((index, end, chosen)),
+            }
+        }
+        runs
+    }
+
+    /// Shapes `text` (bytes `offset..` of the line) with one font, from pen position `pen`;
+    /// returns the pen after it.
+    fn shape_run(
+        &self,
+        font: FontId,
+        text: &str,
+        offset: usize,
+        size: f32,
+        mut pen: f32,
+        out: &mut Vec<ShapedGlyph>,
+    ) -> f32 {
         let data = self.font(font);
         let face = data.face();
         let mut buffer = UnicodeBuffer::new();
@@ -188,24 +289,19 @@ impl Fonts {
         buffer.set_direction(Direction::LeftToRight);
         let output = rustybuzz::shape(&face, &[], buffer);
         let scale = size / data.units_per_em;
-        let mut pen = 0.0;
-        let glyphs = output
-            .glyph_infos()
-            .iter()
-            .zip(output.glyph_positions())
-            .map(|(info, position)| {
-                let glyph = ShapedGlyph {
-                    glyph: info.glyph_id as u16,
-                    cluster: info.cluster as usize,
-                    x: pen + position.x_offset as f32 * scale,
-                    y: -position.y_offset as f32 * scale,
-                    advance: position.x_advance as f32 * scale,
-                };
-                pen += glyph.advance;
-                glyph
-            })
-            .collect();
-        ShapedRun { glyphs, width: pen }
+        for (info, position) in output.glyph_infos().iter().zip(output.glyph_positions()) {
+            let glyph = ShapedGlyph {
+                glyph: info.glyph_id as u16,
+                font,
+                cluster: offset + info.cluster as usize,
+                x: pen + position.x_offset as f32 * scale,
+                y: -position.y_offset as f32 * scale,
+                advance: position.x_advance as f32 * scale,
+            };
+            pen += glyph.advance;
+            out.push(glyph);
+        }
+        pen
     }
 
     /// Atlas placement of a glyph, baking it first if needed. `None` for glyphs without an
@@ -663,5 +759,54 @@ mod tests {
         let id = fonts.add(DEFAULT_FONT.to_vec()).unwrap();
         assert_eq!(id, FontId(1));
         assert_eq!(fonts.len(), 2);
+    }
+
+    #[test]
+    fn one_font_one_run_and_glyphs_name_their_font() {
+        let mut fonts = Fonts::new();
+        let second = fonts.add(DEFAULT_FONT.to_vec()).unwrap();
+        // The second font has everything: no fallback needed, one run in it.
+        fonts.set_fallbacks(vec![FontId::DEFAULT]);
+        let run = fonts.shape(second, "Score คะแนน", 30.0);
+        assert!(run.glyphs.iter().all(|g| g.font == second));
+        assert_eq!(fonts.font_runs(second, "Score คะแนน"), [(0, 21, second)]);
+        // Unknown fallbacks are dropped.
+        fonts.set_fallbacks(vec![FontId(9)]);
+        assert!(fonts.fallbacks().is_empty());
+    }
+
+    /// With a CJK font of the system (when there is one), Chinese inside Thai and Latin text
+    /// comes from it while the rest stays in Prompt, positioned one after the other.
+    #[test]
+    fn missing_characters_come_from_the_fallback_font() {
+        let candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "C:\\Windows\\Fonts\\msyh.ttc",
+        ];
+        let Some(bytes) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else {
+            eprintln!("no CJK font on this machine; skipped");
+            return;
+        };
+        let mut fonts = Fonts::new();
+        let cjk = fonts.add(bytes).unwrap();
+        assert!(!fonts.has_glyph(FontId::DEFAULT, '保'));
+        let text = "A 保存 ก";
+        let before = fonts.shape(FontId::DEFAULT, text, 40.0);
+        assert!(
+            before.glyphs.iter().any(|g| g.glyph == 0),
+            "boxes without a fallback"
+        );
+        fonts.set_fallbacks(vec![cjk]);
+        let run = fonts.shape(FontId::DEFAULT, text, 40.0);
+        assert!(run.glyphs.iter().all(|g| g.glyph != 0), "{:?}", run.glyphs);
+        let font_of = |byte: usize| run.glyphs.iter().find(|g| g.cluster == byte).unwrap().font;
+        assert_eq!(font_of(0), FontId::DEFAULT);
+        assert_eq!(font_of(2), cjk);
+        assert_eq!(font_of("A 保存 ".len()), FontId::DEFAULT);
+        // Pen positions keep increasing across the runs.
+        assert!(run.glyphs.windows(2).all(|w| w[1].x >= w[0].x));
+        let sum: f32 = run.glyphs.iter().map(|g| g.advance).sum();
+        assert!((sum - run.width).abs() < 1e-3);
     }
 }

@@ -383,6 +383,17 @@ impl LabelRef<'_, '_> {
         self.tree.set(self.node, "label.text", text)
     }
 
+    /// The translation key the label shows (empty without one).
+    pub fn key(&self) -> Option<String> {
+        self.tree.get(self.node, "label.key")
+    }
+
+    /// Shows the text of `key` in the game's language, following language changes;
+    /// `""` removes the key (the text then stays as it is).
+    pub fn set_key(&mut self, key: &str) -> Result<(), Error> {
+        self.tree.set(self.node, "label.key", key)
+    }
+
     property!(
         font_size,
         set_font_size,
@@ -434,6 +445,16 @@ impl ButtonRef<'_, '_> {
 
     pub fn set_text(&mut self, text: &str) -> Result<(), Error> {
         self.tree.set(self.node, "button.text", text)
+    }
+
+    /// The translation key the button shows (empty without one).
+    pub fn key(&self) -> Option<String> {
+        self.tree.get(self.node, "button.key")
+    }
+
+    /// Like [`LabelRef::set_key`].
+    pub fn set_key(&mut self, key: &str) -> Result<(), Error> {
+        self.tree.set(self.node, "button.key", key)
     }
 
     property!(

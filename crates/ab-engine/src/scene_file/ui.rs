@@ -16,6 +16,7 @@
 
 use super::format::*;
 use super::SceneOrigin;
+use crate::localization::TextKey;
 use ab_asset::AssetServer;
 use ab_core::{Color, Vec2};
 use ab_rendering::{ColorSpace, RenderAssets};
@@ -318,6 +319,7 @@ fn create_ui(tree: &mut SceneTree, kind: &str, desc: &NodeDesc) -> Result<NodeHa
         }
         _ => unreachable!("checked by `create`"),
     };
+    keyed_text(tree, node, kind, desc);
     // The type's own default (labels let the pointer through) unless the file says.
     if let Some(mouse) = desc.control.as_ref().and_then(|c| c.mouse.as_deref()) {
         let filter = mouse_filter(mouse)?;
@@ -326,6 +328,23 @@ fn create_ui(tree: &mut SceneTree, kind: &str, desc: &NodeDesc) -> Result<NodeHa
         }
     }
     Ok(node)
+}
+
+/// A label's or button's translation key, from its description.
+fn keyed_text(tree: &mut SceneTree, node: NodeHandle, kind: &str, desc: &NodeDesc) {
+    let (key, text) = match kind {
+        class::LABEL => desc
+            .label
+            .as_ref()
+            .map(|l| (l.key.as_deref(), l.text.as_str())),
+        class::BUTTON => desc
+            .button
+            .as_ref()
+            .map(|b| (b.key.as_deref(), b.text.as_str())),
+        _ => None,
+    }
+    .unwrap_or((None, ""));
+    crate::localization::set_text_key(tree, node, key, text);
 }
 
 /// The UI tables of a description, to compare two descriptions' UI parts.
@@ -395,11 +414,13 @@ pub fn apply(tree: &mut SceneTree, node: NodeHandle, desc: &NodeDesc) -> Result<
                 label.v_align = l.v_align;
                 label.autowrap = l.autowrap;
             }
+            keyed_text(tree, node, class::LABEL, desc);
         }
         class::BUTTON => {
             if let Some(mut button) = tree.component_mut::<Button>(node) {
                 apply_button(&mut button, &desc.button.clone().unwrap_or_default())?;
             }
+            keyed_text(tree, node, class::BUTTON, desc);
         }
         class::PROGRESS_BAR => {
             if let Some(mut bar) = tree.component_mut::<ProgressBar>(node) {
@@ -501,6 +522,7 @@ pub fn describe_label(label: &Label) -> LabelDesc {
     let s = &label.style;
     LabelDesc {
         text: label.text.clone(),
+        key: None,
         size: (s.size != default.style.size).then_some(round(s.size)),
         color: changed_color(s.color, default.style.color),
         align: (label.h_align != HAlign::Left)
@@ -525,6 +547,7 @@ pub fn describe_button(button: &Button) -> ButtonDesc {
     let default = Button::new("");
     ButtonDesc {
         text: button.text.clone(),
+        key: None,
         size: (button.text_style.size != default.text_style.size)
             .then_some(round(button.text_style.size)),
         color: changed_color(button.normal.color, default.normal.color),
@@ -594,8 +617,24 @@ pub fn describe(tree: &SceneTree, node: NodeHandle, class_name: &str, desc: &mut
                 desc.panel = Some(describe_panel(&p)).filter(|d| *d != PanelDesc::default());
             }
         }
-        class::LABEL => desc.label = tree.component::<Label>(node).map(|l| describe_label(&l)),
-        class::BUTTON => desc.button = tree.component::<Button>(node).map(|b| describe_button(&b)),
+        class::LABEL => {
+            desc.label = tree.component::<Label>(node).map(|l| describe_label(&l));
+            if let (Some(label), Some(key)) = (desc.label.as_mut(), tree.component::<TextKey>(node))
+            {
+                // The scene's own text, not the translation on screen.
+                label.text = key.fallback.clone();
+                label.key = Some(key.key.clone());
+            }
+        }
+        class::BUTTON => {
+            desc.button = tree.component::<Button>(node).map(|b| describe_button(&b));
+            if let (Some(button), Some(key)) =
+                (desc.button.as_mut(), tree.component::<TextKey>(node))
+            {
+                button.text = key.fallback.clone();
+                button.key = Some(key.key.clone());
+            }
+        }
         class::PROGRESS_BAR => {
             if let Some(bar) = tree.component::<ProgressBar>(node) {
                 desc.progress =
@@ -669,6 +708,7 @@ mod tests {
             outline: Some(2.0),
             outline_color: Some(ColorDesc::Hex("#202020".into())),
             autowrap: Some(true),
+            key: None,
         };
         assert_eq!(describe_label(&label(&l).unwrap()), l);
         let b = ButtonDesc {
@@ -677,6 +717,7 @@ mod tests {
             color: Some(ColorDesc::Hex("#3366cc".into())),
             text_color: Some(ColorDesc::Hex("#000000".into())),
             disabled: Some(true),
+            key: None,
         };
         let mut button = Button::new("");
         apply_button(&mut button, &b).unwrap();

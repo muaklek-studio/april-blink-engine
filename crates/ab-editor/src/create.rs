@@ -57,6 +57,40 @@ pub const MESHES: &[Template] = &[
     ),
 ];
 
+/// Paths and what they build (pick a piece for the fence in the Inspector).
+pub const PATHS: &[Template] = &[
+    t(
+        "Path",
+        "Path3D",
+        "[[node]]\nname = \"Path\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.0, 0.0], [4.0, 0.0, 2.0], [8.0, 0.0, 0.0]] }\n",
+    ),
+    t(
+        "Road",
+        "Path3D",
+        "[[node]]\nname = \"Road\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.02, 0.0], [10.0, 0.02, 3.0], [20.0, 0.02, 0.0]], mode = \"ribbon\", width = 4.0, collide = true }\nmaterial = { color = \"#3a3b3e\", roughness = 0.9 }\n",
+    ),
+    t(
+        "River",
+        "Path3D",
+        "[[node]]\nname = \"River\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.01, 0.0], [8.0, 0.01, 6.0], [16.0, 0.01, 2.0], [24.0, 0.01, 8.0]], mode = \"ribbon\", width = 6.0 }\nmaterial = { color = \"#2f6f9fcc\", roughness = 0.05, metallic = 0.2 }\n",
+    ),
+    t(
+        "Pipe",
+        "Path3D",
+        "[[node]]\nname = \"Pipe\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.5, 0.0], [4.0, 0.5, 0.0], [4.0, 3.0, 2.0]], mode = \"tube\", radius = 0.2, sides = 16, collide = true }\nmaterial = { color = \"#8a9099\", roughness = 0.35, metallic = 1.0 }\n",
+    ),
+    t(
+        "Cable",
+        "Path3D",
+        "[[node]]\nname = \"Cable\"\ntype = \"Path3D\"\npath = { points = [[0.0, 4.0, 0.0], [10.0, 4.0, 0.0]], mode = \"tube\", radius = 0.025, sides = 6, sag = 0.8 }\nmaterial = { color = \"#1a1a1a\" }\n",
+    ),
+    t(
+        "Fence / row of pieces",
+        "Path3D",
+        "[[node]]\nname = \"Fence\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], mode = \"instances\", spacing = 2.0 }\n",
+    ),
+];
+
 pub const LIGHTS: &[Template] = &[
     t(
         "Directional Light",
@@ -438,6 +472,7 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
     };
     section(ui, "Node", BASIC);
     section(ui, "Mesh", MESHES);
+    section(ui, "Path", PATHS);
     section(ui, "Light", LIGHTS);
     section(ui, "Camera", CAMERAS);
     section(ui, "Physics", PHYSICS);
@@ -554,7 +589,7 @@ mod tests {
         let project =
             std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
-        let all: Vec<&Template> = [BASIC, MESHES, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS]
+        let all: Vec<&Template> = [BASIC, MESHES, PATHS, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS]
             .iter()
             .flat_map(|group| group.iter())
             .collect();

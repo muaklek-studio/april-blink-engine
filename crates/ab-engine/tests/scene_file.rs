@@ -31,7 +31,9 @@ fn engine_with(files: &[(&str, &str)]) -> (Engine, TempAssets) {
     .unwrap();
     std::fs::copy(assets.join("audio/thud.wav"), dir.join("audio/thud.wav")).unwrap();
     for (path, text) in files {
-        std::fs::write(dir.join(path), text).unwrap();
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
     }
     let config = EngineConfig {
         asset_root: dir.clone(),
@@ -362,6 +364,29 @@ position = [5.0, 0.0, 0.0]
 }
 
 #[test]
+fn abscene_files_instance_alongside_older_toml_scenes() {
+    let room = "[[node]]\nname = \"Room\"\ntype = \"Node3D\"\n\n[[node]]\nname = \"Lamp\"\nparent = \".\"\ntype = \"OmniLight3D\"\n";
+    let house = "[[node]]\nname = \"House\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"New\"\nparent = \".\"\ninstance = \"rooms/new.abscene\"\n\n\
+                 [[node]]\nname = \"Old\"\nparent = \".\"\ninstance = \"rooms/old.toml\"\n";
+    let (mut engine, _assets) = engine_with(&[
+        ("rooms/new.abscene", room),
+        ("rooms/old.toml", room),
+        ("house.abscene", house),
+    ]);
+    let tree = engine.tree_mut();
+    let house = load_scene(tree, "house.abscene").unwrap();
+    assert!(tree.get_node(house, "New/Lamp").is_some());
+    assert!(tree.get_node(house, "Old/Lamp").is_some());
+    let saved = save_scene(tree, house);
+    assert_eq!(
+        saved.nodes[1].instance.as_deref(),
+        Some("rooms/new.abscene")
+    );
+    assert_eq!(saved.nodes[2].instance.as_deref(), Some("rooms/old.toml"));
+}
+
+#[test]
 fn save_and_reload_round_trips() {
     let (mut engine, _assets) = engine_with(&[("level.toml", LEVEL)]);
     let tree = engine.tree_mut();
@@ -605,4 +630,280 @@ fn ui_scenes_load_lay_out_and_save_back() {
     assert!(text.contains("type = \"TextureRect\""));
     assert!(text.contains("texture = \"logo.png\""));
     assert!(text.contains("text = \"Paused\""));
+}
+
+#[test]
+fn keyed_ui_texts_translate_and_save_their_own_text() {
+    let hud = "[[node]]\nname = \"Hud\"\ntype = \"Control\"\n\n\
+               [[node]]\nname = \"Score\"\nparent = \".\"\ntype = \"Label\"\nlabel = { text = \"Score\", key = \"hud.score\" }\n\n\
+               [[node]]\nname = \"Play\"\nparent = \".\"\ntype = \"Button\"\nbutton = { text = \"Play\", key = \"hud.play\" }\n";
+    let en = "[language]\ncode = \"en\"\nname = \"English\"\n[hud]\nscore = \"Score\"\nplay = \"Play\"\n";
+    let th =
+        "[language]\ncode = \"th\"\nname = \"ไทย\"\n[hud]\nscore = \"คะแนน\"\nplay = \"เล่น\"\n";
+    let (mut engine, _assets) = engine_with(&[
+        ("hud.abscene", hud),
+        ("locales/en.toml", en),
+        ("locales/th.toml", th),
+    ]);
+    let settings = ab_engine::localization::LocalizationSettings {
+        languages: vec!["en".into(), "th".into()],
+        default_language: Some("th".into()),
+        ..Default::default()
+    };
+    ab_engine::localization::install(engine.tree_mut().world_mut(), &settings).unwrap();
+    let tree = engine.tree_mut();
+    let hud = load_scene(tree, "hud.abscene").unwrap();
+    let root = tree.root();
+    tree.add_child(root, hud).unwrap();
+    engine.update(1.0 / 60.0);
+    let tree = engine.tree();
+    let score = tree.get_node(hud, "Score").unwrap();
+    let play = tree.get_node(hud, "Play").unwrap();
+    assert_eq!(
+        tree.component::<ab_engine::ui::Label>(score).unwrap().text,
+        "คะแนน"
+    );
+    assert_eq!(
+        tree.component::<ab_engine::ui::Button>(play).unwrap().text,
+        "เล่น"
+    );
+
+    // Saved: the key and the scene's own text, not the Thai on screen.
+    let saved = save_scene(tree, hud);
+    let label = saved.nodes[1].label.as_ref().unwrap();
+    assert_eq!(
+        (label.text.as_str(), label.key.as_deref()),
+        ("Score", Some("hud.score"))
+    );
+    let button = saved.nodes[2].button.as_ref().unwrap();
+    assert_eq!(
+        (button.text.as_str(), button.key.as_deref()),
+        ("Play", Some("hud.play"))
+    );
+}
+
+#[test]
+fn material_files_are_shared_and_overridden_per_node() {
+    let brick = "color = \"#aa4433\"\nroughness = 0.8\nalbedo_texture = \"albedo.png\"\nnormal_texture = \"albedo.png\"\nnormal_scale = 0.5\n";
+    let scene = "[[node]]\nname = \"Wall\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"A\"\nparent = \".\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\nmaterial = { file = \"materials/brick.abmat\" }\n\n\
+                 [[node]]\nname = \"B\"\nparent = \".\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\nmaterial = { file = \"materials/brick.abmat\", roughness = 0.2 }\n";
+    let png = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/models/totem_albedo.png"
+    ))
+    .unwrap();
+    let (mut engine, assets) =
+        engine_with(&[("materials/brick.abmat", brick), ("wall.abscene", scene)]);
+    std::fs::write(assets.0.join("albedo.png"), png).unwrap();
+    let tree = engine.tree_mut();
+    let wall = load_scene(tree, "wall.abscene").unwrap();
+    let material = |name: &str| {
+        let node = tree.get_node(wall, name).unwrap();
+        let handle = tree.component::<MeshInstance3D>(node).unwrap().material;
+        tree.world()
+            .resource::<RenderAssets>()
+            .unwrap()
+            .material(handle)
+            .copied()
+            .unwrap()
+    };
+    let (a, b) = (material("A"), material("B"));
+    assert!(a.albedo_texture.is_some() && a.normal_texture.is_some());
+    assert_eq!(a.normal_scale, 0.5);
+    assert_eq!((a.roughness, b.roughness), (0.8, 0.2));
+    assert_eq!(a.albedo, b.albedo, "both from the file");
+
+    // Saved as written: the file and the node's own keys, not the file's contents.
+    let saved = save_scene(tree, wall);
+    let b = saved.nodes[2].material.as_ref().unwrap();
+    assert_eq!(b.file.as_deref(), Some("materials/brick.abmat"));
+    assert_eq!((b.roughness, b.color.is_none()), (Some(0.2), true));
+
+    // A missing material file names itself.
+    let broken = "[[node]]\nname = \"C\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\nmaterial = { file = \"materials/none.abmat\" }\n";
+    std::fs::write(assets.0.join("broken.abscene"), broken).unwrap();
+    let err = load_scene(tree, "broken.abscene").unwrap_err().to_string();
+    assert!(err.contains("materials/none.abmat"), "{err}");
+}
+
+#[test]
+fn prefab_instances_keep_their_own_changes_when_the_prefab_changes() {
+    let lamp = "[[node]]\nname = \"Lamp\"\ntype = \"Node3D\"\n\n\
+                [[node]]\nname = \"Light\"\nparent = \".\"\ntype = \"OmniLight3D\"\nlight = { energy = 2.0, range = 5.0 }\n";
+    let room = "[[node]]\nname = \"Room\"\ntype = \"Node3D\"\n\n\
+                [[node]]\nname = \"A\"\nparent = \".\"\ninstance = \"lamp.abscene\"\n\n\
+                [[node]]\nname = \"B\"\nparent = \".\"\ninstance = \"lamp.abscene\"\nposition = [3.0, 0.0, 0.0]\n\
+                overrides = [{ path = \"Light\", light = { energy = 9.0 } }, { path = \"Gone\", visible = false }]\n\n\
+                [[node]]\nname = \"C\"\nparent = \".\"\ninstance = \"missing.abscene\"\noverrides = [{ path = \"X\", visible = false }]\n";
+    let (mut engine, assets) = engine_with(&[("lamp.abscene", lamp), ("room.abscene", room)]);
+    let energy = |tree: &SceneTree, room: NodeHandle, path: &str| {
+        let light = tree.get_node(room, path).unwrap();
+        tree.component::<ab_engine::rendering::OmniLight3D>(light)
+            .unwrap()
+            .energy
+    };
+    let tree = engine.tree_mut();
+    let room_node = load_scene(tree, "room.abscene").unwrap();
+    assert_eq!(energy(tree, room_node, "A/Light"), 2.0);
+    assert_eq!(energy(tree, room_node, "B/Light"), 9.0, "B's override");
+    // The missing prefab: a placeholder, the rest of the room loads.
+    let c = tree.get_node(room_node, "C").unwrap();
+    assert!(tree
+        .component::<ab_engine::scene_file::prefab::MissingInstance>(c)
+        .is_some());
+
+    // A's light is changed in the level: saved as A's override, the prefab untouched.
+    let a_light = tree.get_node(room_node, "A/Light").unwrap();
+    tree.component_mut::<ab_engine::rendering::OmniLight3D>(a_light)
+        .unwrap()
+        .range = 12.0;
+    let saved = save_scene(tree, room_node);
+    let a = &saved.nodes[1];
+    assert_eq!(a.overrides.len(), 1, "{:?}", a.overrides);
+    assert_eq!(a.overrides[0]["path"].as_str(), Some("Light"));
+    assert_eq!(a.overrides[0]["light"]["range"].as_float(), Some(12.0));
+    assert!(
+        a.overrides[0]["light"].get("energy").is_none(),
+        "only what changed"
+    );
+    // B keeps the override that matches nothing; C saves back as written.
+    let b = &saved.nodes[2];
+    assert!(b
+        .overrides
+        .iter()
+        .any(|o| o["path"].as_str() == Some("Gone")));
+    let c = &saved.nodes[3];
+    assert_eq!(c.instance.as_deref(), Some("missing.abscene"));
+    assert_eq!(c.overrides.len(), 1);
+
+    // The prefab changes: every instance gets it, overrides still win.
+    std::fs::write(assets.0.join("room.abscene"), saved.to_toml()).unwrap();
+    std::fs::write(
+        assets.0.join("lamp.abscene"),
+        lamp.replace("energy = 2.0, range = 5.0", "energy = 4.0, range = 5.0"),
+    )
+    .unwrap();
+    let again = load_scene(tree, "room.abscene").unwrap();
+    assert_eq!(
+        energy(tree, again, "A/Light"),
+        4.0,
+        "the prefab's new energy"
+    );
+    assert_eq!(energy(tree, again, "B/Light"), 9.0, "B's own energy");
+    let a_light = tree.get_node(again, "A/Light").unwrap();
+    assert_eq!(
+        tree.component::<ab_engine::rendering::OmniLight3D>(a_light)
+            .unwrap()
+            .range,
+        12.0
+    );
+}
+
+#[test]
+fn paths_build_roads_pipes_and_fences_and_save_only_their_points() {
+    let post = "[[node]]\nname = \"Post\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\n";
+    let scene = "[[node]]\nname = \"Land\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"Road\"\nparent = \".\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 5.0]], mode = \"ribbon\", width = 4.0, collide = true }\nmaterial = { color = \"#333333\" }\n\n\
+                 [[node]]\nname = \"Fence\"\nparent = \".\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0]], mode = \"instances\", piece = \"post.abscene\", spacing = 2.5 }\n\n\
+                 [[node]]\nname = \"Cable\"\nparent = \".\"\ntype = \"Path3D\"\npath = { points = [[0.0, 5.0, 0.0], [8.0, 5.0, 0.0]], mode = \"tube\", radius = 0.03, sag = 0.5 }\n";
+    let (mut engine, _assets) = engine_with(&[("post.abscene", post), ("land.abscene", scene)]);
+    let tree = engine.tree_mut();
+    let land = load_scene(tree, "land.abscene").unwrap();
+    let road = tree.get_node(land, "Road").unwrap();
+    assert_eq!(tree.class_name(road), Some("Path3D"));
+    assert!(tree.get_node(road, "Built/Mesh").is_some());
+    assert!(tree.get_node(road, "Built/Shape").is_some(), "the road can be driven on");
+    let fence = tree.get_node(land, "Fence").unwrap();
+    assert_eq!(tree.children(tree.get_node(fence, "Built").unwrap()).len(), 5);
+    assert!(tree.get_node(land, "Cable/Built/Mesh").is_some());
+
+    let saved = save_scene(tree, land);
+    assert_eq!(saved.nodes.len(), 4, "only the paths, not what they built");
+    let road = &saved.nodes[1];
+    assert_eq!(road.path.as_ref().unwrap().points.len(), 3);
+    assert!(road.material.is_some());
+    // Round trip: the same scene again.
+    let again = SceneFile::from_toml(&saved.to_toml()).unwrap();
+    assert_eq!(again, saved);
+
+    let bad = "[[node]]\nname = \"P\"\ntype = \"Path3D\"\npath = { mode = \"spiral\" }\n";
+    std::fs::write(_assets.0.join("bad.abscene"), bad).unwrap();
+    let err = load_scene(tree, "bad.abscene").unwrap_err().to_string();
+    assert!(err.contains("spiral"), "{err}");
+}
+
+#[test]
+fn generators_build_on_load_repeat_by_seed_and_save_their_recipe() {
+    let world = r##"
+[[node]]
+name = "World"
+type = "Node3D"
+
+[[node]]
+name = "Hills"
+parent = "."
+type = "Generator"
+generator = { kind = "terrain", seed = 4, size = 60.0, resolution = 24, height = 8.0 }
+
+[[node]]
+name = "Trees"
+parent = "."
+type = "Generator"
+generator = { kind = "scatter", seed = 9, count = 20, width = 40.0, depth = 40.0, min_distance = 2.0 }
+
+[[node]]
+name = "Crypt"
+parent = "."
+type = "Generator"
+position = [100.0, 0.0, 0.0]
+generator = { kind = "dungeon", seed = 2, width = 16, depth = 16, rooms = 4 }
+
+[[node]]
+name = "Village"
+parent = "."
+type = "Generator"
+position = [0.0, 0.0, 200.0]
+generator = { kind = "town", seed = 1, blocks_x = 2, blocks_z = 1, houses = 1 }
+"##;
+    let (mut engine, assets) = engine_with(&[("world.abscene", world)]);
+    let tree = engine.tree_mut();
+    let root = load_scene(tree, "world.abscene").unwrap();
+    let built = |tree: &SceneTree, name: &str| {
+        let node = tree.get_node(root, &format!("{name}/Built")).unwrap();
+        tree.children(node)
+    };
+    assert_eq!(built(tree, "Hills").len(), 1, "one terrain");
+    assert!(tree.get_node(root, "Hills/Built/Terrain/Shape").is_some(), "with collision");
+    let trees = built(tree, "Trees");
+    assert!(trees.len() >= 15, "{}", trees.len());
+    // Standing on the hills, not at y = 0.
+    let heights: Vec<f32> = trees.iter().map(|&t| tree.transform(t).unwrap().translation.y).collect();
+    assert!(heights.iter().any(|&y| y > 0.5), "{heights:?}");
+    let crypt = built(tree, "Crypt");
+    assert!(crypt.len() > 20, "floors, walls and lights: {}", crypt.len());
+    let village = built(tree, "Village");
+    let roads = village.iter().filter(|&&n| tree.class_name(n) == Some("Path3D")).count();
+    assert_eq!(roads, 3 + 2, "roads around 2 × 1 blocks");
+    let house = village.iter().copied().find(|&n| tree.class_name(n) == Some("Generator")).unwrap();
+    assert!(tree.get_node(house, "Built/Roof").is_some(), "the town's buildings are built too");
+
+    // The same seed: the same result.
+    let again = load_scene(tree, "world.abscene").unwrap();
+    let positions = |r: NodeHandle| {
+        let built = tree.get_node(r, "Trees/Built").unwrap();
+        tree.children(built).iter().map(|&t| tree.transform(t).unwrap().translation).collect::<Vec<_>>()
+    };
+    assert_eq!(positions(root), positions(again));
+
+    // Saved: the recipes only.
+    let saved = save_scene(tree, root);
+    assert_eq!(saved.nodes.len(), 5);
+    assert_eq!(saved.nodes[2].generator.as_ref().unwrap().params["count"].as_integer(), Some(20));
+    assert_eq!(SceneFile::from_toml(&saved.to_toml()).unwrap(), saved);
+
+    let bad = "[[node]]\nname = \"G\"\ntype = \"Generator\"\ngenerator = { kind = \"galaxy\" }\n";
+    std::fs::write(assets.0.join("bad.abscene"), bad).unwrap();
+    let err = load_scene(tree, "bad.abscene").unwrap_err().to_string();
+    assert!(err.contains("galaxy") && err.contains("terrain"), "{err}");
 }

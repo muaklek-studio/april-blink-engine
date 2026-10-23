@@ -8,7 +8,7 @@
 //! cargo run -p ab-editor                                       # project manager
 //! cargo run -p ab-editor -- --new-project "My Game" --in ~/Games    # no window
 //! cargo run -p ab-editor -- --export <project folder> --platform all --archive
-//! cargo run -p ab-editor -- --project assets --scene slice/level.toml \
+//! cargo run -p ab-editor -- --project assets --scene slice/level.abscene \
 //!     --scripts target/debug/libab_slice.so                      # with the game's scripts
 //! ```
 
@@ -18,23 +18,34 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod asset_viewer;
+mod build;
 mod chrome;
+mod commands;
 mod console;
 mod create;
+mod dialogs;
 mod export;
+mod fonts;
 mod git;
 mod history;
+mod i18n;
 mod loading;
 mod panels;
+mod preferences;
+mod preview;
 mod project;
 mod project_manager;
 mod projects;
 mod scripts;
+mod settings;
 mod shell;
 mod state;
 mod theme;
+mod thumbnails;
 mod ui_edit;
 mod viewport;
+mod viewports;
 
 use anyhow::{bail, Context as _};
 use std::path::PathBuf;
@@ -62,6 +73,12 @@ pub struct Options {
     pub system_titlebar: bool,
     /// Save a PNG of the window after start-up and exit (documentation, CI).
     pub screenshot: Option<PathBuf>,
+    /// The editor's language for this run (`en`, `th`), over the saved preference.
+    pub language: Option<String>,
+    /// The asset folder the browser starts in (screenshots).
+    pub browse: Option<String>,
+    /// An asset to open in the viewer at start (screenshots).
+    pub view: Option<String>,
 }
 
 /// The editor draws with the engine's GPU context: the same instance flags (no Vulkan
@@ -161,11 +178,15 @@ fn parse() -> anyhow::Result<Options> {
             }
             "--select" => options.select = Some(value()?),
             "--screenshot" => options.screenshot = Some(value()?.into()),
+            "--language" => options.language = Some(value()?),
+            "--browse" => options.browse = Some(value()?),
+            "--view" => options.view = Some(value()?),
             "-h" | "--help" => {
                 println!(
                     "usage: ab-editor [--project <asset dir>] [--scene <scene.toml>] \
                      [--scripts <library>] [--select <node path,...>] [--play] [--physics-view] \
                      [--show <panel,...>] [--system-titlebar] [--screenshot <file.png>] \
+                     [--language <en|th|…>] \
                      [--hold-loading]\n\n\
                      Without --project the project manager opens after the system check."
                 );

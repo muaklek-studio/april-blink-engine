@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 ab-engine.workspace = true
+ab-locale.workspace = true
 ab-project.workspace = true
 anyhow.workspace = true
 # egui_dock and egui-phosphor support egui 0.36; eframe 0.36 uses the same wgpu as the engine.
@@ -21,6 +22,8 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu", "defa
 egui_dock = "0.21"
 egui-phosphor = "0.14"
 image.workspace = true
+# Checks font files before egui gets them.
+rustybuzz.workspace = true
 serde.workspace = true
 toml.workspace = true
 tracing.workspace = true

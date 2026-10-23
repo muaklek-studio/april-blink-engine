@@ -39,6 +39,20 @@ pub struct Shell {
 impl Shell {
     pub fn new(cc: &eframe::CreationContext<'_>, options: Options, logs: LogBuffer) -> Self {
         theme::apply(&cc.egui_ctx);
+        // The user's language, font and scale from the first screen on (screenshots use
+        // the defaults, so they look the same on every machine).
+        let mut settings = match options.screenshot {
+            None => {
+                crate::settings::EditorSettings::load(&crate::settings::EditorSettings::store())
+            }
+            Some(_) => Default::default(),
+        };
+        if let Some(language) = &options.language {
+            settings.language = language.clone();
+        }
+        if let Some(err) = crate::preferences::apply(&cc.egui_ctx, &settings) {
+            tracing::warn!("{err}");
+        }
         cc.egui_ctx
             .send_viewport_cmd(ViewportCommand::Title("April Blink Editor".into()));
         Self {

@@ -1,0 +1,11 @@
+# The game's English texts. Give a Label or Button a key (`label = { key = "menu.play" }`)
+# and it shows the key's text in the current language. Add a language: copy this file
+# (th.toml next to it), translate it, and list its code under [localization] in game.toml.
+
+[language]
+code = "en"
+name = "English"
+
+[menu]
+play = "Play"
+quit = "Quit"

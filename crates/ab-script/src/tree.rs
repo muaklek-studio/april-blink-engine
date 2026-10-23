@@ -663,7 +663,7 @@ impl<'a> Tree<'a> {
     // Scenes, files and saves
     // =========================================================================================
 
-    /// Loads a scene file (`"levels/one.toml"`, or a glTF model) as a detached node.
+    /// Loads a scene file (`"levels/one.abscene"`, or a glTF model) as a detached node.
     pub fn load_scene(&mut self, path: &str) -> Result<Node, Error> {
         self.created(method!("scene.load"), &[path.to_value()])
     }
@@ -676,7 +676,7 @@ impl<'a> Tree<'a> {
         )
     }
 
-    /// Builds nodes from scene-file text (the same TOML as `.toml` scenes), detached.
+    /// Builds nodes from scene-file text (the TOML inside `.abscene` scenes), detached.
     pub fn instantiate_toml(&mut self, toml: &str) -> Result<Node, Error> {
         self.created(method!("scene.from_toml"), &[toml.to_value()])
     }
@@ -689,6 +689,102 @@ impl<'a> Tree<'a> {
     /// Loads the current scene again from its file.
     pub fn reload_scene(&mut self) -> Result<Node, Error> {
         self.created(method!("scene.reload"), &[])
+    }
+
+    /// The length of a `Path3D` (metres, in the world).
+    pub fn path_length(&self, path: Node) -> Result<f32, Error> {
+        self.fetch::<f64>(method!("path.length"), &[path.to_value()])?
+            .map(|v| v as f32)
+            .ok_or_else(|| Error::new(ErrorKind::Failed, "not a path"))
+    }
+
+    /// Where a `Path3D` is `distance` metres from its start, and which way it goes there
+    /// (world space): move a train, a camera or a patrol along it. A closed path wraps.
+    pub fn path_point(&self, path: Node, distance: f32) -> Result<(Vec3, Vec3), Error> {
+        let values = self.values(method!("path.point"), &[path.to_value(), distance.to_value()])?;
+        match values.as_slice() {
+            [p, d] => match (p.get::<Vec3>(), d.get::<Vec3>()) {
+                (Some(p), Some(d)) => Ok((p, d)),
+                _ => Err(Error::new(ErrorKind::Failed, "unexpected path values")),
+            },
+            _ => Err(Error::new(ErrorKind::Failed, "not a path")),
+        }
+    }
+
+    /// A number from the game's config (`config.toml`): `tree.config_f32("Player.MoveSpeed")`.
+    /// `Err` names the problem: an unknown key (with the closest one), a value of another
+    /// type, or a game without a config.
+    pub fn config_f32(&self, key: &str) -> Result<f32, Error> {
+        self.config_number(key).map(|v| v as f32)
+    }
+
+    /// A number from the game's config, at full precision.
+    pub fn config_number(&self, key: &str) -> Result<f64, Error> {
+        self.fetch(method!("config.number"), &[key.to_value()])?
+            .ok_or_else(|| Error::new(ErrorKind::Failed, format!("no number `{key}`")))
+    }
+
+    /// An integer from the game's config (`Player.MaxHealth`).
+    pub fn config_int(&self, key: &str) -> Result<i64, Error> {
+        self.fetch(method!("config.int"), &[key.to_value()])?
+            .ok_or_else(|| Error::new(ErrorKind::Failed, format!("no integer `{key}`")))
+    }
+
+    pub fn config_bool(&self, key: &str) -> Result<bool, Error> {
+        self.fetch(method!("config.bool"), &[key.to_value()])?
+            .ok_or_else(|| Error::new(ErrorKind::Failed, format!("no bool `{key}`")))
+    }
+
+    pub fn config_text(&self, key: &str) -> Result<String, Error> {
+        self.fetch(method!("config.text"), &[key.to_value()])?
+            .ok_or_else(|| Error::new(ErrorKind::Failed, format!("no text `{key}`")))
+    }
+
+    /// Changes a setting of the game's config. Refused (with the reason) for constants, a
+    /// value of another type, one outside the setting's range or options, or an unknown key.
+    pub fn set_config(&mut self, key: &str, value: impl IntoValue) -> Result<(), Error> {
+        self.run(method!("config.set"), &[key.to_value(), value.to_value()])
+    }
+
+    /// The text of translation `key` in the game's language (`[localization]` in
+    /// `game.toml`; missing texts come from the first language). The key itself when no
+    /// language has it, or the game has no languages.
+    pub fn text(&self, key: &str) -> String {
+        self.query::<String>(method!("locale.text"), &[key.to_value()])
+            .unwrap_or_else(|| key.to_owned())
+    }
+
+    /// [`Tree::text`] with `{name}` placeholders filled:
+    /// `tree.text_with("hud.coins", &[("count", &coins)])`.
+    pub fn text_with(&self, key: &str, args: &[(&str, &dyn core::fmt::Display)]) -> String {
+        let mut text = self.text(key);
+        for (name, value) in args {
+            text = text.replace(&format!("{{{name}}}"), &value.to_string());
+        }
+        text
+    }
+
+    /// The game's current language code (`"en"`), empty when it has none.
+    pub fn language(&self) -> String {
+        self.query::<String>(method!("locale.language"), &[])
+            .unwrap_or_default()
+    }
+
+    /// The codes of the game's languages, in `game.toml`'s order.
+    pub fn languages(&self) -> Vec<String> {
+        self.query::<String>(method!("locale.languages"), &[])
+            .map(|list| {
+                list.split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Switches the game's language; labels and buttons with a key change at once.
+    pub fn set_language(&mut self, code: &str) -> Result<(), Error> {
+        self.run(method!("locale.set_language"), &[code.to_value()])
     }
 
     /// A text asset (`"dialogue/intro.txt"`), from the asset folder or the game's pack.

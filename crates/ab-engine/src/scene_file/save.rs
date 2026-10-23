@@ -16,6 +16,16 @@ use tracing::warn;
 /// and meshes created in code, triangle-mesh shapes) are written as plain `Node` / `Node3D`
 /// with a warning. Write the result with [`SceneFile::to_toml`].
 pub fn save_scene(tree: &SceneTree, root: NodeHandle) -> SceneFile {
+    save_tree(tree, root, false)
+}
+
+/// Like [`save_scene`], but an instance at `root` is described with its contents (as the
+/// scene it was made from looks now): to compare with that scene, or to write it back.
+pub fn save_contents(tree: &SceneTree, root: NodeHandle) -> SceneFile {
+    save_tree(tree, root, true)
+}
+
+fn save_tree(tree: &SceneTree, root: NodeHandle, expand_root: bool) -> SceneFile {
     let mut scene = SceneFile::default();
     // (node, parent path, own path)
     let mut stack = vec![(root, None::<String>, ".".to_owned())];
@@ -29,15 +39,25 @@ pub fn save_scene(tree: &SceneTree, root: NodeHandle) -> SceneFile {
             ..Default::default()
         };
         common(tree, node, &mut desc);
-        let instance = tree.component::<SceneInstance>(node).map(|i| i.0.clone());
+        let instance = tree
+            .component::<SceneInstance>(node)
+            .map(|i| i.0.clone())
+            .filter(|_| !(expand_root && node == root));
         // A humanoid ragdoll's bodies are rebuilt from its skeleton on load.
         let generated = tree.component::<crate::ragdoll::RagdollRig>(node).is_some();
         match instance {
-            Some(instance) => desc.instance = Some(instance),
+            Some(instance) => {
+                desc.overrides = super::prefab::instance_overrides(tree, node, &instance);
+                desc.instance = Some(instance);
+            }
             None if generated => describe(tree, node, &mut desc),
             None => {
                 describe(tree, node, &mut desc);
                 for child in tree.children(node).into_iter().rev() {
+                    // Built from this node's description: made again on load.
+                    if tree.component::<super::Generated>(child).is_some() {
+                        continue;
+                    }
                     let Some(child_name) = tree.name(child).map(|n| n.to_owned()) else {
                         continue;
                     };
@@ -102,6 +122,14 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
     let origin = tree.component::<SceneOrigin>(node).map(|o| o.clone());
     let kind: &str = match class {
         "Node" | "Node3D" | "AudioListener3D" | "CameraShake" => class,
+        super::path::PATH_3D => {
+            super::path::describe(tree, node, desc);
+            class
+        }
+        super::generator::GENERATOR => {
+            super::generator::describe(tree, node, desc);
+            class
+        }
         "Ragdoll" => {
             let active = tree.component::<Ragdoll>(node).is_some_and(|r| r.active);
             let rig = tree

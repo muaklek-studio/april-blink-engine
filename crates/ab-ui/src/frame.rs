@@ -585,7 +585,7 @@ impl Context<'_, '_> {
                 let baseline = ((origin.y + line.baseline) * s).round() + shift.y;
                 let line_x = (origin.x + line.x) * s + shift.x;
                 for glyph in &line.glyphs {
-                    let Some(entry) = self.fonts.glyph(style.font, glyph.glyph) else {
+                    let Some(entry) = self.fonts.glyph(glyph.font, glyph.glyph) else {
                         continue;
                     };
                     let [left, top, right, bottom] = entry.plane;

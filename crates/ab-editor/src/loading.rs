@@ -5,8 +5,10 @@
 //! Graphics checks run on the UI thread (they need the GPU device); the others run on a
 //! background thread. Results are revealed one by one, at a readable pace.
 
-use crate::projects::{self, RecentProjects};
+use crate::projects::RecentProjects;
+use crate::settings::EditorSettings;
 use crate::theme;
+use ab_project::{EngineLookup, EngineSource};
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use eframe::egui_wgpu;
 use egui_phosphor::regular as icon;
@@ -29,31 +31,37 @@ pub enum Level {
     Fail,
 }
 
+/// What the user can do about a check that did not pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fix {
+    /// Pick the engine checkout's folder.
+    LocateEngine,
+}
+
 /// Result of one check.
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub level: Level,
     pub detail: String,
+    pub fix: Option<Fix>,
 }
 
 impl Outcome {
-    fn ok(detail: impl Into<String>) -> Self {
+    fn new(level: Level, detail: impl Into<String>) -> Self {
         Self {
-            level: Level::Ok,
+            level,
             detail: detail.into(),
+            fix: None,
         }
+    }
+    fn ok(detail: impl Into<String>) -> Self {
+        Self::new(Level::Ok, detail)
     }
     fn warn(detail: impl Into<String>) -> Self {
-        Self {
-            level: Level::Warn,
-            detail: detail.into(),
-        }
+        Self::new(Level::Warn, detail)
     }
     fn fail(detail: impl Into<String>) -> Self {
-        Self {
-            level: Level::Fail,
-            detail: detail.into(),
-        }
+        Self::new(Level::Fail, detail)
     }
 }
 
@@ -153,6 +161,8 @@ pub struct Loading {
     finished_at: Option<Instant>,
     /// Keep showing the screen (screenshots of it).
     hold: bool,
+    /// A folder picker for [`Fix::LocateEngine`] is open.
+    picker: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl Loading {
@@ -183,6 +193,7 @@ impl Loading {
             frames: 0,
             finished_at: None,
             hold,
+            picker: None,
         }
     }
 
@@ -210,6 +221,17 @@ impl Loading {
         }
         while let Ok((index, outcome)) = self.receiver.try_recv() {
             self.results[index] = Some(outcome);
+        }
+        if let Some(picked) = self.picker.as_ref().and_then(|p| p.try_recv().ok()) {
+            self.picker = None;
+            if let Some(dir) = picked {
+                let index = Check::ALL.iter().position(|c| *c == Check::Engine);
+                if let Some(slot) = index.and_then(|i| self.results.get_mut(i)) {
+                    *slot = Some(choose_engine(&dir));
+                }
+                // Everything fine now: move on as if it had been found.
+                self.finished_at = Some(Instant::now());
+            }
         }
         if let Ok(recent) = self.recent.try_recv() {
             self.loaded_recent = Some(recent);
@@ -412,11 +434,48 @@ impl Loading {
                     {
                         choice = Some(Next::Quit);
                     }
+                    let locate = report
+                        .results
+                        .iter()
+                        .any(|(_, o)| o.fix == Some(Fix::LocateEngine));
+                    if locate {
+                        let button = egui::Button::new(format!(
+                            "{}  Locate engine sources…",
+                            icon::FOLDER_OPEN
+                        ))
+                        .min_size(Vec2::new(0.0, 26.0));
+                        if ui
+                            .add_enabled(self.picker.is_none(), button)
+                            .on_hover_text(
+                                "Choose the engine checkout (the folder with Cargo.toml and \
+                                 crates/). It is remembered for the next start.",
+                            )
+                            .clicked()
+                        {
+                            self.picker = Some(pick_folder(ui.ctx(), "Locate the engine sources"));
+                        }
+                    }
                 });
             });
         }
         choice
     }
+}
+
+/// Opens a native folder picker off the UI thread; the receiver gets the choice.
+pub fn pick_folder(ctx: &egui::Context, title: &str) -> Receiver<Option<PathBuf>> {
+    let (send, receive) = mpsc::channel();
+    let mut picker = rfd::FileDialog::new().set_title(title);
+    if let Some(home) = crate::projects::projects_dir().and_then(|d| d.parent().map(PathBuf::from))
+    {
+        picker = picker.set_directory(home);
+    }
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let _ = send.send(picker.pick_folder());
+        ctx.request_repaint();
+    });
+    receive
 }
 
 /// A soft radial accent glow: bright in the middle, fading to nothing at `radius`.
@@ -566,19 +625,64 @@ fn parse_version(text: &str) -> Option<Version> {
 /// The script SDK new projects build against: the engine checkout's (development builds),
 /// else the copy shipped next to the editor. (The projects folder needs no check: it is
 /// created with the first project.)
+///
+/// The checkout found last time is remembered in the editor settings and tried first; a
+/// checkout found anew (the old one moved) replaces it.
 fn check_engine() -> Outcome {
-    engine_outcome(projects::engine_root(), ab_project::sdk_dir())
+    let store = EditorSettings::store();
+    let mut settings = EditorSettings::load(&store);
+    if let Some(saved) = &settings.engine_root {
+        if let Err(err) = ab_project::set_engine_root(Some(saved)) {
+            tracing::info!("the remembered engine sources are gone: {err}");
+        }
+    }
+    let lookup = ab_project::locate_engine();
+    if let EngineLookup::Found { root, source } = &lookup {
+        if *source != EngineSource::Environment && settings.engine_root.as_ref() != Some(root) {
+            settings.engine_root = Some(root.clone());
+            settings.save(&store);
+        }
+    }
+    engine_outcome(&lookup, ab_project::sdk_dir())
 }
 
-fn engine_outcome(engine: Option<PathBuf>, sdk: Option<PathBuf>) -> Outcome {
-    match (engine, sdk) {
-        (Some(engine), Some(_)) => Outcome::ok(engine.display().to_string()),
-        (None, Some(sdk)) => Outcome::ok(format!("SDK shipped with the editor: {}", sdk.display())),
+/// Uses `dir` (picked by the user) for the engine sources and remembers it.
+pub fn choose_engine(dir: &std::path::Path) -> Outcome {
+    if let Err(err) = ab_project::set_engine_root(Some(dir)) {
+        let mut outcome = Outcome::warn(err);
+        outcome.fix = Some(Fix::LocateEngine);
+        return outcome;
+    }
+    let store = EditorSettings::store();
+    let mut settings = EditorSettings::load(&store);
+    settings.engine_root = ab_project::engine_root();
+    settings.save(&store);
+    engine_outcome(&ab_project::locate_engine(), ab_project::sdk_dir())
+}
+
+fn engine_outcome(lookup: &EngineLookup, sdk: Option<PathBuf>) -> Outcome {
+    let mut outcome = match (lookup, sdk) {
+        (EngineLookup::Found { root, source }, Some(_)) => Outcome::ok(match source {
+            EngineSource::Environment => format!("{} (AB_ENGINE_ROOT)", root.display()),
+            _ => root.display().to_string(),
+        }),
+        (EngineLookup::InvalidEnvironment(dir), _) => Outcome::warn(format!(
+            "AB_ENGINE_ROOT is {}, which is not an engine checkout: fix or unset it",
+            dir.display()
+        )),
+        (_, Some(sdk)) => Outcome::ok(format!("SDK shipped with the editor: {}", sdk.display())),
+        (EngineLookup::Disabled, None) => {
+            Outcome::ok("Ignored (AB_ENGINE_ROOT is empty): new projects use the published SDK")
+        }
         (_, None) => Outcome::warn(
             "Not found: new projects use the published ab-script crate (downloaded when \
-             their scripts first build). Set AB_ENGINE_ROOT to an engine checkout to use it.",
+             their scripts first build). Locate an engine checkout to use its SDK.",
         ),
+    };
+    if outcome.level != Level::Ok && !matches!(lookup, EngineLookup::InvalidEnvironment(_)) {
+        outcome.fix = Some(Fix::LocateEngine);
     }
+    outcome
 }
 
 /// The settings folder exists and is writable.
@@ -628,19 +732,36 @@ mod tests {
 
     #[test]
     fn the_engine_check_looks_for_the_sdk_not_the_projects_folder() {
-        // This checkout: found, whether or not ~/April Blink Projects exists yet.
-        let here = check_engine();
-        assert_eq!(here.level, Level::Ok, "{}", here.detail);
         let engine = PathBuf::from("/engine");
         let sdk = PathBuf::from("/editor/sdk/ab-script");
-        assert_eq!(
-            engine_outcome(Some(engine.clone()), Some(sdk.clone())).detail,
-            engine.display().to_string()
-        );
-        let shipped = engine_outcome(None, Some(sdk));
+        let found = |source| EngineLookup::Found {
+            root: engine.clone(),
+            source,
+        };
+        let outcome = engine_outcome(&found(EngineSource::Build), Some(sdk.clone()));
+        assert_eq!(outcome.detail, engine.display().to_string());
+        assert_eq!(outcome.fix, None);
+        let shipped = engine_outcome(&EngineLookup::NotFound, Some(sdk.clone()));
         assert_eq!(shipped.level, Level::Ok);
         assert!(shipped.detail.starts_with("SDK shipped with the editor"));
-        assert_eq!(engine_outcome(Some(engine), None).level, Level::Warn);
+        // Nothing at all: a warning the user can fix by locating the sources.
+        let missing = engine_outcome(&EngineLookup::NotFound, None);
+        assert_eq!(missing.level, Level::Warn);
+        assert_eq!(missing.fix, Some(Fix::LocateEngine));
+        // A wrong AB_ENGINE_ROOT is the user's setting: reported, not overridden.
+        let wrong = engine_outcome(&EngineLookup::InvalidEnvironment("/nope".into()), Some(sdk));
+        assert_eq!((wrong.level, wrong.fix), (Level::Warn, None));
+        assert!(wrong.detail.contains("AB_ENGINE_ROOT"));
+    }
+
+    #[test]
+    fn choosing_a_folder_that_is_not_the_engine_is_refused() {
+        let outcome = choose_engine(std::path::Path::new("/nonexistent/folder"));
+        assert_eq!(outcome.level, Level::Warn);
+        assert_eq!(outcome.fix, Some(Fix::LocateEngine));
+        assert!(outcome
+            .detail
+            .contains("not an April Blink engine checkout"));
     }
 
     #[test]

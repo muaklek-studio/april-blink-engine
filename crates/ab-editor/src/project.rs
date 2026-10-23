@@ -9,6 +9,7 @@ pub enum AssetKind {
     Folder,
     Scene,
     Model,
+    Material,
     Image,
     Audio,
     Font,
@@ -28,10 +29,18 @@ impl AssetKind {
             Some("png" | "jpg" | "jpeg") => Self::Image,
             Some("wav" | "ogg" | "mp3" | "flac") => Self::Audio,
             Some("ttf" | "otf") => Self::Font,
+            Some(ab_engine::scene_file::SCENE_EXTENSION) => Self::Scene,
+            Some(ab_engine::scene_file::MATERIAL_EXTENSION) => Self::Material,
+            // Scenes saved before `.abscene`; other TOML files are settings or clips.
             Some("toml") if text_probe() => Self::Scene,
             Some("toml" | "json") => Self::Config,
             _ => Self::Other,
         }
+    }
+
+    /// The kind of a file by its name (a `.toml` scene is not told from settings).
+    pub fn of_path(path: &Path) -> Self {
+        Self::of(path, || false)
     }
 
     pub fn icon(self) -> &'static str {
@@ -40,6 +49,7 @@ impl AssetKind {
             Self::Folder => icon::FOLDER_SIMPLE,
             Self::Scene => icon::FILM_SLATE,
             Self::Model => icon::CUBE,
+            Self::Material => icon::DROP_HALF,
             Self::Image => icon::IMAGE,
             Self::Audio => icon::WAVEFORM,
             Self::Font => icon::TEXT_AA,
@@ -193,7 +203,7 @@ mod tests {
         assert_eq!(find("models"), Some(AssetKind::Folder));
         assert_eq!(find("models/crate.glb"), Some(AssetKind::Model));
         assert_eq!(find("audio/thud.wav"), Some(AssetKind::Audio));
-        assert_eq!(find("slice/level.toml"), Some(AssetKind::Scene));
+        assert_eq!(find("slice/level.abscene"), Some(AssetKind::Scene));
         assert_eq!(find("input.toml"), None, "project files are not assets");
         assert!(index.of_kind(AssetKind::Scene).count() >= 1);
     }
@@ -215,6 +225,16 @@ mod tests {
             index.refresh();
         }
         assert_eq!(index.of_kind(AssetKind::Scene).count(), 1);
+        // `.abscene` files are scenes without looking inside.
+        std::fs::write(dir.join("empty.abscene"), "").unwrap();
+        std::fs::write(dir.join("clip.toml"), "[[track]]\n").unwrap();
+        index.rescan();
+        let mut scenes: Vec<_> = index
+            .of_kind(AssetKind::Scene)
+            .map(|a| a.path.clone())
+            .collect();
+        scenes.sort();
+        assert_eq!(scenes, ["empty.abscene", "level.toml"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

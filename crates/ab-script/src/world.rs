@@ -360,7 +360,7 @@ impl<'a> Tree<'a> {
         self.created(method!("effects.spawn"), &args)
     }
 
-    /// Plays an effect scene made in the editor's Effect editor (`effects/blast.toml`) at
+    /// Plays an effect scene made in the editor's Effect editor (`effects/blast.abscene`) at
     /// `position` under `parent`; freed once its one-shot layers and flashes are done.
     pub fn spawn_effect_scene(
         &mut self,

@@ -84,6 +84,7 @@ name = "ab-editor"
 version = "0.1.0"
 dependencies = [
  "ab-engine",
+ "ab-locale",
  "ab-project",
  "anyhow",
  "eframe",
@@ -91,6 +92,7 @@ dependencies = [
  "egui_dock",
  "image",
  "rfd",
+ "rustybuzz",
  "serde",
  "toml",
  "tracing",
@@ -120,6 +122,7 @@ dependencies = [
  "ab-ecs",
  "ab-effects",
  "ab-input",
+ "ab-locale",
  "ab-navigation",
  "ab-physics",
  "ab-platform",
@@ -147,6 +150,15 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "toml",
+]
+
+[[package]]
+name = "ab-locale"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

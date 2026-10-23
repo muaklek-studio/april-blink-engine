@@ -1,6 +1,8 @@
 //! The 3D viewport: renders the scene through the engine's renderer into a texture shown by
 //! egui, with an editor camera, grid, icons, selection bounds, picking and transform gizmos.
 
+use crate::i18n::{t, tf};
+use crate::settings::SnapSettings;
 use crate::state::{Editor, Mode};
 use crate::theme;
 use ab_engine::core::{Affine3A, Color, EulerRot, Mat4, Quat, Transform3D, Vec3, Vec4};
@@ -19,6 +21,65 @@ use egui_phosphor::regular as icon;
 #[derive(Debug, Clone)]
 pub struct AssetDrag(pub String);
 
+/// What a view looks through: the free perspective camera, or an orthographic camera
+/// looking straight down an axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewKind {
+    Perspective,
+    /// Down the Y axis.
+    Top,
+    /// Along -Z.
+    Front,
+    /// Along -X (from +X).
+    Side,
+}
+
+impl ViewKind {
+    pub const ALL: [ViewKind; 4] = [
+        ViewKind::Perspective,
+        ViewKind::Top,
+        ViewKind::Front,
+        ViewKind::Side,
+    ];
+
+    pub fn is_orthographic(self) -> bool {
+        self != ViewKind::Perspective
+    }
+
+    /// The fixed camera rotation of an orthographic view.
+    fn rotation(self) -> Option<Quat> {
+        let (yaw, pitch) = match self {
+            ViewKind::Perspective => return None,
+            ViewKind::Top => (0.0, -std::f32::consts::FRAC_PI_2),
+            ViewKind::Front => (0.0, 0.0),
+            ViewKind::Side => (std::f32::consts::FRAC_PI_2, 0.0),
+        };
+        Some(Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0))
+    }
+
+    /// The world axes the grid of the view spans.
+    fn grid_axes(self) -> (Vec3, Vec3) {
+        match self {
+            ViewKind::Perspective | ViewKind::Top => (Vec3::X, Vec3::Z),
+            ViewKind::Front => (Vec3::X, Vec3::Y),
+            ViewKind::Side => (Vec3::Z, Vec3::Y),
+        }
+    }
+
+    pub fn label(self) -> String {
+        crate::i18n::t(match self {
+            ViewKind::Perspective => "viewport.perspective",
+            ViewKind::Top => "viewport.top",
+            ViewKind::Front => "viewport.front",
+            ViewKind::Side => "viewport.side",
+        })
+    }
+}
+
+/// How far behind the pivot an orthographic camera sits: far enough that nothing in the
+/// scene is behind it.
+const ORTHO_BACK: f32 = 1000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GizmoMode {
     Select,
@@ -31,7 +92,11 @@ pub enum GizmoMode {
 #[derive(Debug, Clone)]
 pub struct ViewOptions {
     pub gizmo: GizmoMode,
-    pub snap: bool,
+    pub snap: SnapSettings,
+    /// Outline selected objects (selection itself, the gizmo and picking work either way).
+    pub highlight_selection: bool,
+    /// Outline the object under the pointer.
+    pub highlight_hover: bool,
     pub grid: bool,
     pub icons: bool,
     pub collision: bool,
@@ -48,7 +113,9 @@ impl Default for ViewOptions {
     fn default() -> Self {
         Self {
             gizmo: GizmoMode::Translate,
-            snap: false,
+            snap: SnapSettings::default(),
+            highlight_selection: true,
+            highlight_hover: true,
             grid: true,
             icons: true,
             collision: false,
@@ -59,10 +126,6 @@ impl Default for ViewOptions {
         }
     }
 }
-
-const TRANSLATE_SNAP: f32 = 0.5;
-const ROTATE_SNAP: f32 = 15.0;
-const SCALE_SNAP: f32 = 0.1;
 
 /// Orbit/fly camera of the editor.
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +203,9 @@ struct Projector {
     inverse: Mat4,
     eye: Vec3,
     rect: Rect,
+    /// An orthographic view's height in world units, and the field of view that maps it to
+    /// a perspective distance (for sizes that should look the same in both).
+    ortho: Option<(f32, f32)>,
 }
 
 impl Projector {
@@ -149,6 +215,23 @@ impl Projector {
             inverse: view.view_projection.inverse(),
             eye: view.position,
             rect,
+            ortho: None,
+        }
+    }
+
+    fn orthographic(view: &CameraView, rect: Rect, fov_y_radians: f32) -> Self {
+        Self {
+            ortho: view.ortho_height.map(|h| (h, fov_y_radians)),
+            ..Self::new(view, rect)
+        }
+    }
+
+    /// How far `p` looks from the camera: its distance, or for an orthographic view the
+    /// distance a perspective camera would need to show the same size.
+    fn view_distance(&self, p: Vec3) -> f32 {
+        match self.ortho {
+            Some((height, fov)) => height * 0.5 / (fov * 0.5).tan().max(1e-3),
+            None => self.eye.distance(p),
         }
     }
 
@@ -184,12 +267,20 @@ impl Projector {
         Some([self.screen_of(ca), self.screen_of(cb)])
     }
 
-    /// World ray (origin, unit direction) through a screen point.
+    /// World ray (origin, unit direction) through a screen point. Orthographic rays are
+    /// parallel and start on the near plane under the point.
     fn ray(&self, pos: Pos2) -> (Vec3, Vec3) {
         let x = (pos.x - self.rect.min.x) / self.rect.width() * 2.0 - 1.0;
         let y = 1.0 - (pos.y - self.rect.min.y) / self.rect.height() * 2.0;
-        let far = self.inverse * Vec4::new(x, y, 0.5, 1.0);
-        let point = far.truncate() / far.w;
+        let unproject = |z: f32| {
+            let p = self.inverse * Vec4::new(x, y, z, 1.0);
+            p.truncate() / p.w
+        };
+        if self.ortho.is_some() {
+            let (near, far) = (unproject(0.0), unproject(1.0));
+            return (near, (far - near).normalize_or(Vec3::NEG_Z));
+        }
+        let point = unproject(0.5);
         (self.eye, (point - self.eye).normalize_or(Vec3::NEG_Z))
     }
 
@@ -205,7 +296,8 @@ impl Projector {
 /// Renders the engine's scene into a texture egui can draw.
 pub struct ViewportRenderer {
     gpu: GpuContext,
-    renderer: SceneRenderer,
+    /// Shared by every view of the editor: one set of pipelines and shadow maps.
+    renderer: std::rc::Rc<std::cell::RefCell<SceneRenderer>>,
     target: Option<OffscreenTarget>,
     texture: Option<egui::TextureId>,
     pub stats: FrameStats,
@@ -225,7 +317,18 @@ impl ViewportRenderer {
         let renderer = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &config);
         Self {
             gpu,
-            renderer,
+            renderer: std::rc::Rc::new(std::cell::RefCell::new(renderer)),
+            target: None,
+            texture: None,
+            stats: FrameStats::default(),
+        }
+    }
+
+    /// Another view drawing with the same scene renderer, into its own image.
+    fn sharing(&self) -> Self {
+        Self {
+            gpu: self.gpu.clone(),
+            renderer: self.renderer.clone(),
             target: None,
             texture: None,
             stats: FrameStats::default(),
@@ -262,9 +365,10 @@ impl ViewportRenderer {
         }
         let target = self.target.as_ref().expect("created above");
         ab_engine::ui::prepare_ui(world, width, height);
-        self.stats = self
-            .renderer
-            .render(&self.gpu, world, target.view(), width, height);
+        self.stats =
+            self.renderer
+                .borrow_mut()
+                .render(&self.gpu, world, target.view(), width, height);
         self.texture.expect("registered above")
     }
 }
@@ -304,6 +408,12 @@ struct GizmoDrag {
 pub struct Viewport {
     pub camera: EditorCamera,
     pub options: ViewOptions,
+    pub kind: ViewKind,
+    /// The view that shows the game's camera and takes the game's input while playing
+    /// (the first one); the others keep their editor camera.
+    pub main: bool,
+    /// The layout button was pressed (the viewport area acts on it).
+    pub toggle_layout: bool,
     renderer: Option<ViewportRenderer>,
     drag: Option<GizmoDrag>,
     /// What the gizmo drag moves: each selected root with its transforms at the start.
@@ -320,14 +430,39 @@ pub struct Viewport {
     last_modifiers: egui::Modifiers,
     /// Image size in physical pixels, for the game's cursor coordinates.
     pixels_per_point: f32,
+    /// What was under the pointer when the context menu opened, and the ground point there.
+    menu_target: Option<(Option<NodeHandle>, Vec3)>,
+    /// A right-click elsewhere closed the open menu: open the new one next frame.
+    reopen_menu: bool,
+    /// A path point being dragged: the path, the point, and the points before the drag.
+    path_drag: Option<(NodeHandle, usize, Vec<[f32; 3]>)>,
+    /// A right-click deleted a path point: no context menu for it.
+    suppress_menu: bool,
 }
 
 impl Viewport {
     pub fn new(state: Option<&egui_wgpu::RenderState>) -> Self {
+        Self::with_renderer(state.map(ViewportRenderer::new))
+    }
+
+    /// Another view sharing this one's scene renderer.
+    pub fn sharing(&self, kind: ViewKind) -> Self {
+        let mut view = Self::with_renderer(self.renderer.as_ref().map(ViewportRenderer::sharing));
+        view.kind = kind;
+        view.main = false;
+        view.options = self.options.clone();
+        view.camera = self.camera;
+        view
+    }
+
+    fn with_renderer(renderer: Option<ViewportRenderer>) -> Self {
         Self {
             camera: EditorCamera::default(),
             options: ViewOptions::default(),
-            renderer: state.map(ViewportRenderer::new),
+            kind: ViewKind::Perspective,
+            main: true,
+            toggle_layout: false,
+            renderer,
             drag: None,
             drag_group: Vec::new(),
             marquee: None,
@@ -337,6 +472,10 @@ impl Viewport {
             forwarding: false,
             last_modifiers: egui::Modifiers::NONE,
             pixels_per_point: 1.0,
+            menu_target: None,
+            reopen_menu: false,
+            path_drag: None,
+            suppress_menu: false,
         }
     }
 
@@ -351,16 +490,19 @@ impl Viewport {
             nodes.push(editor.scene_root);
         }
         let tree = editor.tree();
-        // Meshes by their bounds, other nodes (lights, cameras) by their position.
+        // Meshes by their bounds, then collision shapes, other nodes (lights, cameras) by
+        // their position.
         let bounds = nodes
             .iter()
             .filter_map(|&n| {
-                tree.subtree_bounds(n).or_else(|| {
-                    tree.global_position(n).map(|p| Aabb {
-                        min: p - Vec3::splat(0.5),
-                        max: p + Vec3::splat(0.5),
+                tree.subtree_bounds(n)
+                    .or_else(|| subtree_shape_bounds(editor, n))
+                    .or_else(|| {
+                        tree.global_position(n).map(|p| Aabb {
+                            min: p - Vec3::splat(0.5),
+                            max: p + Vec3::splat(0.5),
+                        })
                     })
-                })
             })
             .reduce(|a, b| a.union(&b));
         let (center, radius) = match bounds {
@@ -380,7 +522,27 @@ impl Viewport {
                 .storage::<Camera3D>()
                 .is_some_and(|cameras| !cameras.is_empty())
         };
-        !editor.is_playing() || self.options.free_camera_in_play || !game_has_camera()
+        !self.main || !editor.is_playing() || self.options.free_camera_in_play || !game_has_camera()
+    }
+
+    /// The view camera's global transform: the orbit camera, or for an orthographic view
+    /// its fixed direction from far behind the pivot.
+    fn view_global(&self) -> Affine3A {
+        match self.kind.rotation() {
+            Some(rotation) => Affine3A::from_rotation_translation(
+                rotation,
+                self.camera.pivot + rotation * Vec3::Z * ORTHO_BACK,
+            ),
+            None => self.camera.global(),
+        }
+    }
+
+    /// An orthographic view's height in world units: what a perspective camera at the
+    /// same distance sees, so switching views keeps the scale.
+    fn ortho_height(&self) -> Option<f32> {
+        self.kind
+            .is_orthographic()
+            .then(|| 2.0 * self.camera.distance * (self.camera.fov.to_radians() * 0.5).tan())
     }
 
     pub fn show(
@@ -402,10 +564,15 @@ impl Viewport {
         if editor_camera {
             self.navigate(ui, &response, editor);
         }
+        let ortho_height = self.ortho_height();
         let camera = Camera3D {
             fov_y_degrees: self.camera.fov,
             near: 0.05,
-            far: 2000.0,
+            far: if ortho_height.is_some() {
+                ORTHO_BACK * 2.0 + 2000.0
+            } else {
+                2000.0
+            },
             current: true,
         };
         {
@@ -413,7 +580,8 @@ impl Viewport {
             if editor_camera {
                 world.insert_resource(CameraOverride {
                     camera,
-                    global: self.camera.global(),
+                    global: self.view_global(),
+                    ortho_height,
                 });
             } else {
                 world.remove_resource::<CameraOverride>();
@@ -448,25 +616,35 @@ impl Viewport {
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "No GPU renderer",
+                    t("viewport.no_gpu"),
                     egui::FontId::proportional(16.0),
                     theme::TEXT_DIM,
                 );
             }
         }
 
-        let view = CameraView::new(
-            &self.camera.global(),
-            camera.fov_y_degrees.to_radians(),
-            rect.width() / rect.height().max(1.0),
-            camera.near,
-            camera.far,
-        );
-        let projector = Projector::new(&view, rect);
+        let aspect = rect.width() / rect.height().max(1.0);
+        let fov = camera.fov_y_degrees.to_radians();
+        let projector = match ortho_height {
+            Some(height) => {
+                let view = CameraView::orthographic(
+                    &self.view_global(),
+                    height,
+                    aspect,
+                    camera.near,
+                    camera.far,
+                );
+                Projector::orthographic(&view, rect, fov)
+            }
+            None => Projector::new(
+                &CameraView::new(&self.view_global(), fov, aspect, camera.near, camera.far),
+                rect,
+            ),
+        };
 
         if editor_camera {
             if self.options.grid {
-                draw_grid(&painter, &projector, &self.camera);
+                draw_grid(&painter, &projector, &self.camera, self.kind);
             }
             if self.options.collision {
                 draw_collision(&painter, &projector, editor);
@@ -483,16 +661,23 @@ impl Viewport {
             if bounds_view && !editor.is_playing() {
                 draw_mesh_bounds(&painter, &projector, editor);
             }
-            for node in editor.selected_nodes() {
-                let active = editor.selection == Some(node);
-                draw_selection(&painter, &projector, editor, node, active);
+            if self.options.highlight_selection {
+                for node in editor.selected_nodes() {
+                    let active = editor.selection == Some(node);
+                    draw_selection(&painter, &projector, editor, node, active);
+                }
             }
         }
 
         let mut gizmo_hovered = false;
-        if editor.mode == Mode::Edit {
+        if editor.mode == Mode::Edit && editor.build.is_some() {
+            self.build_tool(ui, &response, &painter, &projector, editor);
+        } else if editor.mode == Mode::Edit {
+            // A selected path's points come before the gizmo.
+            let path_busy = self.path_tool(ui, &response, &painter, &projector, editor);
+            gizmo_hovered = path_busy;
             // The gizmo first (it is drawn on top), then the UI controls over the scene.
-            if self.ui_drag.is_none() {
+            if self.ui_drag.is_none() && !path_busy {
                 gizmo_hovered = self.gizmo(ui, &response, &painter, &projector, editor);
             }
             let ui_view = self
@@ -505,7 +690,7 @@ impl Viewport {
                 .as_ref()
                 .filter(|_| self.drag.is_none() && !gizmo_hovered)
             {
-                let snapping = self.options.snap || ui.input(|i| i.modifiers.command);
+                let snapping = self.options.snap.enabled || ui.input(|i| i.modifiers.command);
                 ui_busy = crate::ui_edit::edit(
                     &mut self.ui_drag,
                     ui,
@@ -523,12 +708,29 @@ impl Viewport {
                         let controls = crate::ui_edit::controls(editor);
                         crate::ui_edit::pick(&controls, view, pos, editor)
                     });
-                    match control.or_else(|| pick(editor, &projector, pos)) {
-                        Some(node) if modifiers.command => editor.toggle_selected(node),
-                        Some(node) if modifiers.shift => editor.add_to_selection(&[node]),
+                    let hit = control
+                        .map(|node| Hit {
+                            owner: node,
+                            part: node,
+                        })
+                        .or_else(|| hit(editor, &projector, pos));
+                    match hit {
+                        Some(hit) if modifiers.command => editor.toggle_selected(hit.owner),
+                        Some(hit) if modifiers.shift => editor.add_to_selection(&[hit.owner]),
+                        // A second click on a selected body picks the part under the
+                        // pointer (its mesh or collision shape).
+                        Some(hit)
+                            if editor.selection == Some(hit.owner)
+                                && editor.selected.len() == 1
+                                && hit.part != hit.owner
+                                && editor.can_edit_properties(hit.part) =>
+                        {
+                            editor.select(Some(hit.part));
+                        }
+                        Some(hit) => editor.select(Some(hit.owner)),
                         // A click on nothing with a modifier keeps the selection.
                         None if modifiers.command || modifiers.shift => {}
-                        node => editor.select(node),
+                        None => editor.select(None),
                     }
                 }
             }
@@ -561,15 +763,27 @@ impl Viewport {
                     )),
                 }
             }
-            if let (Some(_), Some(pos)) = (
-                response.dnd_hover_payload::<crate::scripts::ScriptDrag>(),
-                response.hover_pos(),
-            ) {
+            let dragging_script = response
+                .dnd_hover_payload::<crate::scripts::ScriptDrag>()
+                .is_some();
+            let idle = self.drag.is_none()
+                && self.marquee.is_none()
+                && self.ui_drag.is_none()
+                && !gizmo_hovered
+                && !ui.input(|i| i.pointer.any_down());
+            // The object under the pointer: a script's drop target, or a hover outline.
+            if let Some(pos) = response
+                .hover_pos()
+                .filter(|_| dragging_script || (idle && self.options.highlight_hover))
+            {
                 if let Some(node) = pick(editor, &projector, pos) {
-                    draw_selection(&painter, &projector, editor, node, true);
+                    if dragging_script || !editor.is_selected(node) {
+                        draw_hover(&painter, &projector, editor, node);
+                    }
                 }
             }
-        } else {
+            self.context_menu(ui, &response, &projector, editor);
+        } else if self.main {
             self.forward_input(ui, &response, editor, rect);
         }
 
@@ -580,6 +794,504 @@ impl Viewport {
         let _ = gizmo_hovered;
         // Keep animating (effects preview, play mode).
         ui.ctx().request_repaint();
+    }
+
+    // =========================================================================================
+    // Path points
+    // =========================================================================================
+
+    /// The selected path's curve and points: drag a point to move it (Shift: up and
+    /// down), Ctrl+click to add one (on the curve, or after the last), right-click a point
+    /// to delete it. Returns whether the pointer is busy with the points.
+    fn path_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        projector: &Projector,
+        editor: &mut Editor,
+    ) -> bool {
+        use ab_engine::scene_file::path::Path3D;
+        let Some(node) = editor
+            .selection
+            .filter(|&n| editor.can_edit_properties(n))
+            .filter(|&n| editor.tree().component::<Path3D>(n).is_some())
+        else {
+            self.path_drag = None;
+            return false;
+        };
+        let tree = editor.tree();
+        let Some(global) = tree.global_transform(node) else {
+            return false;
+        };
+        let Some(path) = tree.component::<Path3D>(node).map(|p| p.clone()) else {
+            return false;
+        };
+        // The curve.
+        let curve: Vec<Pos2> = path
+            .spline
+            .polyline()
+            .filter_map(|p| projector.project(global.transform_point3(p)))
+            .collect();
+        painter.add(egui::Shape::line(curve, Stroke::new(2.0_f32, theme::ACCENT)));
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let pressed_at = ui.input(|i| i.pointer.press_origin());
+        let screen: Vec<Option<Pos2>> = path
+            .desc
+            .points
+            .iter()
+            .map(|&p| projector.project(global.transform_point3(Vec3::from(p))))
+            .collect();
+        let point_at = |p: Pos2| {
+            screen
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| Some((i, ((*s)? - p).length())))
+                .filter(|(_, d)| *d < 9.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        let hovered = pointer.and_then(point_at);
+        for (i, at) in screen.iter().enumerate() {
+            let Some(at) = at else { continue };
+            let active = self.path_drag.as_ref().is_some_and(|d| d.1 == i) || hovered == Some(i);
+            let rect = Rect::from_center_size(*at, Vec2::splat(if active { 11.0 } else { 9.0 }));
+            painter.rect_filled(rect, 2.0, if active { Color32::WHITE } else { theme::ACCENT });
+            painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, theme::BG_0), egui::StrokeKind::Outside);
+        }
+
+        let apply = |editor: &mut Editor, points: Vec<[f32; 3]>, before: Vec<[f32; 3]>| {
+            // Back to the points before the change, so undo returns to them.
+            if let Some(mut p) = editor.tree().component_mut::<Path3D>(node) {
+                let mut desc = p.desc.clone();
+                desc.points = before.clone();
+                *p = Path3D::new(desc);
+            }
+            let Some(mut old) = editor.describe_node(node) else {
+                return;
+            };
+            let mut new = old.clone();
+            if let Some(p) = new.path.as_mut() {
+                p.points = points;
+            }
+            if let Some(p) = old.path.as_mut() {
+                p.points = before;
+            }
+            editor.apply_desc(node, &old, new);
+            editor.end_gesture();
+        };
+
+        // Delete with a right-click.
+        if response.secondary_clicked() {
+            if let Some(i) = hovered {
+                let before = path.desc.points.clone();
+                let mut points = before.clone();
+                points.remove(i);
+                apply(editor, points, before);
+                self.suppress_menu = true;
+                return true;
+            }
+        }
+        // Start, continue or end a drag.
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            // Where the button went down: the drag starts once the pointer has moved.
+            if let Some(i) = pressed_at.and_then(point_at) {
+                self.path_drag = Some((node, i, path.desc.points.clone()));
+            }
+        }
+        if let Some((dragged, i, before)) = self.path_drag.clone() {
+            if dragged != node {
+                self.path_drag = None;
+            } else if response.dragged_by(egui::PointerButton::Primary) {
+                if let (Some(pos), Some(&local)) = (pointer, path.desc.points.get(i)) {
+                    let world = global.transform_point3(Vec3::from(local));
+                    let (origin, dir) = projector.ray(pos);
+                    let vertical = ui.input(|i| i.modifiers.shift);
+                    // Level moves on the point's height; Shift moves it up and down.
+                    let normal = if vertical {
+                        let toward = projector.eye - world;
+                        Vec3::new(toward.x, 0.0, toward.z).normalize_or(Vec3::Z)
+                    } else {
+                        Vec3::Y
+                    };
+                    let denom = dir.dot(normal);
+                    if denom.abs() > 1e-4 {
+                        let t = (world - origin).dot(normal) / denom;
+                        let mut hit = origin + dir * t;
+                        if vertical {
+                            hit = Vec3::new(world.x, hit.y, world.z);
+                        }
+                        if self.options.snap.enabled || ui.input(|i| i.modifiers.command) {
+                            let step = self.options.snap.translate;
+                            hit = (hit / step).round() * step;
+                        }
+                        let local = global.inverse().transform_point3(hit);
+                        let mut points = path.desc.points.clone();
+                        points[i] = local.to_array();
+                        // Live: the curve follows; what it builds is rebuilt on release.
+                        let mut moved = path.clone();
+                        moved.desc.points = points;
+                        let moved = Path3D::new(moved.desc);
+                        if let Some(mut p) = editor.tree().component_mut::<Path3D>(node) {
+                            *p = moved;
+                        }
+                    }
+                }
+                return true;
+            } else {
+                self.path_drag = None;
+                let points = path.desc.points.clone();
+                if points != before {
+                    apply(editor, points, before);
+                }
+                return true;
+            }
+        }
+        // Add with Ctrl+click.
+        if response.clicked() && ui.input(|i| i.modifiers.command) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let at = global
+                    .inverse()
+                    .transform_point3(ground_point(projector, pos));
+                let before = path.desc.points.clone();
+                let mut points = before.clone();
+                let near_curve = path
+                    .spline
+                    .nearest_segment(at)
+                    .filter(|&(segment, t)| {
+                        let p = global.transform_point3(path.spline.segment_point(segment, t));
+                        projector.project(p).is_some_and(|s| (s - pos).length() < 16.0)
+                    });
+                match near_curve {
+                    Some((segment, _)) => points.insert(segment + 1, at.to_array()),
+                    None => points.push(at.to_array()),
+                }
+                apply(editor, points, before);
+                return true;
+            }
+        }
+        hovered.is_some() || pressed_at.and_then(point_at).is_some()
+    }
+
+    // =========================================================================================
+    // Build tool
+    // =========================================================================================
+
+    /// The build tool's piece follows the pointer, resting on what is under it; a click
+    /// places it (see [`crate::build`]).
+    fn build_tool(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        projector: &Projector,
+        editor: &mut Editor,
+    ) {
+        if response.secondary_clicked() {
+            editor.build = None;
+            return;
+        }
+        let Some(pos) = response.hover_pos() else {
+            return;
+        };
+        let Some((ghost, bounds)) = editor.build_ghost() else {
+            return;
+        };
+        let surface = surface_at(editor, projector, pos);
+        let step = if ui.input(|i| i.modifiers.alt) {
+            0.0
+        } else {
+            self.options.snap.translate
+        };
+        let origin = crate::build::placement(&surface, &bounds, step);
+        {
+            let tree = editor.tree_mut();
+            let _ = tree.set_global_position(ghost, origin);
+            tree.update_transforms();
+        }
+        let placed = Aabb {
+            min: bounds.min + origin,
+            max: bounds.max + origin,
+        };
+        draw_box(
+            painter,
+            projector,
+            &placed.corners(),
+            Stroke::new(1.5_f32, theme::ACCENT),
+        );
+        // The footprint on the surface it rests on.
+        if let Some(at) = projector.project(surface.point) {
+            painter.circle_stroke(at, 4.0, Stroke::new(1.5_f32, theme::ACCENT));
+        }
+        let hint = format!("{}  {}", icon::CUBE, t("build.hint"));
+        let galley = painter.layout_no_wrap(hint, egui::FontId::proportional(12.0), Color32::WHITE);
+        let at = pos + Vec2::new(16.0, 18.0);
+        painter.rect_filled(
+            Rect::from_min_size(
+                at - Vec2::new(6.0, 3.0),
+                galley.size() + Vec2::new(12.0, 6.0),
+            ),
+            6.0,
+            theme::BG_0.gamma_multiply(0.85),
+        );
+        painter.galley(at, galley, Color32::WHITE);
+        if response.clicked() {
+            if let Some(piece) = editor.build.clone() {
+                editor.place_piece(&piece, origin);
+            }
+        }
+    }
+
+    // =========================================================================================
+    // Context menu
+    // =========================================================================================
+
+    /// Right-click (without dragging, which flies the camera): actions for the object under
+    /// the pointer, or for the scene when there is none. The object is selected first,
+    /// unless it is part of the selection already.
+    fn context_menu(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        projector: &Projector,
+        editor: &mut Editor,
+    ) {
+        let clicked = response.secondary_clicked() && !std::mem::take(&mut self.suppress_menu);
+        if clicked {
+            self.menu_target = response.interact_pointer_pos().map(|pos| {
+                let node = pick(editor, projector, pos);
+                if let Some(node) = node.filter(|&n| !editor.is_selected(n)) {
+                    editor.select(Some(node));
+                }
+                (node, ground_point(projector, pos))
+            });
+        }
+        let Some((target, at)) = self.menu_target else {
+            return;
+        };
+        let mut popup = egui::Popup::context_menu(response);
+        // egui closes an open menu on any click, this one included.
+        let was_open = egui::Popup::is_id_open(ui.ctx(), popup.get_id());
+        if std::mem::take(&mut self.reopen_menu) {
+            popup = popup.open_memory(Some(true.into()));
+        }
+        let shown = popup.show(|ui| {
+            ui.set_min_width(210.0);
+            let target = target.filter(|&n| editor.tree().is_valid(n));
+            match target {
+                Some(node) => self.object_menu(ui, editor, node, at),
+                None => self.space_menu(ui, editor, at),
+            }
+        });
+        if clicked && was_open {
+            // The click that closed the previous menu opens this one, next frame.
+            self.reopen_menu = true;
+        } else if shown.is_none() {
+            self.menu_target = None;
+        }
+    }
+
+    fn object_menu(&mut self, ui: &mut egui::Ui, editor: &mut Editor, node: NodeHandle, at: Vec3) {
+        use crate::commands::{menu_item, Command};
+        let tree = editor.tree();
+        let class = tree.class_name(node).unwrap_or("Node").to_owned();
+        let name = tree.name(node).map(|n| n.to_owned()).unwrap_or_default();
+        let count = editor.selected.len();
+        let title = if count > 1 {
+            tf("menu.objects", &[("count", &count)])
+        } else {
+            name
+        };
+        ui.label(
+            egui::RichText::new(format!("{}  {title}", theme::class_icon(&class)))
+                .strong()
+                .color(theme::class_color(&class)),
+        );
+        ui.separator();
+        let editable = editor.is_editable(node) && !editor.is_playing();
+        menu_item(ui, Command::Cut, editable);
+        menu_item(ui, Command::Copy, editable);
+        menu_item(ui, Command::Paste, editor.can_paste(None));
+        let into = editable && !editor.is_instance(node);
+        if ui
+            .add_enabled(
+                into && editor.can_paste(None),
+                egui::Button::new(format!(
+                    "{}  {}",
+                    icon::CLIPBOARD_TEXT,
+                    t("menu.paste_as_child")
+                )),
+            )
+            .clicked()
+        {
+            editor.paste(None, Some(node), None);
+            ui.close();
+        }
+        menu_item(ui, Command::Duplicate, editable);
+        menu_item(ui, Command::Rename, editable && count == 1);
+        if editable
+            && !editor.is_instance(node)
+            && count == 1
+            && ui
+                .button(format!(
+                    "{}  {}",
+                    icon::LINK_SIMPLE,
+                    t("menu.create_prefab")
+                ))
+                .clicked()
+        {
+            let path = crate::panels::scene_tree::prefab_path(editor, node);
+            match editor.create_prefab(node, &path) {
+                Ok(instance) => editor.select(Some(instance)),
+                Err(err) => editor.fail(err),
+            }
+            ui.close();
+        }
+        ui.separator();
+        menu_item(ui, Command::FrameSelection, true);
+        if let Some(parent) = editor
+            .tree()
+            .parent(node)
+            .filter(|&p| p != editor.scene_root)
+            .and_then(|p| editor.instance_owner(p))
+        {
+            if ui
+                .button(format!(
+                    "{}  {}",
+                    icon::ARROW_ELBOW_LEFT_UP,
+                    t("menu.select_parent")
+                ))
+                .clicked()
+            {
+                editor.select(Some(parent));
+                ui.close();
+            }
+        }
+        let children: Vec<NodeHandle> = editor
+            .tree()
+            .children(node)
+            .into_iter()
+            .filter(|&c| editor.is_editable(c))
+            .collect();
+        if !children.is_empty()
+            && ui
+                .button(format!(
+                    "{}  {}",
+                    icon::TREE_STRUCTURE,
+                    t("menu.select_children")
+                ))
+                .clicked()
+        {
+            editor.set_selection(children, None);
+            ui.close();
+        }
+        menu_item(ui, Command::SelectNone, true);
+        ui.separator();
+        ui.menu_button(
+            format!("{}  {}", icon::ALIGN_CENTER_HORIZONTAL, t("build.arrange")),
+            |ui| {
+                use crate::state::Align;
+                let many = count > 1;
+                for (axis, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                    ui.add_enabled_ui(many, |ui| {
+                        ui.menu_button(format!("{} {name}", t("build.align")), |ui| {
+                            for (align, label) in [
+                                (Align::Min, "Min"),
+                                (Align::Center, "Center"),
+                                (Align::Max, "Max"),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    editor.align_selected(axis, align);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                }
+                for (axis, name) in [(0, "X"), (2, "Z")] {
+                    if ui
+                        .add_enabled(
+                            count > 2,
+                            egui::Button::new(format!("{} {name}", t("build.distribute"))),
+                        )
+                        .clicked()
+                    {
+                        editor.distribute_selected(axis);
+                        ui.close();
+                    }
+                }
+                if ui
+                    .add_enabled(editable, egui::Button::new(t("build.drop")))
+                    .clicked()
+                {
+                    editor.drop_selected();
+                    ui.close();
+                }
+            },
+        );
+        ui.add_enabled_ui(into, |ui| {
+            ui.menu_button(format!("{}  {}", icon::PLUS, t("menu.add_child")), |ui| {
+                crate::create::menu(ui, editor, at);
+            });
+        });
+        ui.separator();
+        if ui
+            .add_enabled(
+                editable,
+                egui::Button::new(
+                    egui::RichText::new(format!("{}  {}", icon::TRASH, Command::Delete.label()))
+                        .color(theme::ERROR),
+                )
+                .shortcut_text(Command::Delete.shortcut_text(ui.ctx())),
+            )
+            .clicked()
+        {
+            crate::commands::request(ui.ctx(), Command::Delete);
+            ui.close();
+        }
+    }
+
+    fn space_menu(&mut self, ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
+        use crate::commands::{menu_item, Command};
+        let editing = !editor.is_playing();
+        ui.add_enabled_ui(editing, |ui| {
+            ui.menu_button(format!("{}  {}", icon::PLUS, t("menu.create")), |ui| {
+                editor.select(None);
+                crate::create::menu(ui, editor, at);
+            });
+        });
+        if ui
+            .add_enabled(
+                editor.can_paste(None),
+                egui::Button::new(format!("{}  {}", icon::CLIPBOARD, t("menu.paste_here")))
+                    .shortcut_text(Command::Paste.shortcut_text(ui.ctx())),
+            )
+            .clicked()
+        {
+            editor.paste(None, Some(editor.scene_root), Some(at));
+            ui.close();
+        }
+        ui.separator();
+        menu_item(ui, Command::SelectAll, editing);
+        menu_item(ui, Command::SelectNone, !editor.selected.is_empty());
+        if ui
+            .button(format!("{}  {}", icon::CROSSHAIR, t("menu.frame_scene")))
+            .clicked()
+        {
+            editor.select(None);
+            self.frame_selection(editor);
+            ui.close();
+        }
+        ui.separator();
+        ui.checkbox(&mut self.options.grid, t("menu.grid"));
+        ui.checkbox(&mut self.options.icons, t("menu.node_icons"));
+        ui.checkbox(&mut self.options.collision, t("menu.collision"));
+        ui.checkbox(
+            &mut self.options.highlight_selection,
+            t("menu.highlight_selection"),
+        );
+        ui.checkbox(&mut self.options.highlight_hover, t("menu.highlight_hover"));
+        ui.checkbox(&mut self.options.snap.enabled, t("menu.snap_to_grid"));
     }
 
     // =========================================================================================
@@ -644,6 +1356,29 @@ impl Viewport {
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response, editor: &Editor) {
         let (delta, modifiers, dt) =
             ui.input(|i| (i.pointer.delta(), i.modifiers, i.stable_dt.min(0.1)));
+        if let (Some(rotation), Some(height)) = (self.kind.rotation(), self.ortho_height()) {
+            // Orthographic: every drag pans (the view keeps its axis), the wheel zooms.
+            let dragging = response.dragged_by(egui::PointerButton::Secondary)
+                || response.dragged_by(egui::PointerButton::Middle)
+                || response.dragged_by(egui::PointerButton::Primary) && modifiers.alt;
+            if dragging {
+                let per_pixel = height / response.rect.height().max(1.0);
+                self.camera.pivot +=
+                    (rotation * Vec3::NEG_X * delta.x + rotation * Vec3::Y * delta.y) * per_pixel;
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if response.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    self.camera.zoom(scroll / 50.0);
+                }
+                let focus = ui.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.is_none());
+                if focus && editor.mode == Mode::Edit && !ui.ctx().egui_wants_keyboard_input() {
+                    self.frame_selection(editor);
+                }
+            }
+            return;
+        }
         let flying = response.dragged_by(egui::PointerButton::Secondary);
         let orbiting = response.dragged_by(egui::PointerButton::Middle) && !modifiers.shift
             || response.dragged_by(egui::PointerButton::Primary) && modifiers.alt;
@@ -727,7 +1462,7 @@ impl Viewport {
     ) -> bool {
         let mode = self.options.gizmo;
         let Some(node) = editor.selection.filter(|&n| {
-            mode != GizmoMode::Select && n != editor.scene_root && editor.is_editable(n)
+            mode != GizmoMode::Select && n != editor.scene_root && editor.can_edit_properties(n)
         }) else {
             self.drag = None;
             return false;
@@ -741,7 +1476,7 @@ impl Viewport {
         let Some(center) = projector.project(origin) else {
             return false;
         };
-        let size = projector.eye.distance(origin).max(0.1) * 0.16;
+        let size = projector.view_distance(origin).max(0.1) * 0.16;
         let axes: [Vec3; 3] = match mode {
             // Scale works along the node's own axes.
             GizmoMode::Scale => [
@@ -797,7 +1532,7 @@ impl Viewport {
                 self.drag_group = editor
                     .selected_roots()
                     .into_iter()
-                    .filter(|&n| n != editor.scene_root && editor.is_editable(n))
+                    .filter(|&n| n != editor.scene_root && editor.can_edit_properties(n))
                     .filter_map(|n| Some((n, tree.global_transform(n)?, tree.transform(n)?)))
                     .collect();
                 self.drag = Some(GizmoDrag {
@@ -814,7 +1549,8 @@ impl Viewport {
         }
 
         // Continue it.
-        let snap = self.options.snap || ui.input(|i| i.modifiers.command);
+        let snap = (self.options.snap.enabled || ui.input(|i| i.modifiers.command))
+            .then_some(self.options.snap);
         if let Some(drag) = self.drag.filter(|d| d.node == node) {
             if response.dragged_by(egui::PointerButton::Primary) {
                 if let Some(mouse) = response.interact_pointer_pos() {
@@ -887,7 +1623,7 @@ impl Viewport {
         center: Pos2,
         projector: &Projector,
         axes: &[Vec3; 3],
-        snap: bool,
+        snap: Option<SnapSettings>,
         editor: &mut Editor,
     ) {
         let delta = mouse - drag.start_mouse;
@@ -897,8 +1633,8 @@ impl Viewport {
                 let offset = match handle {
                     Handle::Axis(i) => {
                         let mut units = delta.dot(drag.axis_screen) / drag.pixels_per_unit;
-                        if snap {
-                            units = (units / TRANSLATE_SNAP).round() * TRANSLATE_SNAP;
+                        if let Some(snap) = snap {
+                            units = snap.translate(units);
                         }
                         axes[i] * units
                     }
@@ -907,8 +1643,12 @@ impl Viewport {
                         let scale = 1.0 / drag.pixels_per_unit;
                         let mut offset =
                             (rotation * Vec3::X * delta.x - rotation * Vec3::Y * delta.y) * scale;
-                        if snap {
-                            offset = (offset / TRANSLATE_SNAP).round() * TRANSLATE_SNAP;
+                        if let Some(snap) = snap {
+                            offset = Vec3::new(
+                                snap.translate(offset.x),
+                                snap.translate(offset.y),
+                                snap.translate(offset.z),
+                            );
                         }
                         offset
                     }
@@ -923,9 +1663,8 @@ impl Viewport {
                 if facing {
                     angle = -angle;
                 }
-                if snap {
-                    let step = ROTATE_SNAP.to_radians();
-                    angle = (angle / step).round() * step;
+                if let Some(snap) = snap {
+                    angle = snap.rotate(angle.to_degrees()).to_radians();
                 }
                 let rotation = Affine3A::from_translation(start_origin)
                     * Affine3A::from_axis_angle(axes[i], angle)
@@ -939,10 +1678,8 @@ impl Viewport {
                         let mut factor =
                             (1.0 + delta.dot(drag.axis_screen) / drag.pixels_per_unit).max(0.01);
                         let start = drag.start_local.scale[i];
-                        if snap {
-                            let value = ((start * factor / SCALE_SNAP).round() * SCALE_SNAP)
-                                .max(SCALE_SNAP);
-                            factor = value / start;
+                        if let Some(snap) = snap {
+                            factor = snap.scale(start * factor) / start;
                         }
                         let mut factors = Vec3::ONE;
                         factors[i] = factor;
@@ -950,8 +1687,8 @@ impl Viewport {
                     }
                     Handle::Center => {
                         let mut factor = (1.0 + (delta.x - delta.y) / 120.0).max(0.01);
-                        if snap {
-                            factor = ((factor / SCALE_SNAP).round() * SCALE_SNAP).max(SCALE_SNAP);
+                        if let Some(snap) = snap {
+                            factor = snap.scale(factor);
                         }
                         Vec3::splat(factor)
                     }
@@ -1009,21 +1746,38 @@ impl Viewport {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 2.0;
                                     for (mode, glyph, tip) in [
-                                        (GizmoMode::Select, icon::CURSOR, "Select (Q)"),
+                                        (GizmoMode::Select, icon::CURSOR, t("viewport.select")),
                                         (
                                             GizmoMode::Translate,
                                             icon::ARROWS_OUT_CARDINAL,
-                                            "Move (W)",
+                                            t("viewport.move"),
                                         ),
-                                        (GizmoMode::Rotate, icon::ARROWS_CLOCKWISE, "Rotate (E)"),
-                                        (GizmoMode::Scale, icon::ARROWS_OUT, "Scale (R)"),
+                                        (
+                                            GizmoMode::Rotate,
+                                            icon::ARROWS_CLOCKWISE,
+                                            t("viewport.rotate"),
+                                        ),
+                                        (GizmoMode::Scale, icon::ARROWS_OUT, t("viewport.scale")),
                                     ] {
                                         ui.selectable_value(&mut self.options.gizmo, mode, glyph)
                                             .on_hover_text(tip);
                                     }
                                     ui.separator();
-                                    ui.toggle_value(&mut self.options.snap, icon::MAGNET)
-                                        .on_hover_text("Snap (hold Ctrl): 0.5 m, 15°, 0.1");
+                                    let snap = self.options.snap;
+                                    ui.toggle_value(&mut self.options.snap.enabled, icon::MAGNET)
+                                        .on_hover_text(tf(
+                                            "snap.tooltip",
+                                            &[
+                                                ("move", &snap.translate),
+                                                ("rotate", &snap.rotate),
+                                                ("scale", &snap.scale),
+                                            ],
+                                        ));
+                                    ui.menu_button(icon::CARET_DOWN, |ui| {
+                                        snap_settings(ui, &mut self.options.snap);
+                                    })
+                                    .response
+                                    .on_hover_text(t("snap.steps"));
                                 });
                             });
                     }
@@ -1034,36 +1788,82 @@ impl Viewport {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
-                                ui.menu_button(format!("{} View", icon::EYE), |ui| {
-                                    ui.checkbox(&mut self.options.grid, "Grid");
-                                    ui.checkbox(&mut self.options.icons, "Node icons");
-                                    ui.checkbox(&mut self.options.collision, "Collision shapes");
-                                    ui.checkbox(&mut self.options.ui, "Edit UI in the view");
-                                    ui.checkbox(&mut self.options.stats, "Statistics");
-                                    ui.checkbox(
-                                        &mut self.options.editor_lighting,
-                                        "Editor lighting (bright, no fog)",
-                                    );
-                                    ui.checkbox(&mut editor.preview_effects, "Preview effects");
-                                    ui.checkbox(
-                                        &mut self.options.free_camera_in_play,
-                                        "Editor camera while playing",
-                                    );
-                                    ui.separator();
-                                    ui.add(
-                                        egui::Slider::new(&mut self.camera.fov, 20.0..=110.0)
-                                            .text("Field of view"),
-                                    );
-                                    ui.add(
-                                        egui::Slider::new(&mut self.camera.fly_speed, 0.5..=100.0)
+                                let kind_icon = if self.kind.is_orthographic() {
+                                    icon::SQUARE_HALF
+                                } else {
+                                    icon::CUBE
+                                };
+                                ui.menu_button(
+                                    format!("{kind_icon} {}", self.kind.label()),
+                                    |ui| {
+                                        for kind in ViewKind::ALL {
+                                            if ui
+                                                .selectable_label(self.kind == kind, kind.label())
+                                                .clicked()
+                                            {
+                                                self.kind = kind;
+                                                ui.close();
+                                            }
+                                        }
+                                    },
+                                )
+                                .response
+                                .on_hover_text(t("viewport.projection"));
+                                if ui
+                                    .button(icon::SQUARES_FOUR)
+                                    .on_hover_text(t("viewport.layout"))
+                                    .clicked()
+                                {
+                                    self.toggle_layout = true;
+                                }
+                                ui.menu_button(
+                                    format!("{} {}", icon::EYE, t("viewport.view")),
+                                    |ui| {
+                                        let o = &mut self.options;
+                                        ui.checkbox(&mut o.grid, t("menu.grid"));
+                                        ui.checkbox(&mut o.icons, t("menu.node_icons"));
+                                        ui.checkbox(&mut o.collision, t("menu.collision"));
+                                        ui.checkbox(
+                                            &mut o.highlight_selection,
+                                            format!("{} (H)", t("menu.highlight_selection")),
+                                        );
+                                        ui.checkbox(
+                                            &mut o.highlight_hover,
+                                            t("menu.highlight_hover"),
+                                        );
+                                        ui.checkbox(&mut o.ui, t("menu.edit_ui"));
+                                        ui.checkbox(&mut o.stats, t("menu.statistics"));
+                                        ui.checkbox(
+                                            &mut o.editor_lighting,
+                                            t("menu.editor_lighting"),
+                                        );
+                                        ui.checkbox(
+                                            &mut editor.preview_effects,
+                                            t("menu.preview_effects"),
+                                        );
+                                        ui.checkbox(
+                                            &mut o.free_camera_in_play,
+                                            t("viewport.camera_in_play"),
+                                        );
+                                        ui.separator();
+                                        ui.add(
+                                            egui::Slider::new(&mut self.camera.fov, 20.0..=110.0)
+                                                .text(t("viewport.field_of_view")),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut self.camera.fly_speed,
+                                                0.5..=100.0,
+                                            )
                                             .logarithmic(true)
-                                            .text("Fly speed"),
-                                    );
-                                    if ui.button("Reset camera").clicked() {
-                                        self.camera = EditorCamera::default();
-                                        ui.close();
-                                    }
-                                });
+                                            .text(t("viewport.fly_speed")),
+                                        );
+                                        if ui.button(t("viewport.reset_camera")).clicked() {
+                                            self.camera = EditorCamera::default();
+                                            ui.close();
+                                        }
+                                    },
+                                );
                             });
                         });
                 });
@@ -1078,13 +1878,19 @@ impl Viewport {
                 stats.objects, stats.draw_calls, stats.culled, stats.lights, stats.particles
             );
             let painter = ui.painter_at(rect);
-            let galley = painter.layout(
+            let galley = painter.layout_no_wrap(
                 text,
                 egui::FontId::monospace(11.5),
                 Color32::from_gray(210),
-                220.0,
             );
-            let pos = Pos2::new(rect.max.x - galley.size().x - 16.0, rect.min.y + 12.0);
+            // Narrow views (four at once): the bottom corner, clear of the tool bar.
+            let narrow = rect.width() < 1000.0;
+            let y = if narrow {
+                rect.max.y - galley.size().y - 12.0
+            } else {
+                rect.min.y + 12.0
+            };
+            let pos = Pos2::new(rect.max.x - galley.size().x - 16.0, y);
             painter.rect_filled(
                 Rect::from_min_size(pos - Vec2::splat(6.0), galley.size() + Vec2::splat(12.0)),
                 6.0,
@@ -1107,10 +1913,7 @@ impl Viewport {
             );
             if !self.game_focus {
                 let galley = painter.layout_no_wrap(
-                    format!(
-                        "{}  Click to control the game · Esc releases the mouse",
-                        icon::MOUSE
-                    ),
+                    format!("{}  {}", icon::MOUSE, t("viewport.click_to_play")),
                     egui::FontId::proportional(12.5),
                     Color32::from_white_alpha(220),
                 );
@@ -1392,13 +2195,46 @@ fn has_icon(class: &str) -> bool {
             | "Area3D"
             | "CameraShake"
             | "Joint3D"
+            | "Path3D"
     )
 }
 
-/// The scene node under a screen point: icons first, then the nearest mesh.
+/// What a click hits: the node under the pointer (`part`) and the object it selects
+/// (`owner`): a physics body for its mesh or collision shape, an instance for its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hit {
+    owner: NodeHandle,
+    part: NodeHandle,
+}
+
+/// The object a click on `node` selects (see [`Hit`]).
+fn selectable_owner(editor: &Editor, node: NodeHandle) -> Option<NodeHandle> {
+    let tree = editor.tree();
+    let owner = editor.instance_owner(node)?;
+    match tree.parent(owner) {
+        Some(parent)
+            if parent != editor.scene_root
+                && tree.component::<PhysicsBody3D>(parent).is_some()
+                && editor.is_editable(parent)
+                && tree.component::<PhysicsBody3D>(owner).is_none() =>
+        {
+            Some(parent)
+        }
+        _ => Some(owner),
+    }
+}
+
+/// The object under a screen point (see [`hit`]).
 fn pick(editor: &Editor, projector: &Projector, pos: Pos2) -> Option<NodeHandle> {
+    hit(editor, projector, pos).map(|hit| hit.owner)
+}
+
+/// What is under a screen point: icons first, then the nearest mesh, then the nearest
+/// collision shape (so a trigger volume does not hide the objects inside it).
+fn hit(editor: &Editor, projector: &Projector, pos: Pos2) -> Option<Hit> {
     let tree = editor.tree();
     let nodes = tree.subtree(editor.scene_root);
+    let found = |part: NodeHandle| selectable_owner(editor, part).map(|owner| Hit { owner, part });
     let mut best_icon: Option<(f32, NodeHandle)> = None;
     for &node in &nodes {
         if !tree
@@ -1419,51 +2255,173 @@ fn pick(editor: &Editor, projector: &Projector, pos: Pos2) -> Option<NodeHandle>
         }
     }
     if let Some((_, node)) = best_icon {
-        return editor.instance_owner(node);
+        return found(node);
     }
 
     let (origin, dir) = projector.ray(pos);
     let assets = tree.world().resource::<RenderAssets>()?;
-    let mut best: Option<(f32, NodeHandle)> = None;
+    let nearest = |best: &mut Option<(f32, NodeHandle)>, t: f32, node: NodeHandle| {
+        if best.is_none_or(|(d, _)| t < d) {
+            *best = Some((t, node));
+        }
+    };
+    // A ray tested in the space of `global`: tight for rotated boxes, same ray parameter.
+    let local_hit = |global: &Affine3A, min: Vec3, max: Vec3| {
+        let inverse = global.inverse();
+        ray_aabb(
+            inverse.transform_point3(origin),
+            inverse.transform_vector3(dir),
+            min,
+            max,
+        )
+    };
+    let mut best_mesh: Option<(f32, NodeHandle)> = None;
+    let mut best_shape: Option<(f32, NodeHandle)> = None;
     for node in nodes {
-        let Some(mesh) = tree.component::<MeshInstance3D>(node).map(|m| *m) else {
-            continue;
-        };
         if !tree.is_visible_in_tree(node) {
             continue;
         }
-        // A skinned mesh is wherever its joints put it: test its posed world box.
-        if tree.component::<Skin>(node).is_some() {
-            if let Some(t) = tree
-                .mesh_bounds(node)
-                .and_then(|b| ray_aabb(origin, dir, b.min, b.max))
-            {
-                if best.is_none_or(|(d, _)| t < d) {
-                    best = Some((t, node));
-                }
+        if let Some(mesh) = tree.component::<MeshInstance3D>(node).map(|m| *m) {
+            // A skinned mesh is wherever its joints put it: test its posed world box.
+            let t = if tree.component::<Skin>(node).is_some() {
+                tree.mesh_bounds(node)
+                    .and_then(|b| ray_aabb(origin, dir, b.min, b.max))
+            } else {
+                assets
+                    .mesh_aabb(mesh.mesh)
+                    .zip(tree.global_transform(node))
+                    .and_then(|(aabb, global)| local_hit(&global, aabb.min, aabb.max))
+            };
+            if let Some(t) = t {
+                nearest(&mut best_mesh, t, node);
             }
-            continue;
         }
-        let (Some(aabb), Some(global)) = (assets.mesh_aabb(mesh.mesh), tree.global_transform(node))
-        else {
-            continue;
-        };
-        // Test in the mesh's space: tight for rotated meshes, same ray parameter.
-        let inverse = global.inverse();
-        let local_origin = inverse.transform_point3(origin);
-        let local_dir = inverse.transform_vector3(dir);
-        if let Some(t) = ray_aabb(local_origin, local_dir, aabb.min, aabb.max) {
-            if best.is_none_or(|(d, _)| t < d) {
-                best = Some((t, node));
+        if let Some(bounds) = tree
+            .component::<CollisionShape3D>(node)
+            .and_then(|c| shape_bounds(c.shape()))
+        {
+            if let Some(t) = tree
+                .global_transform(node)
+                .and_then(|global| local_hit(&global, bounds.min, bounds.max))
+            {
+                nearest(&mut best_shape, t, node);
             }
         }
     }
-    best.and_then(|(_, node)| editor.instance_owner(node))
+    best_mesh.or(best_shape).and_then(|(_, node)| found(node))
+}
+
+/// Ray / box slab test with the side the ray enters by: (distance, outward unit normal).
+fn ray_aabb_normal(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<(f32, Vec3)> {
+    let inv = dir.recip();
+    let t1 = (min - origin) * inv;
+    let t2 = (max - origin) * inv;
+    let near = t1.min(t2);
+    let far = t1.max(t2).min_element();
+    let enter = near.max_element();
+    if far < enter.max(0.0) {
+        return None;
+    }
+    let axis = (0..3)
+        .max_by(|&a, &b| near[a].total_cmp(&near[b]))
+        .unwrap_or(1);
+    let mut normal = Vec3::ZERO;
+    normal[axis] = -dir[axis].signum();
+    Some((enter.max(0.0), normal))
+}
+
+/// What the build tool's piece would rest on under a screen point: the nearest mesh's side
+/// (as a world axis), else the ground.
+fn surface_at(editor: &Editor, projector: &Projector, pos: Pos2) -> crate::build::Surface {
+    let tree = editor.tree();
+    let (origin, dir) = projector.ray(pos);
+    let mut best: Option<(f32, Vec3, NodeHandle)> = None;
+    if let Some(assets) = tree.world().resource::<RenderAssets>() {
+        for node in tree.subtree(editor.scene_root) {
+            if !tree.is_visible_in_tree(node) {
+                continue;
+            }
+            let Some(mesh) = tree.component::<MeshInstance3D>(node).map(|m| *m) else {
+                continue;
+            };
+            let (Some(aabb), Some(global)) =
+                (assets.mesh_aabb(mesh.mesh), tree.global_transform(node))
+            else {
+                continue;
+            };
+            let inverse = global.inverse();
+            let hit = ray_aabb_normal(
+                inverse.transform_point3(origin),
+                inverse.transform_vector3(dir),
+                aabb.min,
+                aabb.max,
+            );
+            if let Some((t, local)) = hit {
+                if best.is_none_or(|(d, _, _)| t < d) {
+                    let world = Vec3::from(global.matrix3 * ab_engine::core::Vec3A::from(local));
+                    best = Some((t, crate::build::dominant_axis(world), node));
+                }
+            }
+        }
+    }
+    match best {
+        Some((t, normal, node)) => crate::build::Surface {
+            point: origin + dir * t,
+            normal,
+            support: selectable_owner(editor, node)
+                .and_then(|owner| editor.world_bounds(owner))
+                .or_else(|| tree.mesh_bounds(node)),
+        },
+        None => crate::build::Surface {
+            point: ground_point(projector, pos),
+            normal: Vec3::Y,
+            support: None,
+        },
+    }
+}
+
+/// The box around a collision shape, in the shape node's space.
+fn shape_bounds(shape: &Shape) -> Option<Aabb> {
+    let extents = match shape {
+        Shape::Box { size } => *size * 0.5,
+        Shape::Sphere { radius } => Vec3::splat(*radius),
+        Shape::Capsule { radius, height } => {
+            Vec3::new(*radius, (height * 0.5).max(*radius), *radius)
+        }
+        Shape::Cylinder { radius, height } => Vec3::new(*radius, height * 0.5, *radius),
+        Shape::ConvexHull { points } => return Aabb::from_points(points.iter().copied()),
+        Shape::TriMesh { vertices, .. } => return Aabb::from_points(vertices.iter().copied()),
+    };
+    let extents = extents.abs();
+    Some(Aabb {
+        min: -extents,
+        max: extents,
+    })
+}
+
+/// The world box around the collision shapes under `node`.
+fn subtree_shape_bounds(editor: &Editor, node: NodeHandle) -> Option<Aabb> {
+    let tree = editor.tree();
+    tree.subtree(node)
+        .into_iter()
+        .filter_map(|n| {
+            let bounds = tree
+                .component::<CollisionShape3D>(n)
+                .and_then(|c| shape_bounds(c.shape()))?;
+            let global = tree.global_transform(n)?;
+            Aabb::from_points(box_corners(&global, bounds.min, bounds.max))
+        })
+        .reduce(|a, b| a.union(&b))
 }
 
 /// Where a screen point's ray meets the ground plane (or 10 m ahead).
 fn ground_point(projector: &Projector, pos: Pos2) -> Vec3 {
     let (origin, dir) = projector.ray(pos);
+    // Front and side views look along the ground: the point on the plane through the
+    // world origin facing the view.
+    if projector.ortho.is_some() && dir.y.abs() < 0.5 {
+        return origin + dir * dir.dot(-origin);
+    }
     if dir.y < -1e-3 {
         let t = -origin.y / dir.y;
         if t < 500.0 {
@@ -1501,61 +2459,80 @@ fn ring(projector: &Projector, center: Vec3, axis: Vec3, radius: f32) -> Vec<Pos
         .collect()
 }
 
-fn draw_grid(painter: &egui::Painter, projector: &Projector, camera: &EditorCamera) {
-    let step = if camera.distance > 60.0 { 10.0 } else { 1.0 };
+/// The grid of the view's plane (the ground, or the XY / ZY plane of the front and side
+/// views), around the camera's pivot, with the two world axes in it highlighted.
+fn draw_grid(
+    painter: &egui::Painter,
+    projector: &Projector,
+    camera: &EditorCamera,
+    kind: ViewKind,
+) {
+    let (u, v) = kind.grid_axes();
+    let distance = projector.view_distance(camera.pivot).max(camera.distance);
+    let step = if distance > 60.0 { 10.0 } else { 1.0 };
     let half = 40;
-    let cx = (camera.pivot.x / step).round() * step;
-    let cz = (camera.pivot.z / step).round() * step;
+    let cu = (camera.pivot.dot(u) / step).round() * step;
+    let cv = (camera.pivot.dot(v) / step).round() * step;
     let extent = half as f32 * step;
+    let at = |a: f32, b: f32| u * a + v * b;
     for i in -half..=half {
         let i: i32 = i;
         let offset = i as f32 * step;
         let fade = 1.0 - (i.unsigned_abs() as f32 / half as f32);
         let alpha = (fade * fade * 22.0) as u8;
-        let major = ((cx + offset) / step).round() as i64 % 10 == 0;
+        if alpha == 0 {
+            continue;
+        }
+        let a = cu + offset;
+        let major = (a / step).round() as i64 % 10 == 0;
         let color = Color32::from_white_alpha(if major {
             alpha.saturating_mul(2)
         } else {
             alpha
         });
-        if alpha == 0 {
-            continue;
-        }
-        let x = cx + offset;
-        if x.abs() > 1e-4 {
+        if a.abs() > 1e-4 {
             line(
                 painter,
                 projector,
-                Vec3::new(x, 0.0, cz - extent),
-                Vec3::new(x, 0.0, cz + extent),
+                at(a, cv - extent),
+                at(a, cv + extent),
                 Stroke::new(1.0_f32, color),
             );
         }
-        let z = cz + offset;
-        if z.abs() > 1e-4 {
+        let b = cv + offset;
+        if b.abs() > 1e-4 {
             line(
                 painter,
                 projector,
-                Vec3::new(cx - extent, 0.0, z),
-                Vec3::new(cx + extent, 0.0, z),
+                at(cu - extent, b),
+                at(cu + extent, b),
                 Stroke::new(1.0_f32, color),
             );
         }
     }
+    let axis_color = |axis: Vec3| {
+        if axis == Vec3::X {
+            theme::AXIS_X
+        } else if axis == Vec3::Y {
+            theme::AXIS_Y
+        } else {
+            theme::AXIS_Z
+        }
+    };
     let axis = |color: Color32| Stroke::new(1.5_f32, color.gamma_multiply(0.75));
     line(
         painter,
         projector,
-        Vec3::new(cx - extent, 0.0, 0.0),
-        Vec3::new(cx + extent, 0.0, 0.0),
-        axis(theme::AXIS_X),
+        at(cu - extent, 0.0),
+        at(cu + extent, 0.0),
+        axis(axis_color(u)),
     );
     line(
         painter,
         projector,
-        Vec3::new(0.0, 0.0, cz - extent),
-        Vec3::new(0.0, 0.0, cz + extent),
-        axis(theme::AXIS_Z),
+        at(0.0, cv - extent),
+        at(0.0, cv + extent),
+        axis(axis_color(v)),
     );
 }
 
@@ -1672,8 +2649,14 @@ fn marquee_nodes(editor: &Editor, projector: &Projector, rect: Rect) -> Vec<Node
         if node == editor.scene_root || !tree.is_visible_in_tree(node) {
             continue;
         }
+        let shape = tree
+            .component::<CollisionShape3D>(node)
+            .and_then(|c| shape_bounds(c.shape()));
         let center = if tree.component::<MeshInstance3D>(node).is_some() {
             tree.mesh_bounds(node).map(|b| b.center())
+        } else if let Some(shape) = shape {
+            tree.global_transform(node)
+                .map(|global| global.transform_point3(shape.center()))
         } else if tree
             .class_name(node)
             .is_some_and(|c| icon_shown(editor, node, c))
@@ -1688,17 +2671,9 @@ fn marquee_nodes(editor: &Editor, projector: &Projector, rect: Rect) -> Vec<Node
         if !rect.contains(at) {
             continue;
         }
-        let Some(mut owner) = editor.instance_owner(node) else {
+        let Some(owner) = selectable_owner(editor, node) else {
             continue;
         };
-        if let Some(parent) = tree.parent(owner) {
-            if parent != editor.scene_root
-                && tree.component::<PhysicsBody3D>(parent).is_some()
-                && editor.is_editable(parent)
-            {
-                owner = parent;
-            }
-        }
         if !found.contains(&owner) {
             found.push(owner);
         }
@@ -1716,7 +2691,9 @@ fn box_corners(transform: &Affine3A, min: Vec3, max: Vec3) -> [Vec3; 8] {
     })
 }
 
-/// Outlines `node`'s meshes; the active node of a selection is drawn brighter.
+/// Outlines `node`'s meshes; the active node of a selection is drawn brighter. Its
+/// collision shapes show too, fainter and under the outline, so a shape the size of its
+/// mesh does not hide it.
 fn draw_selection(
     painter: &egui::Painter,
     projector: &Projector,
@@ -1734,8 +2711,22 @@ fn draw_selection(
     } else {
         Stroke::new(1.0_f32, theme::SELECTION.gamma_multiply(0.6))
     };
+    let shape_stroke = Stroke::new(
+        1.0_f32,
+        theme::PLAY.gamma_multiply(if active { 0.7 } else { 0.4 }),
+    );
     let mut any = false;
-    for n in tree.subtree(node) {
+    let nodes = tree.subtree(node);
+    for &n in &nodes {
+        if let (Some(shape), Some(global)) = (
+            tree.component::<CollisionShape3D>(n),
+            tree.global_transform(n),
+        ) {
+            draw_shape(painter, projector, &global, shape.shape(), shape_stroke);
+            any = true;
+        }
+    }
+    for &n in &nodes {
         let Some(mesh) = tree.component::<MeshInstance3D>(n).map(|m| *m) else {
             continue;
         };
@@ -1764,6 +2755,91 @@ fn draw_selection(
     }
 }
 
+/// A thin outline around the object under the pointer.
+fn draw_hover(painter: &egui::Painter, projector: &Projector, editor: &Editor, node: NodeHandle) {
+    let tree = editor.tree();
+    let Some(assets) = tree.world().resource::<RenderAssets>() else {
+        return;
+    };
+    let stroke = Stroke::new(1.0_f32, Color32::from_white_alpha(110));
+    let mut any = false;
+    for n in tree.subtree(node) {
+        let corners = match tree.component::<MeshInstance3D>(n).map(|m| *m) {
+            Some(_) if tree.component::<Skin>(n).is_some() => {
+                tree.mesh_bounds(n).map(|b| b.corners())
+            }
+            Some(mesh) => assets
+                .mesh_aabb(mesh.mesh)
+                .zip(tree.global_transform(n))
+                .map(|(aabb, global)| box_corners(&global, aabb.min, aabb.max)),
+            None => None,
+        };
+        if let Some(corners) = corners {
+            draw_box(painter, projector, &corners, stroke);
+            any = true;
+        }
+    }
+    if !any {
+        if let Some(bounds) = subtree_shape_bounds(editor, node) {
+            draw_box(painter, projector, &bounds.corners(), stroke);
+        } else if let Some(at) = tree
+            .global_position(node)
+            .and_then(|p| projector.project(p))
+        {
+            painter.circle_stroke(at, 14.0, stroke);
+        }
+    }
+}
+
+/// The snap steps, editable.
+pub fn snap_settings(ui: &mut egui::Ui, snap: &mut SnapSettings) {
+    ui.set_min_width(220.0);
+    ui.checkbox(&mut snap.enabled, t("snap.title"));
+    egui::Grid::new("snap_steps").num_columns(2).show(ui, |ui| {
+        ui.label(t("snap.move"));
+        ui.add(
+            egui::DragValue::new(&mut snap.translate)
+                .range(0.001..=1000.0)
+                .speed(0.01)
+                .suffix(" m"),
+        );
+        ui.end_row();
+        ui.label(t("snap.rotate"));
+        ui.add(
+            egui::DragValue::new(&mut snap.rotate)
+                .range(0.1..=180.0)
+                .speed(0.5)
+                .suffix("°"),
+        );
+        ui.end_row();
+        ui.label(t("snap.scale"));
+        ui.add(
+            egui::DragValue::new(&mut snap.scale)
+                .range(0.001..=100.0)
+                .speed(0.005),
+        );
+        ui.end_row();
+    });
+    ui.horizontal(|ui| {
+        for (label, step) in [
+            ("0.1 m", 0.1),
+            ("0.25 m", 0.25),
+            ("0.5 m", 0.5),
+            ("1 m", 1.0),
+        ] {
+            if ui.small_button(label).clicked() {
+                snap.translate = step;
+            }
+        }
+    });
+    if ui.button(t("snap.reset")).clicked() {
+        *snap = SnapSettings {
+            enabled: snap.enabled,
+            ..SnapSettings::default()
+        };
+    }
+}
+
 /// The Debug panel's mesh bounds view while editing: every visible mesh's world box.
 fn draw_mesh_bounds(painter: &egui::Painter, projector: &Projector, editor: &Editor) {
     let color32 = |c: Color| {
@@ -1788,53 +2864,119 @@ fn draw_collision(painter: &egui::Painter, projector: &Projector, editor: &Edito
     let tree = editor.tree();
     let stroke = Stroke::new(1.0_f32, theme::PLAY.gamma_multiply(0.85));
     for node in tree.subtree(editor.scene_root) {
-        let Some(shape) = tree
-            .component::<CollisionShape3D>(node)
-            .map(|c| c.shape().clone())
-        else {
-            continue;
-        };
-        let Some(global) = tree.global_transform(node) else {
-            continue;
-        };
-        match shape {
-            Shape::Box { size } => {
+        if let (Some(shape), Some(global)) = (
+            tree.component::<CollisionShape3D>(node),
+            tree.global_transform(node),
+        ) {
+            draw_shape(painter, projector, &global, shape.shape(), stroke);
+        }
+    }
+}
+
+/// A closed polyline through `points` (in the space of `global`).
+fn local_polyline(
+    painter: &egui::Painter,
+    projector: &Projector,
+    global: &Affine3A,
+    points: impl IntoIterator<Item = Vec3>,
+    stroke: Stroke,
+) {
+    let points: Vec<Vec3> = points
+        .into_iter()
+        .map(|p| global.transform_point3(p))
+        .collect();
+    for pair in points.windows(2) {
+        line(painter, projector, pair[0], pair[1], stroke);
+    }
+}
+
+/// Points of an arc in the shape's space: `center + (u cos a + v sin a) * radius`.
+fn arc(center: Vec3, u: Vec3, v: Vec3, radius: f32, from: f32, to: f32) -> Vec<Vec3> {
+    const STEPS: usize = 32;
+    (0..=STEPS)
+        .map(|i| {
+            let angle = from + (to - from) * i as f32 / STEPS as f32;
+            center + (u * angle.cos() + v * angle.sin()) * radius
+        })
+        .collect()
+}
+
+/// Wireframe of a collision shape placed at `global` (its scale applies, as in physics).
+fn draw_shape(
+    painter: &egui::Painter,
+    projector: &Projector,
+    global: &Affine3A,
+    shape: &Shape,
+    stroke: Stroke,
+) {
+    use std::f32::consts::{PI, TAU};
+    let poly = |points: Vec<Vec3>| local_polyline(painter, projector, global, points, stroke);
+    match shape {
+        Shape::Box { size } => {
+            draw_box(
+                painter,
+                projector,
+                &box_corners(global, -*size * 0.5, *size * 0.5),
+                stroke,
+            );
+        }
+        Shape::Sphere { radius } => {
+            for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)] {
+                poly(arc(Vec3::ZERO, u, v, *radius, 0.0, TAU));
+            }
+        }
+        Shape::Capsule { radius, height } => {
+            // `height` includes both caps: the straight part is what is left.
+            let half = (height * 0.5 - radius).max(0.0);
+            let (top, bottom) = (Vec3::Y * half, Vec3::NEG_Y * half);
+            for center in [top, bottom] {
+                poly(arc(center, Vec3::X, Vec3::Z, *radius, 0.0, TAU));
+            }
+            for side in [Vec3::X, Vec3::Z] {
+                poly(arc(top, side, Vec3::Y, *radius, 0.0, PI));
+                poly(arc(bottom, side, Vec3::NEG_Y, *radius, 0.0, PI));
+                for sign in [1.0, -1.0] {
+                    poly(vec![
+                        top + side * radius * sign,
+                        bottom + side * radius * sign,
+                    ]);
+                }
+            }
+        }
+        Shape::Cylinder { radius, height } => {
+            let half = height * 0.5;
+            for y in [-half, half] {
+                poly(arc(Vec3::Y * y, Vec3::X, Vec3::Z, *radius, 0.0, TAU));
+            }
+            for side in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
+                poly(vec![
+                    side * *radius - Vec3::Y * half,
+                    side * *radius + Vec3::Y * half,
+                ]);
+            }
+        }
+        Shape::TriMesh { vertices, indices } if indices.len() <= 4096 => {
+            for triangle in indices.iter() {
+                let corner = |i: u32| vertices.get(i as usize).copied();
+                if let (Some(a), Some(b), Some(c)) = (
+                    corner(triangle[0]),
+                    corner(triangle[1]),
+                    corner(triangle[2]),
+                ) {
+                    poly(vec![a, b, c, a]);
+                }
+            }
+        }
+        // Hulls and big meshes: their bounds.
+        Shape::ConvexHull { .. } | Shape::TriMesh { .. } => {
+            if let Some(bounds) = shape_bounds(shape) {
                 draw_box(
                     painter,
                     projector,
-                    &box_corners(&global, -size * 0.5, size * 0.5),
+                    &box_corners(global, bounds.min, bounds.max),
                     stroke,
                 );
             }
-            Shape::Sphere { radius } => {
-                let center: Vec3 = global.translation.into();
-                let scale = Vec3::from(global.matrix3.x_axis).length();
-                for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
-                    let points = ring(projector, center, axis, radius * scale);
-                    painter.add(egui::Shape::line(points, stroke));
-                }
-            }
-            Shape::Capsule { radius, height } | Shape::Cylinder { radius, height } => {
-                let half = (height * 0.5).max(radius);
-                for y in [-half, half] {
-                    let center = global.transform_point3(Vec3::new(0.0, y, 0.0));
-                    let axis = Vec3::from(global.matrix3.y_axis).normalize_or(Vec3::Y);
-                    painter.add(egui::Shape::line(
-                        ring(projector, center, axis, radius),
-                        stroke,
-                    ));
-                }
-                for (x, z) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-                    line(
-                        painter,
-                        projector,
-                        global.transform_point3(Vec3::new(x * radius, -half, z * radius)),
-                        global.transform_point3(Vec3::new(x * radius, half, z * radius)),
-                        stroke,
-                    );
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -1863,7 +3005,7 @@ mod tests {
         let project =
             std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
-        editor.open_scene("slice/level.toml");
+        editor.open_scene("slice/level.abscene");
         let mut camera = EditorCamera::default();
         let scene = editor.tree().subtree_bounds(editor.scene_root).unwrap();
         camera.frame(scene.center(), scene.size().length() * 0.5);
@@ -1884,6 +3026,316 @@ mod tests {
         assert_eq!(marquee_nodes(&editor, &projector, small), [pillar]);
         let empty = Rect::from_min_size(Pos2::new(-50.0, -50.0), Vec2::splat(10.0));
         assert!(marquee_nodes(&editor, &projector, empty).is_empty());
+    }
+
+    /// The default camera looking at the origin, and a fresh empty scene.
+    fn shapes_scene() -> (Editor, Projector) {
+        let project =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
+        editor.new_scene();
+        for child in editor.tree().children(editor.scene_root) {
+            editor.delete(child);
+        }
+        let mut camera = EditorCamera::default();
+        camera.frame(Vec3::ZERO, 1.0);
+        let view = CameraView::new(&camera.global(), 60f32.to_radians(), 1.6, 0.05, 2000.0);
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0));
+        (editor, Projector::new(&view, rect))
+    }
+
+    fn template(label: &str) -> SceneFile {
+        crate::create::PHYSICS
+            .iter()
+            .find(|t| t.label == label)
+            .unwrap()
+            .scene()
+    }
+
+    use ab_engine::scene_file::SceneFile;
+
+    #[test]
+    fn bodies_without_meshes_are_picked_by_their_shape() {
+        let (mut editor, projector) = shapes_scene();
+        editor.add_scene(template("Character"), Some(Vec3::ZERO));
+        let character = editor.selection.unwrap();
+        // Placed at the origin: the capsule spans -0.9..0.9.
+        let center = projector.project(Vec3::new(0.0, 0.3, 0.0)).unwrap();
+        editor.select(None);
+        assert_eq!(pick(&editor, &projector, center), Some(character));
+        let shape = editor.tree().get_node(character, "Shape").unwrap();
+        assert_eq!(
+            hit(&editor, &projector, center),
+            Some(Hit {
+                owner: character,
+                part: shape
+            })
+        );
+        // Framing and box selection find it too.
+        assert!(subtree_shape_bounds(&editor, character).is_some());
+        let middle = projector.project(Vec3::ZERO).unwrap();
+        let around = Rect::from_center_size(middle, Vec2::splat(20.0));
+        assert_eq!(marquee_nodes(&editor, &projector, around), [character]);
+    }
+
+    #[test]
+    fn a_click_on_a_bodys_mesh_selects_the_body_so_mesh_and_shape_move_together() {
+        let (mut editor, projector) = shapes_scene();
+        editor.add_scene(template("Static Box"), Some(Vec3::ZERO));
+        let wall = editor.selection.unwrap();
+        let mesh = editor.tree().get_node(wall, "Mesh").unwrap();
+        let at = projector.project(Vec3::ZERO).unwrap();
+        assert_eq!(
+            hit(&editor, &projector, at),
+            Some(Hit {
+                owner: wall,
+                part: mesh
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_volumes_do_not_hide_what_is_inside() {
+        let (mut editor, projector) = shapes_scene();
+        editor.add_scene(template("Trigger Area"), Some(Vec3::ZERO));
+        let area = editor.selection.unwrap();
+        editor.select(None);
+        editor.add_scene(crate::create::MESHES[0].scene(), Some(Vec3::ZERO));
+        let cube = editor.selection.unwrap();
+        // Off-centre, away from the area's icon: the cube inside wins over the volume.
+        let at = projector.project(Vec3::new(0.3, 0.3, 0.3)).unwrap();
+        assert_eq!(pick(&editor, &projector, at), Some(cube));
+        // Outside the cube but inside the volume: the area.
+        let at = projector.project(Vec3::new(0.0, 0.9, 0.0)).unwrap();
+        assert_eq!(pick(&editor, &projector, at), Some(area));
+    }
+
+    #[test]
+    fn shape_bounds_follow_the_shape() {
+        let capsule = shape_bounds(&Shape::capsule(0.4, 1.8)).unwrap();
+        assert_eq!(capsule.max, Vec3::new(0.4, 0.9, 0.4));
+        let sphere = shape_bounds(&Shape::sphere(0.5)).unwrap();
+        assert_eq!(sphere.min, Vec3::splat(-0.5));
+        let hull = shape_bounds(&Shape::convex_hull(vec![Vec3::ZERO, Vec3::ONE])).unwrap();
+        assert_eq!((hull.min, hull.max), (Vec3::ZERO, Vec3::ONE));
+    }
+
+    /// Runs the viewport for one frame with `events`, on a 1200 × 800 window.
+    fn frame(
+        ctx: &egui::Context,
+        viewport: &mut Viewport,
+        editor: &mut Editor,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| viewport.show(ui, editor, None));
+        output.textures_delta.clear();
+    }
+
+    fn right_click(at: Pos2) -> [Vec<egui::Event>; 3] {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        [
+            vec![egui::Event::PointerMoved(at)],
+            vec![button(true)],
+            vec![button(false)],
+        ]
+    }
+
+    #[test]
+    fn right_click_opens_a_menu_for_the_object_or_the_scene() {
+        let (mut editor, _) = shapes_scene();
+        // At the camera's pivot: the middle of the view.
+        let pivot = EditorCamera::default().pivot;
+        editor.add_scene(crate::create::MESHES[0].scene(), Some(pivot));
+        let cube = editor.selection.unwrap();
+        editor.select(None);
+        let ctx = egui::Context::default();
+        let mut viewport = Viewport::new(None);
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+
+        for events in right_click(Pos2::new(600.0, 400.0)) {
+            frame(&ctx, &mut viewport, &mut editor, events);
+        }
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        assert_eq!(
+            editor.selection,
+            Some(cube),
+            "the object is selected for its menu"
+        );
+        assert!(matches!(viewport.menu_target, Some((Some(n), _)) if n == cube));
+        assert!(egui::Popup::is_any_open(&ctx), "the menu is open");
+
+        // Empty space: the scene menu, the selection left alone.
+        for events in right_click(Pos2::new(40.0, 760.0)) {
+            frame(&ctx, &mut viewport, &mut editor, events);
+        }
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        assert!(matches!(viewport.menu_target, Some((None, _))));
+        assert_eq!(editor.selection, Some(cube));
+        assert!(egui::Popup::is_any_open(&ctx));
+    }
+
+    #[test]
+    fn the_build_tool_places_pieces_on_the_grid_and_stacks_them() {
+        let (mut editor, _) = shapes_scene();
+        let ctx = egui::Context::default();
+        let mut viewport = Viewport::new(None);
+        viewport.options.snap.translate = 1.0;
+        editor.build = Some(crate::state::BuildPiece {
+            path: "pieces/floor_tile.abscene".into(),
+            turns: 0,
+        });
+        let before = editor.tree().children(editor.scene_root).len();
+        let click = |at: Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            [
+                vec![egui::Event::PointerMoved(at)],
+                vec![button(true)],
+                vec![button(false)],
+            ]
+        };
+        let middle = Pos2::new(600.0, 400.0);
+        for events in click(middle) {
+            frame(&ctx, &mut viewport, &mut editor, events);
+        }
+        let placed: Vec<_> = editor.tree().children(editor.scene_root);
+        assert_eq!(placed.len(), before + 1, "one piece placed");
+        let tile = *placed.last().unwrap();
+        let p = editor.tree().global_position(tile).unwrap();
+        assert_eq!(p.y, 0.0, "on the ground");
+        assert_eq!((p.x.fract(), p.z.fract()), (0.0, 0.0), "on the grid: {p}");
+        // The ghost is not part of the scene.
+        assert!(editor
+            .tree()
+            .subtree(editor.scene_root)
+            .iter()
+            .all(|&n| editor.tree().name(n).as_deref() != Some("BuildGhost")));
+
+        // A second click on the tile: stacked on top of it.
+        for events in click(middle) {
+            frame(&ctx, &mut viewport, &mut editor, events);
+        }
+        let top = *editor.tree().children(editor.scene_root).last().unwrap();
+        let q = editor.tree().global_position(top).unwrap();
+        assert!((q.y - 0.2).abs() < 1e-3, "on the tile's top: {q}");
+
+        // Done: the ghost goes away.
+        editor.build = None;
+        editor.tick(0.0);
+        assert!(editor.tree().children(editor.tree().root()).len() == 1);
+    }
+
+    #[test]
+    fn path_points_drag_add_and_delete_with_undo() {
+        use ab_engine::scene_file::path::Path3D;
+        let (mut editor, _) = shapes_scene();
+        let ctx = egui::Context::default();
+        let mut viewport = Viewport::new(None);
+        editor.select(None);
+        editor.add_scene(crate::create::PATHS[0].scene(), Some(Vec3::ZERO));
+        let path = editor.selection.unwrap();
+        editor.end_gesture();
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        let points = |editor: &Editor| {
+            let node = editor.selection.unwrap();
+            editor.tree().component::<Path3D>(node).unwrap().desc.points.clone()
+        };
+        let before = points(&editor);
+        assert_eq!(before.len(), 3);
+        // Where the middle point is on screen (the view of `frame`: 1200 × 800).
+        let view = CameraView::new(&viewport.camera.global(), 60f32.to_radians(), 1.5, 0.05, 2000.0);
+        let projector = Projector::new(&view, Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)));
+        let middle = projector
+            .project(editor.tree().global_transform(path).unwrap().transform_point3(Vec3::from(before[1])))
+            .unwrap();
+        let primary = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(middle)]);
+        frame(&ctx, &mut viewport, &mut editor, vec![primary(middle, true)]);
+        for step in 1..=8 {
+            let pos = middle + Vec2::new(step as f32 * 6.0, 0.0);
+            frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(pos)]);
+        }
+        let end = middle + Vec2::new(48.0, 0.0);
+        frame(&ctx, &mut viewport, &mut editor, vec![primary(end, false)]);
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        let moved = points(&editor);
+        assert!(moved[1][0] > before[1][0] + 0.2, "{moved:?}");
+        assert_eq!(moved[1][1], before[1][1], "level");
+        editor.undo();
+        assert_eq!(points(&editor), before, "one undo step back");
+
+        // Right-click a point: gone.
+        let first = projector
+            .project(editor.tree().global_transform(editor.selection.unwrap()).unwrap().transform_point3(Vec3::from(before[0])))
+            .unwrap();
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: first,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [vec![egui::Event::PointerMoved(first)], vec![secondary(true)], vec![secondary(false)], vec![]] {
+            frame(&ctx, &mut viewport, &mut editor, events);
+        }
+        assert_eq!(points(&editor).len(), 2);
+        assert!(!egui::Popup::is_any_open(&ctx), "no context menu for it");
+    }
+
+    #[test]
+    fn dragging_with_the_right_button_flies_without_a_menu() {
+        let (mut editor, _) = shapes_scene();
+        let ctx = egui::Context::default();
+        let mut viewport = Viewport::new(None);
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        let start = Pos2::new(600.0, 400.0);
+        let yaw = viewport.camera.yaw;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            &ctx,
+            &mut viewport,
+            &mut editor,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        frame(&ctx, &mut viewport, &mut editor, vec![button(start, true)]);
+        for step in 1..=10 {
+            let pos = start + Vec2::new(step as f32 * 12.0, 0.0);
+            frame(
+                &ctx,
+                &mut viewport,
+                &mut editor,
+                vec![egui::Event::PointerMoved(pos)],
+            );
+        }
+        let end = start + Vec2::new(120.0, 0.0);
+        frame(&ctx, &mut viewport, &mut editor, vec![button(end, false)]);
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        assert!(viewport.camera.yaw != yaw, "the camera turned");
+        assert!(viewport.menu_target.is_none());
+        assert!(!egui::Popup::is_any_open(&ctx));
     }
 
     #[test]

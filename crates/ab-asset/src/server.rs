@@ -51,6 +51,15 @@ impl AssetServer {
             .map_err(|source| AssetError::Io { path, source })
     }
 
+    /// Forgets what was loaded from `path` (its file changed): the next load reads it again.
+    pub fn evict(&mut self, path: &str) {
+        if let Ok(path) = Self::normalize(path) {
+            self.scenes.remove(&path);
+            self.textures.retain(|(p, _), _| *p != path);
+            self.audio.remove(&path);
+        }
+    }
+
     pub fn exists(&self, path: &str) -> bool {
         Self::normalize(path).is_ok_and(|p| self.source.exists(&p))
     }

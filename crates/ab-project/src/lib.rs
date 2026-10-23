@@ -22,6 +22,7 @@
 //!   one file and the script library, checked by running the result.
 
 pub mod archive;
+mod engine;
 pub mod export;
 mod platform;
 pub mod process;
@@ -30,7 +31,10 @@ pub mod script_templates;
 mod scripts;
 mod template;
 
+pub use engine::{
+    engine_root, is_engine_root, locate_engine, set_engine_root, EngineLookup, EngineSource,
+};
 pub use platform::Platform;
-pub use project::{engine_root, Profile, Project, GAME_FILE};
+pub use project::{Profile, Project, GAME_FILE};
 pub use scripts::{BuildState, ScriptBuild};
 pub use template::{create, folder_name, sdk_dir, template_file, NewProject, NEW_SCENE};

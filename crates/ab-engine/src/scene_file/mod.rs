@@ -1,6 +1,9 @@
 //! Scene files: levels and prefabs described in TOML, instantiated into the tree, and saved
 //! back from it.
 //!
+//! Scene files end in `.abscene` ([`SCENE_EXTENSION`]); the text inside is TOML. Scenes
+//! saved before the extension existed end in `.toml` and still load ([`is_scene_path`]).
+//!
 //! The format is a flat list of nodes like Godot's `.tscn`: the first node is the scene's
 //! root, every other names its `parent` by path from the root (`"."` is the root itself).
 //!
@@ -78,20 +81,62 @@
 
 mod format;
 mod load;
+pub mod generator;
+pub mod path;
+pub mod prefab;
 mod save;
 pub mod ui;
 
 pub use format::{
     AnimationDesc, AudioDesc, BodyDesc, BoxDesc, ButtonDesc, CameraDesc, CanvasDesc, CharacterDesc,
     ColorDesc, ControlDesc, EnvironmentDesc, ImageDesc, JointDesc, LabelDesc, LightDesc,
-    MaterialDesc, MeshDesc, NodeDesc, PanelDesc, ParticlesDesc, ProgressDesc, RagdollDesc,
+    GeneratorDesc, MaterialDesc, MeshDesc, NodeDesc, PathDesc, PanelDesc, ParticlesDesc, ProgressDesc, RagdollDesc,
     SceneFile, ShapeDesc, TimerDesc,
 };
 pub use load::{
     apply_environment, install_clips, instantiate_scene, load_animations, load_scene,
-    mesh_and_material, particle_emitter, SceneAssetCache, SceneFileError,
+    material_handle, mesh_and_material, particle_emitter, resolve_material, SceneAssetCache, SceneFileError,
 };
-pub use save::{relative_path, save_scene};
+pub use save::{relative_path, save_contents, save_scene};
+
+/// File extension of scene files (TOML text inside).
+pub const SCENE_EXTENSION: &str = "abscene";
+
+/// File extension of material files: the keys of a `material = { … }` table, in TOML.
+pub const MATERIAL_EXTENSION: &str = "abmat";
+
+/// The extension of scene files saved before `.abscene`; they still load.
+pub const LEGACY_SCENE_EXTENSION: &str = "toml";
+
+/// Whether `path` names a scene file by its extension: `.abscene`, or a `.toml` scene of
+/// older projects. (Other `.toml` files, such as animation clips, share that extension; the
+/// context tells them apart.)
+pub fn is_scene_path(path: &str) -> bool {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    extension.eq_ignore_ascii_case(SCENE_EXTENSION)
+        || extension.eq_ignore_ascii_case(LEGACY_SCENE_EXTENSION)
+}
+
+/// `path` with the scene extension: added when it has none, `.toml` swapped for
+/// `.abscene`. Other extensions are kept as typed (`level.v2` becomes `level.v2.abscene`).
+pub fn with_scene_extension(path: &str) -> String {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    match file.rsplit_once('.') {
+        Some((_, ext)) if ext.eq_ignore_ascii_case(SCENE_EXTENSION) => path.to_owned(),
+        Some((_, ext)) if ext.eq_ignore_ascii_case(LEGACY_SCENE_EXTENSION) => {
+            format!("{}.{SCENE_EXTENSION}", &path[..path.len() - ext.len() - 1])
+        }
+        _ => format!("{path}.{SCENE_EXTENSION}"),
+    }
+}
+
+/// Marks nodes built from another node's description (a path's road mesh, a generator's
+/// output): rebuilt on load, never saved, not edited by hand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Generated;
 
 /// Marks the root of an instanced model or scene, so saving writes `instance = path`
 /// instead of its contents.
@@ -109,4 +154,25 @@ pub struct SceneOrigin {
     pub animation: Option<AnimationDesc>,
     /// A `TextureRect`'s image file.
     pub image: Option<ImageDesc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_extensions() {
+        assert!(is_scene_path("levels/one.abscene"));
+        assert!(is_scene_path("levels/ONE.AbScene"));
+        assert!(is_scene_path("old/level.toml"), "older scenes still load");
+        assert!(!is_scene_path("models/crate.glb"));
+        assert!(!is_scene_path("abscene"));
+        assert_eq!(with_scene_extension("scenes/a"), "scenes/a.abscene");
+        assert_eq!(with_scene_extension("scenes/a.abscene"), "scenes/a.abscene");
+        assert_eq!(with_scene_extension("scenes/a.toml"), "scenes/a.abscene");
+        assert_eq!(
+            with_scene_extension("my.levels/a.v2"),
+            "my.levels/a.v2.abscene"
+        );
+    }
 }

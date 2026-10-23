@@ -1,0 +1,17 @@
+[package]
+name = "ab-locale"
+description = "Translations for April Blink Engine: language files, fallbacks and placeholders, for the editor and games"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Light: the editor, the engine and tools use it.
+[dependencies]
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

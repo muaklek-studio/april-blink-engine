@@ -190,11 +190,11 @@ mod tests {
     fn later_mounts_override_and_paths_are_confined() {
         let dir = std::env::temp_dir().join(format!("ab-vfs-src-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("scenes")).unwrap();
-        std::fs::write(dir.join("scenes/main.toml"), b"from disk").unwrap();
+        std::fs::write(dir.join("scenes/main.abscene"), b"from disk").unwrap();
         std::fs::write(dir.join("only-on-disk.txt"), b"disk").unwrap();
 
         let mut writer = PackWriter::new();
-        writer.add("scenes/main.toml", b"from pack".to_vec());
+        writer.add("scenes/main.abscene", b"from pack".to_vec());
         writer.add("only-in-pack.txt", b"pack".to_vec());
         let mut bytes = Vec::new();
         writer.write_to(&mut bytes).unwrap();
@@ -203,7 +203,7 @@ mod tests {
         vfs.mount(PackSource::new(crate::Pack::from_bytes(bytes).unwrap()));
         vfs.mount(DirSource::new(&dir));
         assert_eq!(
-            vfs.read("scenes/main.toml").unwrap(),
+            vfs.read("scenes/main.abscene").unwrap(),
             b"from disk",
             "top wins"
         );
@@ -212,7 +212,11 @@ mod tests {
         assert!(matches!(vfs.read("nope"), Err(VfsError::NotFound(_))));
         assert_eq!(
             vfs.list(),
-            ["only-in-pack.txt", "only-on-disk.txt", "scenes/main.toml"]
+            [
+                "only-in-pack.txt",
+                "only-on-disk.txt",
+                "scenes/main.abscene"
+            ]
         );
         let disk = DirSource::new(dir.join("scenes"));
         assert!(matches!(

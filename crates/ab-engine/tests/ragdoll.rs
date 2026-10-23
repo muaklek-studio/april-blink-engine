@@ -219,7 +219,7 @@ fn physics_view_profiling_and_time_scale() {
     assert!((slow - normal * 0.5).abs() < 0.01, "{slow} vs {normal}");
 }
 
-/// `assets/samples/ragdolls.toml`: a floor, steps, a mannequin that falls on Play and one
+/// `assets/samples/ragdolls.abscene`: a floor, steps, a mannequin that falls on Play and one
 /// that stands until hit. Regenerate with `AB_WRITE_SAMPLES=1 cargo test -p ab-engine
 /// --test ragdoll`.
 fn playground() -> ab_engine::scene_file::SceneFile {
@@ -275,7 +275,7 @@ fn playground() -> ab_engine::scene_file::SceneFile {
 fn the_ragdoll_sample_scene_is_current_and_plays() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/samples/ragdolls.toml"
+        "/../../assets/samples/ragdolls.abscene"
     );
     let scene = playground();
     if std::env::var_os("AB_WRITE_SAMPLES").is_some() {
@@ -288,7 +288,7 @@ fn the_ragdoll_sample_scene_is_current_and_plays() {
 
     let mut engine = engine();
     let tree = engine.tree_mut();
-    let root = ab_engine::scene_file::load_scene(tree, "samples/ragdolls.toml").unwrap();
+    let root = ab_engine::scene_file::load_scene(tree, "samples/ragdolls.abscene").unwrap();
     tree.add_child(tree.root(), root).unwrap();
     frames(&mut engine, 180);
     let tree = engine.tree();

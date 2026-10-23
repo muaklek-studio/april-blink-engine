@@ -23,14 +23,30 @@ foundation for making games, with a small codebase that one person can read and 
 ## Features
 
 - **Scenes**: a node tree (`Node3D`, physics bodies, lights, cameras, UI controls…) on a
-  small sparse-set ECS, with signals, groups, tweens and TOML scene files.
+  small sparse-set ECS, with signals, groups, tweens and `.abscene` scene files (TOML
+  inside; `.toml` scenes of older projects still load).
 - **Rendering**: a wgpu forward renderer with shadows, bloom, skinned meshes, particles,
   debug lines and MSDF text (complex scripts such as Thai included).
 - **Physics**: Rapier 3D bodies, joints, ragdolls, areas, scene queries and a kinematic
   character controller; grid navigation baked from the physics world.
 - **Audio**: Kira streams, 2D/3D players and a listener.
+- **Languages**: translations in `locales/<code>.toml` (`ab-locale`) with fallbacks and
+  `{placeholders}`; UI labels and buttons with a `key` follow the language at runtime, and
+  fonts fall back per character for scripts the UI font lacks.
+- **Prefabs and materials**: any scene file is a prefab; instances keep their own changes
+  as overrides (a changed prefab reaches every instance, overrides still win; a missing one
+  loads as a placeholder that saves back unchanged). Materials are files too (`.abmat`)
+  with albedo, normal and metal/rough maps.
+- **Config**: named values in `config.toml` (`Player.MoveSpeed`, `Game.DefaultLanguage`)
+  with types, ranges, options and constants, read and changed safely by scripts.
 - **Editor**: scene editing, play in editor, assets, inspector, console, profiler, source
-  control and one-click export.
+  control and one-click export; right-click menus, cut/copy/paste of objects, configurable
+  snapping and shortcuts from one command table (F1 lists them), four views (perspective,
+  top, front, side), English and Thai with a font and scale of your choice (Edit →
+  Preferences), a Game Config panel, thumbnails and a viewer for images, models, scenes
+  and materials, and a Build panel to put levels together from pieces on a grid (stack,
+  turn, align, distribute, rows). The engine sources are found again when the
+  checkout moves, or located once from the loading screen.
 - **Scripting**: Rust scripts built against the `ab-script` SDK and loaded through a stable
   C ABI, so the editor and games never need rebuilding with them; rebuilt and hot reloaded
   while the game or the editor runs.
@@ -63,6 +79,7 @@ foundation for making games, with a small codebase that one person can read and 
 | `ab-effects` | Particles, one-shot effects, light flashes, camera shake |
 | `ab-audio` | Kira audio: streams, 2D/3D players, listener |
 | `ab-ui` | Screen-space controls, layout and MSDF text |
+| `ab-locale` | Language files, fallbacks and placeholders (editor and games) |
 | `ab-engine` | Facade: game loop, scheduling, subsystem wiring, script host, hot reload |
 | `ab-script-api` | The C ABI between the engine and script libraries |
 | `ab-script` | The script SDK game projects depend on |

@@ -3,7 +3,7 @@
 //! (building its scripts first). The editor itself only opens once a project is chosen.
 
 use crate::chrome;
-use crate::loading::{Level, Report};
+use crate::loading::{Fix, Level, Report};
 use crate::projects::{
     self, BuildState, NewProject, Profile, Project, RecentProjects, ScriptBuild,
 };
@@ -61,6 +61,8 @@ pub struct ProjectManager {
     show_system: bool,
     /// The system's folder picker, open on its own thread; sends the chosen folder.
     picker: Option<Receiver<Option<PathBuf>>>,
+    /// The folder picker of the System window's "Locate engine sources".
+    engine_picker: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl ProjectManager {
@@ -77,6 +79,7 @@ impl ProjectManager {
             banner: None,
             show_system: false,
             picker: None,
+            engine_picker: None,
         }
     }
 
@@ -917,6 +920,21 @@ impl ProjectManager {
     }
 
     fn system_window(&mut self, ctx: &egui::Context) {
+        if let Some(picked) = self.engine_picker.as_ref().and_then(|p| p.try_recv().ok()) {
+            self.engine_picker = None;
+            if let Some(dir) = picked {
+                let outcome = crate::loading::choose_engine(&dir);
+                let engine = self
+                    .report
+                    .results
+                    .iter_mut()
+                    .find(|(_, o)| o.fix == Some(Fix::LocateEngine));
+                if let Some((_, slot)) = engine {
+                    *slot = outcome;
+                }
+            }
+        }
+        let mut locate = false;
         let mut open = true;
         egui::Window::new("System check")
             .open(&mut open)
@@ -944,11 +962,26 @@ impl ProjectManager {
                                 )
                                 .wrap(),
                             );
+                            if outcome.fix == Some(Fix::LocateEngine) {
+                                let button = egui::Button::new(format!(
+                                    "{}  Locate engine sources…",
+                                    icon::FOLDER_OPEN
+                                ));
+                                locate |= ui
+                                    .add_enabled(self.engine_picker.is_none(), button)
+                                    .clicked();
+                            }
                         });
                     });
                     ui.add_space(4.0);
                 }
             });
+        if locate {
+            self.engine_picker = Some(crate::loading::pick_folder(
+                ctx,
+                "Locate the engine sources",
+            ));
+        }
         self.show_system = open;
     }
 }

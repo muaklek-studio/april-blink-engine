@@ -2,6 +2,7 @@
 //! context menu.
 
 use super::ROW_SELECTED;
+use crate::commands::{self, Command};
 use crate::scripts::ScriptDrag;
 use crate::state::Editor;
 use crate::theme;
@@ -31,6 +32,8 @@ pub struct SceneTreePanel {
     filter: String,
     /// Folded nodes, by path (handles change when the scene is rebuilt).
     collapsed: HashSet<String>,
+    /// Prefab instances unfolded (they start folded), by path.
+    expanded: HashSet<String>,
     renaming: Option<(NodeHandle, String)>,
     /// Scroll the selection into view once (it changed elsewhere).
     reveal: Option<NodeHandle>,
@@ -55,6 +58,10 @@ enum Action {
     Instance(String, NodeHandle),
     AttachScript(NodeHandle, String),
     ToggleVisible(NodeHandle),
+    /// Paste the clipboard under this node.
+    PasteInto(NodeHandle),
+    /// Save as a prefab and replace with an instance of it.
+    MakePrefab(NodeHandle),
 }
 
 impl SceneTreePanel {
@@ -130,6 +137,37 @@ impl SceneTreePanel {
                 if rest.clicked() {
                     editor.select(None);
                 }
+                if rest.secondary_clicked() {
+                    editor.select(None);
+                }
+                rest.context_menu(|ui| {
+                    ui.set_min_width(200.0);
+                    ui.add_enabled_ui(!editor.is_playing(), |ui| {
+                        ui.menu_button(
+                            format!("{}  {}", icon::PLUS, crate::i18n::t("menu.create")),
+                            |ui| {
+                                crate::create::menu(ui, editor, focus);
+                            },
+                        );
+                    });
+                    if ui
+                        .add_enabled(
+                            editor.can_paste(None),
+                            egui::Button::new(format!(
+                                "{}  {}",
+                                icon::CLIPBOARD,
+                                Command::Paste.label()
+                            )),
+                        )
+                        .clicked()
+                    {
+                        actions.push(Action::PasteInto(editor.scene_root));
+                        ui.close();
+                    }
+                    ui.separator();
+                    commands::menu_item(ui, Command::SelectAll, !editor.is_playing());
+                    commands::menu_item(ui, Command::SelectNone, !editor.selected.is_empty());
+                });
             });
         self.reveal = None;
 
@@ -172,6 +210,14 @@ impl SceneTreePanel {
                     crate::app::instance_asset(editor, &path, None);
                 }
                 Action::AttachScript(node, name) => editor.attach_script(node, &name),
+                Action::PasteInto(node) => editor.paste(None, Some(node), None),
+                Action::MakePrefab(node) => {
+                    let path = crate::panels::scene_tree::prefab_path(editor, node);
+                    match editor.create_prefab(node, &path) {
+                        Ok(instance) => editor.select(Some(instance)),
+                        Err(err) => editor.fail(err),
+                    }
+                }
                 Action::ToggleVisible(node) => {
                     if let Some(old) = editor.describe_node(node) {
                         let mut new = old.clone();
@@ -262,13 +308,23 @@ impl SceneTreePanel {
         let class = tree.class_name(node).unwrap_or("Node");
         let path = editor.relative_path(node).unwrap_or_default();
         let instance = editor.is_instance(node);
-        // Instance contents are not part of the scene file: shown as a leaf.
-        let children: Vec<NodeHandle> = if instance {
+        // A prefab's nodes can be changed (overrides): shown, folded at first. A model's
+        // contents are not part of the scene: shown as a leaf.
+        let prefab = instance
+            && tree
+                .children(node)
+                .first()
+                .is_some_and(|&c| editor.is_override_target(c));
+        let children: Vec<NodeHandle> = if instance && !prefab {
             Vec::new()
         } else {
             tree.children(node)
         };
-        let open = !self.collapsed.contains(&path);
+        let open = if prefab {
+            self.expanded.contains(&path)
+        } else {
+            !self.collapsed.contains(&path)
+        };
         let selected = editor.is_selected(node);
         let active = editor.selection == Some(node);
         self.rows.push(node);
@@ -464,10 +520,11 @@ impl SceneTreePanel {
         }
 
         if arrow_clicked {
-            if open {
-                self.collapsed.insert(path.clone());
-            } else {
-                self.collapsed.remove(&path);
+            match (prefab, open) {
+                (true, true) => _ = self.expanded.remove(&path),
+                (true, false) => _ = self.expanded.insert(path.clone()),
+                (false, true) => _ = self.collapsed.insert(path.clone()),
+                (false, false) => _ = self.collapsed.remove(&path),
             }
         }
         if response.double_clicked() {
@@ -477,7 +534,7 @@ impl SceneTreePanel {
         if response.secondary_clicked() {
             actions.push(Action::SelectForMenu(node));
         }
-        if node != editor.scene_root && !editor.is_playing() {
+        if node != editor.scene_root && !editor.is_playing() && editor.is_editable(node) {
             response.dnd_set_drag_payload(NodeDrag(node));
         }
         if let Some(drag) = response.dnd_release_payload::<NodeDrag>() {
@@ -496,18 +553,55 @@ impl SceneTreePanel {
             let editable = !editor.is_playing();
             ui.add_enabled_ui(editable, |ui| {
                 if ui
-                    .button(format!("{}  Rename", icon::PENCIL_SIMPLE))
+                    .button(format!(
+                        "{}  {}",
+                        icon::PENCIL_SIMPLE,
+                        Command::Rename.label()
+                    ))
                     .clicked()
                 {
                     self.renaming = Some((node, name.clone()));
                     ui.close();
                 }
                 let not_root = node != editor.scene_root;
+                if not_root
+                    && editor.is_editable(node)
+                    && !editor.is_instance(node)
+                    && ui
+                        .button(format!("{}  Create Prefab", icon::LINK_SIMPLE))
+                        .on_hover_text("Save this node and its children as prefabs/<name>.abscene and use an instance of it here")
+                        .clicked()
+                {
+                    actions.push(Action::MakePrefab(node));
+                    ui.close();
+                }
+                ui.separator();
+                commands::menu_item(ui, Command::Cut, not_root);
+                commands::menu_item(ui, Command::Copy, not_root);
+                commands::menu_item(ui, Command::Paste, not_root && editor.can_paste(None));
+                if ui
+                    .add_enabled(
+                        editor.can_paste(None) && !editor.is_instance(node),
+                        egui::Button::new(format!(
+                            "{}  {}",
+                            icon::CLIPBOARD_TEXT,
+                            crate::i18n::t("menu.paste_as_child")
+                        )),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::PasteInto(node));
+                    ui.close();
+                }
                 if ui
                     .add_enabled(
                         not_root,
-                        egui::Button::new(format!("{}  Duplicate", icon::COPY))
-                            .shortcut_text("Ctrl+D"),
+                        egui::Button::new(format!(
+                            "{}  {}",
+                            icon::COPY,
+                            Command::Duplicate.label()
+                        ))
+                        .shortcut_text("Ctrl+D"),
                     )
                     .clicked()
                 {
@@ -517,7 +611,11 @@ impl SceneTreePanel {
                 if ui
                     .add_enabled(
                         not_root,
-                        egui::Button::new(format!("{}  Move up", icon::ARROW_UP)),
+                        egui::Button::new(format!(
+                            "{}  {}",
+                            icon::ARROW_UP,
+                            crate::i18n::t("menu.move_up")
+                        )),
                     )
                     .clicked()
                 {
@@ -527,7 +625,11 @@ impl SceneTreePanel {
                 if ui
                     .add_enabled(
                         not_root,
-                        egui::Button::new(format!("{}  Move down", icon::ARROW_DOWN)),
+                        egui::Button::new(format!(
+                            "{}  {}",
+                            icon::ARROW_DOWN,
+                            crate::i18n::t("menu.move_down")
+                        )),
                     )
                     .clicked()
                 {
@@ -539,7 +641,8 @@ impl SceneTreePanel {
                     .add_enabled(
                         not_root,
                         egui::Button::new(
-                            RichText::new(format!("{}  Delete", icon::TRASH)).color(theme::ERROR),
+                            RichText::new(format!("{}  {}", icon::TRASH, Command::Delete.label()))
+                                .color(theme::ERROR),
                         )
                         .shortcut_text("Del"),
                     )
@@ -551,7 +654,11 @@ impl SceneTreePanel {
             });
             ui.separator();
             if ui
-                .button(format!("{}  Copy path", icon::CLIPBOARD_TEXT))
+                .button(format!(
+                    "{}  {}",
+                    icon::CLIPBOARD_TEXT,
+                    crate::i18n::t("menu.copy_path")
+                ))
                 .clicked()
             {
                 ui.ctx().copy_text(path.clone());
@@ -651,4 +758,30 @@ fn select_row(
     } else {
         editor.select(Some(node));
     }
+}
+
+/// Where a new prefab of `node` goes: `prefabs/<name>.abscene`, numbered if taken.
+pub fn prefab_path(editor: &Editor, node: NodeHandle) -> String {
+    let name: String = editor
+        .tree()
+        .name(node)
+        .map(|n| n.to_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ext = ab_engine::scene_file::SCENE_EXTENSION;
+    let mut path = format!("prefabs/{name}.{ext}");
+    let mut n = 2;
+    while editor.project().join(&path).exists() {
+        path = format!("prefabs/{name}_{n}.{ext}");
+        n += 1;
+    }
+    path
 }

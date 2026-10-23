@@ -228,8 +228,69 @@ impl Script for Animator {
     }
 }
 
+/// Reads and changes the game's config, and switches the language of a keyed label.
+#[derive(Debug, Default)]
+struct Settings {
+    report: Vec<String>,
+}
+
+impl Script for Settings {
+    fn ready(&mut self, tree: &mut Tree<'_>, _node: Node) {
+        let r = &mut self.report;
+        r.push(format!(
+            "speed {}",
+            tree.config_f32("Player.MoveSpeed").unwrap()
+        ));
+        r.push(format!(
+            "health {}",
+            tree.config_int("Player.MaxHealth").unwrap()
+        ));
+        r.push(format!(
+            "god {}",
+            tree.config_bool("Player.GodMode").unwrap()
+        ));
+        r.push(format!(
+            "lang {}",
+            tree.config_text("Game.DefaultLanguage").unwrap()
+        ));
+        tree.set_config("Player.MoveSpeed", 7.5).unwrap();
+        r.push(format!(
+            "speed {}",
+            tree.config_f32("Player.MoveSpeed").unwrap()
+        ));
+        r.push(
+            tree.set_config("Player.MaxHealth", 3)
+                .unwrap_err()
+                .to_string(),
+        );
+        r.push(
+            tree.set_config("Player.MoveSpeed", "fast")
+                .unwrap_err()
+                .to_string(),
+        );
+        r.push(tree.config_f32("Player.Speed").unwrap_err().to_string());
+
+        r.push(format!("{} {:?}", tree.language(), tree.languages()));
+        r.push(tree.text("menu.play"));
+        let label = tree.create_label("Play", "Play").unwrap();
+        tree.add_child(tree.root(), label).unwrap();
+        tree.label(label).set_key("menu.play").unwrap();
+        r.push(tree.label(label).key().unwrap());
+        tree.set_language("th").unwrap();
+        r.push(tree.text("menu.play"));
+        r.push(tree.text_with("menu.hello", &[("name", &"Ann")]));
+        r.push(tree.set_language("xx").unwrap_err().to_string());
+
+        let track = tree.get_node(tree.root(), "Track").unwrap();
+        r.push(format!("length {:.1}", tree.path_length(track).unwrap()));
+        let (p, d) = tree.path_point(track, 5.0).unwrap();
+        r.push(format!("at {:.1} {:.1} dir {:.1}", p.x, p.z, d.x));
+    }
+}
+
 fn register(registry: &mut Registry) {
     registry
+        .register::<Settings>("Settings")
         .register::<Animator>("Animator")
         .register::<Mover>("Mover")
         .register::<Listener>("Listener")
@@ -250,7 +311,7 @@ fn engine() -> Engine {
     let library = ScriptLibrary::from_entry(ab_script_library, "abi test").unwrap();
     assert_eq!(
         library.names().collect::<Vec<_>>(),
-        ["Animator", "Mover", "Listener", "Counter", "Panicker", "Prober"]
+        ["Settings", "Animator", "Mover", "Listener", "Counter", "Panicker", "Prober"]
     );
     let world = engine.tree_mut().world_mut();
     library.register(world.resource_or_insert_with(ab_engine::scene::ScriptRegistry::new));
@@ -418,4 +479,65 @@ fn scripts_animate_models_and_drive_their_locomotion() {
     assert!(report.contains("current: Some(\"Walk\")"), "{report}");
     assert!(report.contains("action: true Action"), "{report}");
     assert!(report.contains("air: Fall"), "{report}");
+}
+
+#[test]
+fn scripts_read_the_config_and_switch_languages() {
+    let mut engine = engine();
+    let config = ab_engine::game_config::GameConfig::from_toml(
+        "[Player]\nMoveSpeed = 5.5\nMaxHealth = { value = 100, constant = true }\nGodMode = false\n\
+         [Game]\nDefaultLanguage = { value = \"en\", constant = true }\n",
+    )
+    .unwrap();
+    let mut catalog = ab_engine::localization::Localization::default().catalog;
+    catalog
+        .add_toml("[language]\ncode = \"en\"\nname = \"English\"\n[menu]\nplay = \"Play\"\nhello = \"Hi {name}\"\n")
+        .unwrap();
+    catalog
+        .add_toml("[language]\ncode = \"th\"\nname = \"ไทย\"\n[menu]\nplay = \"เล่น\"\nhello = \"สวัสดี {name}\"\n")
+        .unwrap();
+    let world = engine.tree_mut().world_mut();
+    world.insert_resource(config);
+    world.insert_resource(ab_engine::localization::Localization::new(catalog));
+    let track = ab_engine::scene_file::SceneFile::from_toml(
+        "[[node]]\nname = \"Track\"\ntype = \"Path3D\"\nposition = [0.0, 0.0, 2.0]\npath = { points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]] }\n",
+    )
+    .unwrap();
+    let tree = engine.tree_mut();
+    let track = ab_engine::scene_file::instantiate_scene(tree, &track, "test").unwrap();
+    let root = tree.root();
+    tree.add_child(root, track).unwrap();
+    let node = add(&mut engine, "Settings", "Settings", false);
+    engine.update(1.0 / 60.0);
+    engine.update(1.0 / 60.0);
+    let report = script::<Settings>(&mut engine, node).report.clone();
+    let expected = [
+        "speed 5.5",
+        "health 100",
+        "god false",
+        "lang en",
+        "speed 7.5",
+        "`Player.MaxHealth` is a constant and cannot change",
+        "`Player.MoveSpeed` is a number, not text",
+        "no config value `Player.Speed`",
+        "en [\"en\", \"th\"]",
+        "Play",
+        "menu.play",
+        "เล่น",
+        "สวัสดี Ann",
+        "no language `xx`",
+        "length 10.0",
+        "at 5.0 2.0 dir 1.0",
+    ];
+    assert_eq!(report.len(), expected.len(), "{report:#?}");
+    for (got, want) in report.iter().zip(expected) {
+        assert!(got.contains(want), "{got:?} should contain {want:?}");
+    }
+    // The keyed label follows the language.
+    let tree = engine.tree();
+    let label = tree.get_node(tree.root(), "Play").unwrap();
+    assert_eq!(
+        tree.component::<ab_engine::ui::Label>(label).unwrap().text,
+        "เล่น"
+    );
 }

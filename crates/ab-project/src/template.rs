@@ -7,7 +7,7 @@ use std::path::PathBuf;
 include!(concat!(env!("OUT_DIR"), "/template.rs"));
 
 /// A new scene: a sun, a floor and a camera (the template's main scene).
-pub const NEW_SCENE: &str = include_str!("../template/assets/scenes/main.toml");
+pub const NEW_SCENE: &str = include_str!("../template/assets/scenes/main.abscene");
 
 /// `My Cool Game!` → `my-cool-game`.
 pub fn folder_name(title: &str) -> String {
@@ -239,7 +239,7 @@ mod tests {
         let project = create(&new("Blank Slate", &dir)).unwrap();
         assert_eq!(project.title, "Blank Slate");
         assert_eq!(project.package.as_deref(), Some("blank-slate"));
-        assert_eq!(project.main_scene.as_deref(), Some("scenes/main.toml"));
+        assert_eq!(project.main_scene.as_deref(), Some("scenes/main.abscene"));
         assert!(
             !project.assets.join("game.toml").exists(),
             "project files stay out of the assets"
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn project_files_are_the_settings_and_the_input_map() {
+    fn project_files_are_the_settings_the_input_map_and_the_config() {
         let dir = temp("project-files");
         let project = create(&new("Packed", &dir)).unwrap();
         let names: Vec<_> = project
@@ -330,14 +330,14 @@ mod tests {
                 name
             })
             .collect();
-        assert_eq!(names, ["game.toml", "input.toml"]);
+        assert_eq!(names, ["game.toml", "input.toml", "config.toml"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn the_new_scene_is_the_template_scene() {
         assert_eq!(
-            template_file("assets/scenes/main.toml"),
+            template_file("assets/scenes/main.abscene"),
             Some(NEW_SCENE.as_bytes())
         );
     }

@@ -48,7 +48,64 @@ fn animate(
     Ok(())
 }
 
+fn localization<'t>(
+    c: &'t Call<'_>,
+) -> Result<std::cell::RefMut<'t, crate::localization::Localization>, CallError> {
+    c.tree
+        .world()
+        .resource_mut::<crate::localization::Localization>()
+        .ok_or_else(|| CallError::failed("the game has no languages ([localization] in game.toml)"))
+}
+
 pub(super) fn add(b: &mut Builder) {
+    b.add("locale.text", |c| {
+        let key = c.str(0)?;
+        // Without languages: the key itself, like a missing translation.
+        let text = match c
+            .tree
+            .world()
+            .resource::<crate::localization::Localization>()
+        {
+            Some(l) => l.text(key),
+            None => key.to_owned(),
+        };
+        c.push_str(&text);
+        Ok(())
+    });
+    b.add("locale.language", |c| {
+        let code = c
+            .tree
+            .world()
+            .resource::<crate::localization::Localization>()
+            .map(|l| l.language().to_owned())
+            .unwrap_or_default();
+        c.push_str(&code);
+        Ok(())
+    });
+    b.add("locale.set_language", |c| {
+        let code = c.str(0)?.to_owned();
+        localization(c)?
+            .set_language(&code)
+            .map_err(CallError::failed)?;
+        Ok(())
+    });
+    b.add("locale.languages", |c| {
+        let codes = match c
+            .tree
+            .world()
+            .resource::<crate::localization::Localization>()
+        {
+            Some(l) => l
+                .catalog
+                .languages()
+                .map(|(code, _)| code)
+                .collect::<Vec<_>>()
+                .join(","),
+            None => String::new(),
+        };
+        c.push_str(&codes);
+        Ok(())
+    });
     b.add("ui.create_canvas_layer", |c| {
         let layer = i32::try_from(c.i64(1)?)
             .map_err(|_| CallError::BadArguments("layer out of range".into()))?;

@@ -1,0 +1,12 @@
+# The game's named values, read by scripts (`tree.config_f32("Player.MoveSpeed")`).
+# A plain value is a setting scripts may change; `{ value = …, constant = true }` never
+# changes. `min`, `max` and `options` limit what a setting may become.
+
+[Player]
+MoveSpeed = { value = 5.0, min = 0.0, max = 50.0, description = "Walking speed, m/s" }
+MaxHealth = { value = 100, min = 1, constant = true, description = "Hit points at start" }
+
+[Game]
+Gravity = { value = -9.81, min = -100.0, max = 0.0 }
+# The language at start (see [localization] in game.toml).
+DefaultLanguage = { value = "en", constant = true }

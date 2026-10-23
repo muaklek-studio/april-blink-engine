@@ -1,0 +1,3 @@
+# The totem's painted wood, from its texture.
+albedo_texture = "models/totem_albedo.png"
+roughness = 0.7

@@ -17,6 +17,8 @@ pub struct CameraView {
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
+    /// Height of the view in world units for an orthographic camera (`None`: perspective).
+    pub ortho_height: Option<f32>,
 }
 
 impl CameraView {
@@ -43,7 +45,21 @@ impl CameraView {
             aspect,
             near,
             far,
+            ortho_height: None,
         }
+    }
+
+    /// An orthographic view `height` world units tall (top, front and side views): sizes
+    /// do not shrink with distance.
+    pub fn orthographic(global: &Affine3A, height: f32, aspect: f32, near: f32, far: f32) -> Self {
+        let mut view = Self::new(global, 1.0, aspect, near, far);
+        let half_y = (height * 0.5).max(1e-3);
+        let half_x = half_y * view.aspect;
+        view.projection =
+            directx::orthographic(-half_x, half_x, -half_y, half_y, view.near, view.far);
+        view.view_projection = view.projection * view.view;
+        view.ortho_height = Some(half_y * 2.0);
+        view
     }
 
     /// World-space corners of the frustum slice between `near` and `far` distances.
@@ -57,7 +73,12 @@ impl CameraView {
                 .into_iter()
                 .enumerate()
             {
-                let local = Vec3::new(sx * tan_x * d, sy * tan_y * d, -d);
+                // An orthographic box is as wide at every depth.
+                let (half_x, half_y) = match self.ortho_height {
+                    Some(height) => (height * 0.5 * self.aspect, height * 0.5),
+                    None => (tan_x * d, tan_y * d),
+                };
+                let local = Vec3::new(sx * half_x, sy * half_y, -d);
                 corners[i * 4 + j] = inverse_view.transform_point3(local);
             }
         }
@@ -107,6 +128,24 @@ impl Frustum {
 mod tests {
     use super::*;
     use ab_core::{Quat, Transform3D};
+
+    #[test]
+    fn orthographic_views_keep_sizes_at_any_depth() {
+        let view = CameraView::orthographic(&Affine3A::IDENTITY, 10.0, 2.0, 0.1, 100.0);
+        assert_eq!(view.ortho_height, Some(10.0));
+        let project = |p: Vec3| {
+            let clip = view.view_projection * p.extend(1.0);
+            clip.truncate() / clip.w
+        };
+        // The top edge is at y = 5 near and far; the right edge at x = 10 (aspect 2).
+        assert!((project(Vec3::new(0.0, 5.0, -1.0)).y - 1.0).abs() < 1e-5);
+        assert!((project(Vec3::new(0.0, 5.0, -90.0)).y - 1.0).abs() < 1e-5);
+        assert!((project(Vec3::new(10.0, 0.0, -50.0)).x - 1.0).abs() < 1e-5);
+        let corners = view.slice_corners(1.0, 50.0);
+        assert!((corners[2].y - 5.0).abs() < 1e-4 && (corners[6].y - 5.0).abs() < 1e-4);
+        assert!(Frustum::from_view_projection(&view.view_projection)
+            .contains_point(Vec3::new(9.0, 4.0, -80.0)));
+    }
 
     fn camera_at(position: Vec3, target: Vec3) -> CameraView {
         let t = Transform3D::looking_at(position, target, Vec3::Y);

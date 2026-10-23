@@ -8,7 +8,7 @@
 //! [[track]]
 //! target = "Door"            # path from the AnimationPlayer's parent
 //! property = "rotation"      # position | rotation (degrees) | scale
-//! interpolation = "smooth"   # linear | step | smooth
+//! interpolation = "smooth"   # linear | step | smooth | ease
 //! keys = [[0.0, [0.0, 0.0, 0.0]], [1.5, [0.0, 95.0, 0.0]]]
 //! ```
 //!
@@ -59,6 +59,21 @@ pub enum TrackInterpolation {
     Linear,
     /// Eased through the keys (Catmull-Rom).
     Smooth,
+    /// Slows into and out of every key (cubic, flat at each key): doors, lifts, cameras.
+    Ease,
+}
+
+impl TrackInterpolation {
+    pub const ALL: [TrackInterpolation; 4] = [Self::Step, Self::Linear, Self::Smooth, Self::Ease];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Step => "Step",
+            Self::Linear => "Linear",
+            Self::Smooth => "Smooth",
+            Self::Ease => "Ease",
+        }
+    }
 }
 
 /// One animated property of one node.
@@ -94,6 +109,54 @@ impl Track {
 
     pub fn sort(&mut self) {
         self.keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+
+    /// The track's value at `time`, in its own units (metres, degrees, factors), as the
+    /// curve editor draws it. Positions and scales are exactly what plays; rotations play
+    /// as quaternions, so between keys they can differ slightly from these angles.
+    pub fn sample(&self, time: f32) -> Option<[f32; 3]> {
+        let keys = &self.keys;
+        let first = keys.first()?;
+        let last = keys.last()?;
+        if time <= first.0 {
+            return Some(first.1);
+        }
+        if time >= last.0 {
+            return Some(last.1);
+        }
+        let next = keys.partition_point(|k| k.0 <= time);
+        let (i0, i1) = (next - 1, next);
+        let ((t0, a), (t1, b)) = (keys[i0], keys[i1]);
+        let span = (t1 - t0).max(1e-6);
+        let t = (time - t0) / span;
+        Some(match self.interpolation {
+            TrackInterpolation::Step => a,
+            TrackInterpolation::Linear => std::array::from_fn(|c| a[c] + (b[c] - a[c]) * t),
+            TrackInterpolation::Ease => {
+                let k = t * t * (3.0 - 2.0 * t);
+                std::array::from_fn(|c| a[c] + (b[c] - a[c]) * k)
+            }
+            TrackInterpolation::Smooth => {
+                let n = keys.len();
+                let tangent = |i: usize, c: usize| {
+                    let (p, q) = (i.saturating_sub(1), (i + 1).min(n - 1));
+                    (keys[q].1[c] - keys[p].1[c]) / (keys[q].0 - keys[p].0).max(1e-4)
+                };
+                let (t2, t3) = (t * t, t * t * t);
+                let (h00, h10, h01, h11) = (
+                    2.0 * t3 - 3.0 * t2 + 1.0,
+                    t3 - 2.0 * t2 + t,
+                    -2.0 * t3 + 3.0 * t2,
+                    t3 - t2,
+                );
+                std::array::from_fn(|c| {
+                    a[c] * h00
+                        + tangent(i0, c) * span * h10
+                        + b[c] * h01
+                        + tangent(i1, c) * span * h11
+                })
+            }
+        })
     }
 }
 
@@ -208,6 +271,11 @@ fn channel(track: &Track, target: usize) -> Channel {
             Interpolation::Linear,
             values.iter().map(|v| (*v, None)).collect(),
         ),
+        // Flat tangents: the cubic slows into and out of each key.
+        TrackInterpolation::Ease => (
+            Interpolation::CubicSpline,
+            values.iter().map(|v| (*v, Some([0.0; 3]))).collect(),
+        ),
         // Catmull-Rom tangents (per second), as cubic spline triples.
         TrackInterpolation::Smooth => {
             let n = values.len();
@@ -248,7 +316,10 @@ fn channel(track: &Track, target: usize) -> Channel {
             for i in 1..quats.len() {
                 quats[i] = align(quats[i], quats[i - 1]);
             }
-            if interpolation == Interpolation::CubicSpline {
+            if track.interpolation == TrackInterpolation::Ease {
+                let zero = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+                Keyframes::Rotation(quats.iter().flat_map(|&q| [zero, q, zero]).collect())
+            } else if interpolation == Interpolation::CubicSpline {
                 let n = quats.len();
                 let mut out = Vec::with_capacity(n * 3);
                 for i in 0..n {
@@ -408,5 +479,52 @@ keys = [[0.0, [0.0, 0.0, 0.0]], [0.5, [0.0, -0.1, 0.0]], [1.0, [0.0, 0.0, 0.0]]]
         track.set_key(0.0, [0.0; 3]);
         track.set_key(1.004, [2.0; 3]);
         assert_eq!(track.keys, vec![(0.0, [0.0; 3]), (1.0, [2.0; 3])]);
+    }
+}
+
+#[cfg(test)]
+mod curve_tests {
+    use super::*;
+
+    fn track(interpolation: TrackInterpolation) -> Track {
+        Track {
+            target: ".".into(),
+            property: TrackProperty::Position,
+            interpolation,
+            keys: vec![(0.0, [0.0; 3]), (1.0, [10.0, 0.0, 0.0]), (2.0, [10.0, 5.0, 0.0])],
+        }
+    }
+
+    #[test]
+    fn curves_match_what_plays() {
+        for mode in TrackInterpolation::ALL {
+            let t = track(mode);
+            let (clip, _) = ClipFile {
+                name: "c".into(),
+                length: None,
+                tracks: vec![t.clone()],
+            }
+            .build();
+            for i in 0..=40 {
+                let time = i as f32 * 0.05;
+                let ab_animation::Sample::Translation(played) = clip.channels[0].sample(time) else {
+                    panic!("a position track");
+                };
+                let drawn = Vec3::from(t.sample(time).unwrap());
+                assert!(played.distance(drawn) < 1e-3, "{mode:?} at {time}: {played} vs {drawn}");
+            }
+        }
+    }
+
+    #[test]
+    fn ease_slows_at_the_keys() {
+        let t = track(TrackInterpolation::Ease);
+        let near_start = t.sample(0.1).unwrap()[0];
+        let middle = t.sample(0.5).unwrap()[0];
+        assert!(near_start < 0.5, "slow out of the first key: {near_start}");
+        assert!((middle - 5.0).abs() < 1e-4);
+        assert_eq!(t.sample(-1.0).unwrap(), [0.0; 3]);
+        assert_eq!(t.sample(9.0).unwrap(), [10.0, 5.0, 0.0]);
+        assert!(Track { keys: vec![], ..t }.sample(0.0).is_none());
     }
 }

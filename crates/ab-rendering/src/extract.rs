@@ -102,6 +102,8 @@ pub struct CameraOverride {
     pub camera: Camera3D,
     /// Global transform of the camera (looks down its -Z).
     pub global: ab_core::Affine3A,
+    /// An orthographic view this many world units tall instead of a perspective one.
+    pub ortho_height: Option<f32>,
 }
 
 /// Draws culled per worker job: culling one is a handful of multiplies.
@@ -246,17 +248,23 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
 
     let forced = world
         .resource::<CameraOverride>()
-        .map(|o| (o.camera, o.global));
-    let Some((camera, global)) = forced.or(chosen_camera).or(fallback_camera) else {
+        .map(|o| (o.camera, o.global, o.ortho_height));
+    let Some((camera, global, ortho_height)) = forced
+        .or(chosen_camera.map(|(c, g)| (c, g, None)))
+        .or(fallback_camera.map(|(c, g)| (c, g, None)))
+    else {
         return;
     };
-    let view = CameraView::new(
-        &global,
-        camera.fov_y_degrees.clamp(1.0, 179.0).to_radians(),
-        aspect,
-        camera.near,
-        camera.far,
-    );
+    let view = match ortho_height {
+        Some(height) => CameraView::orthographic(&global, height, aspect, camera.near, camera.far),
+        None => CameraView::new(
+            &global,
+            camera.fov_y_degrees.clamp(1.0, 179.0).to_radians(),
+            aspect,
+            camera.near,
+            camera.far,
+        ),
+    };
 
     if let Some(assets) = world.resource::<RenderAssets>() {
         let frustum = Frustum::from_view_projection(&view.view_projection);

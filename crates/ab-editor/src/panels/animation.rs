@@ -52,6 +52,10 @@ pub struct AnimationPanel {
     key_rotation: bool,
     key_scale: bool,
     new_clip: Option<String>,
+    /// Show the selected track's values as curves (instead of the timeline alone).
+    curves: bool,
+    /// Which components the curves show (x, y, z).
+    curve_axes: [bool; 3],
 }
 
 impl Default for AnimationPanel {
@@ -72,6 +76,8 @@ impl Default for AnimationPanel {
             key_rotation: true,
             key_scale: false,
             new_clip: None,
+            curves: false,
+            curve_axes: [true; 3],
         }
     }
 }
@@ -145,7 +151,168 @@ impl AnimationPanel {
         self.toolbar(ui, editor, player);
         ui.separator();
         self.advance(ui, editor, player);
-        self.timeline(ui, editor, player);
+        let editable = self.file_index().is_some() && desc_of(editor, player).is_some();
+        if editable {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.curves, false, format!("{}  Timeline", icon::ROWS));
+                ui.selectable_value(&mut self.curves, true, format!("{}  Curves", icon::WAVE_SINE));
+                if self.curves {
+                    ui.separator();
+                    for (i, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                        ui.checkbox(&mut self.curve_axes[i], name);
+                    }
+                    ui.label(
+                        RichText::new("Drag a key: up/down changes its value, sideways its time")
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+            });
+        }
+        if self.curves && editable {
+            let height = (ui.available_height() * 0.35).clamp(60.0, 180.0);
+            ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+                self.timeline(ui, editor, player);
+            });
+            self.curve_editor(ui, editor, player);
+        } else {
+            self.timeline(ui, editor, player);
+        }
+    }
+
+    /// The selected track (its key's, else the first) as one curve per component: keys are
+    /// dragged in value and time.
+    fn curve_editor(&mut self, ui: &mut egui::Ui, editor: &mut Editor, player: NodeHandle) {
+        let Some(i) = self.file_index() else {
+            return;
+        };
+        let track_index = self.selected_key.map_or(0, |(t, _)| t);
+        let Some(track) = self.files[i].1.tracks.get(track_index).cloned() else {
+            super::empty_hint(ui, icon::WAVE_SINE, "Record a key first (Key in the toolbar)");
+            return;
+        };
+        let duration = self.duration(editor, player).max(0.1);
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ui.available_height().max(120.0)),
+            Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, theme::BG_0);
+        let plot = Rect::from_min_max(
+            Pos2::new(rect.left() + 48.0, rect.top() + 10.0),
+            Pos2::new(rect.right() - 10.0, rect.bottom() - 18.0),
+        );
+        // Value range: the keys and the curve between them, with a margin.
+        let samples = 160;
+        let mut low = f32::MAX;
+        let mut high = f32::MIN;
+        for s in 0..=samples {
+            let time = duration * s as f32 / samples as f32;
+            if let Some(v) = track.sample(time) {
+                for c in (0..3).filter(|&c| self.curve_axes[c]) {
+                    low = low.min(v[c]);
+                    high = high.max(v[c]);
+                }
+            }
+        }
+        if low > high {
+            return;
+        }
+        let pad = ((high - low) * 0.15).max(0.5);
+        let (low, high) = (low - pad, high + pad);
+        let x_of = |t: f32| plot.left() + t / duration * plot.width();
+        let t_of = |x: f32| ((x - plot.left()) / plot.width() * duration).clamp(0.0, duration);
+        let y_of = |v: f32| plot.bottom() - (v - low) / (high - low) * plot.height();
+        let v_of = |y: f32| low + (plot.bottom() - y) / plot.height() * (high - low);
+        // Grid: zero, and a few values.
+        for k in 0..=4 {
+            let v = low + (high - low) * k as f32 / 4.0;
+            let y = y_of(v);
+            painter.line_segment(
+                [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+                Stroke::new(1.0_f32, theme::BG_3),
+            );
+            painter.text(
+                Pos2::new(rect.left() + 4.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("{v:.2}"),
+                egui::FontId::monospace(10.0),
+                theme::TEXT_DIM,
+            );
+        }
+        if low < 0.0 && high > 0.0 {
+            let y = y_of(0.0);
+            painter.line_segment(
+                [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+                Stroke::new(1.0_f32, theme::TEXT_DIM.gamma_multiply(0.5)),
+            );
+        }
+        let colors = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z];
+        for c in (0..3).filter(|&c| self.curve_axes[c]) {
+            let points: Vec<Pos2> = (0..=samples)
+                .filter_map(|s| {
+                    let time = duration * s as f32 / samples as f32;
+                    track.sample(time).map(|v| Pos2::new(x_of(time), y_of(v[c])))
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, colors[c])));
+        }
+        // Playhead.
+        let x = x_of(self.time.min(duration));
+        painter.line_segment(
+            [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
+            Stroke::new(1.0_f32, theme::WARN),
+        );
+        painter.text(
+            plot.left_bottom() + Vec2::new(0.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            format!("{} · {} ({})", track.target, track.property.name(), track.interpolation.name()),
+            egui::FontId::proportional(10.5),
+            theme::TEXT_DIM,
+        );
+        // Keys, per component.
+        let mut edit: Option<(usize, usize, f32, f32)> = None;
+        for (k, &(time, value)) in track.keys.iter().enumerate() {
+            for c in (0..3).filter(|&c| self.curve_axes[c]) {
+                let center = Pos2::new(x_of(time), y_of(value[c]));
+                let selected = self.selected_key == Some((track_index, k));
+                painter.circle_filled(center, if selected { 5.0 } else { 4.0 }, colors[c]);
+                painter.circle_stroke(center, 5.0, Stroke::new(1.0_f32, if selected { Color32::WHITE } else { theme::BG_0 }));
+                let hit = ui.interact(
+                    Rect::from_center_size(center, Vec2::splat(12.0)),
+                    ui.id().with(("curve_key", track_index, k, c)),
+                    Sense::click_and_drag(),
+                );
+                if hit.clicked() || hit.drag_started() {
+                    self.selected_key = Some((track_index, k));
+                    self.time = time;
+                }
+                if hit.dragged() && !editor.is_playing() {
+                    if let Some(p) = hit.interact_pointer_pos() {
+                        // Hold Shift: value only.
+                        let keep_time = ui.input(|i| i.modifiers.shift);
+                        let t = if keep_time { time } else { t_of(p.x) };
+                        edit = Some((k, c, t, v_of(p.y)));
+                    }
+                }
+                hit.on_hover_text(format!("{:.2}s: {:.3}", time, value[c]));
+            }
+        }
+        if let Some((k, c, time, value)) = edit {
+            let t = &mut self.files[i].1.tracks[track_index];
+            if k < t.keys.len() {
+                let time = (time * 100.0).round() / 100.0;
+                t.keys[k].0 = time;
+                t.keys[k].1[c] = (value * 1000.0).round() / 1000.0;
+                let moved = t.keys[k];
+                t.sort();
+                let index = t.keys.iter().position(|key| *key == moved).unwrap_or(k);
+                self.selected_key = Some((track_index, index));
+                self.time = time;
+                self.changed(editor, player, i);
+                self.pose(editor, player);
+            }
+        }
     }
 
     fn empty(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
@@ -701,11 +868,9 @@ impl AnimationPanel {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
                                 ui.menu_button(RichText::new(icon::WAVE_SINE).small(), |ui| {
-                                    for (mode, name) in [
-                                        (TrackInterpolation::Linear, "Linear"),
-                                        (TrackInterpolation::Smooth, "Smooth"),
-                                        (TrackInterpolation::Step, "Step"),
-                                    ] {
+                                    for (mode, name) in
+                                        TrackInterpolation::ALL.map(|m| (m, m.name()))
+                                    {
                                         if ui
                                             .selectable_label(row.interpolation == Some(mode), name)
                                             .clicked()

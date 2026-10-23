@@ -1,0 +1,4 @@
+# A shiny red plastic. Use it on a mesh: material = { file = "materials/red_plastic.abmat" }
+color = "#c8322a"
+roughness = 0.25
+metallic = 0.0

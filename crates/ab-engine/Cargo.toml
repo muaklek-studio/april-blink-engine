@@ -15,6 +15,7 @@ ab-core.workspace = true
 ab-effects.workspace = true
 ab-ecs.workspace = true
 ab-input.workspace = true
+ab-locale.workspace = true
 ab-navigation.workspace = true
 ab-vfs.workspace = true
 ab-physics.workspace = true

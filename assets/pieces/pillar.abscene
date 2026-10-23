@@ -1,0 +1,20 @@
+# A 0.4 × 3 m pillar. Its origin is at its bottom.
+[[node]]
+name = "Pillar"
+type = "StaticBody3D"
+
+[[node]]
+name = "Mesh"
+parent = "."
+type = "MeshInstance3D"
+position = [0.0, 1.5, 0.0]
+scale = [0.4, 3.0, 0.4]
+mesh = { primitive = "cube" }
+material = { file = "materials/gold.abmat" }
+
+[[node]]
+name = "Shape"
+parent = "."
+type = "CollisionShape3D"
+position = [0.0, 1.5, 0.0]
+shape = { box = [0.4, 3.0, 0.4] }

@@ -44,7 +44,8 @@ impl InspectorPanel {
         let Some(old) = editor.describe_node(node) else {
             return;
         };
-        let editable = editor.is_editable(node);
+        let editable = editor.can_edit_properties(node);
+        let override_target = editor.is_override_target(node);
         let is_3d = tree.is_node3d(node);
         let mut desc = old.clone();
 
@@ -57,7 +58,7 @@ impl InspectorPanel {
             );
             ui.vertical(|ui| {
                 ui.add_enabled(
-                    editable && node != editor.scene_root,
+                    editable && !override_target && node != editor.scene_root,
                     egui::TextEdit::singleline(&mut desc.name)
                         .font(egui::TextStyle::Heading)
                         .desired_width(f32::INFINITY),
@@ -92,6 +93,15 @@ impl InspectorPanel {
             );
             return;
         }
+        if override_target {
+            ui.label(
+                RichText::new(format!(
+                    "{}  Part of a prefab: changes stay with this instance (overrides).",
+                    icon::LINK_SIMPLE
+                ))
+                .color(theme::ACCENT),
+            );
+        }
         ui.add_space(4.0);
         ui.separator();
 
@@ -103,19 +113,26 @@ impl InspectorPanel {
                 }
                 self.node_section(ui, editor, node, &mut desc);
                 class_sections(ui, editor, node, &class, &mut desc);
-                if old
-                    .instance
-                    .as_deref()
-                    .is_some_and(|p| p.ends_with(".toml"))
+                if let Some(missing) = editor
+                    .tree()
+                    .component::<ab_engine::scene_file::prefab::MissingInstance>(node)
+                    .map(|m| m.error.clone())
                 {
                     ui.add_space(6.0);
-                    if ui
-                        .button(format!("{}  Open instanced scene", icon::ARROW_SQUARE_OUT))
-                        .clicked()
-                    {
-                        let path = old.instance.clone().unwrap_or_default();
-                        crate::app::request_open(ui.ctx(), path);
-                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  Not loaded: {missing}. The instance and its overrides are \
+                             kept and saved as they are.",
+                            icon::WARNING
+                        ))
+                        .color(theme::WARN),
+                    );
+                } else if old
+                    .instance
+                    .as_deref()
+                    .is_some_and(ab_engine::scene_file::is_scene_path)
+                {
+                    self.prefab_section(ui, editor, node, &old);
                 }
             });
 
@@ -125,6 +142,76 @@ impl InspectorPanel {
         if let Some((path, line)) = self.open_script.take() {
             crate::panels::assets::open_script(editor, &path, line);
         }
+    }
+
+    /// A prefab instance: its file, its overrides, and what can be done with them.
+    fn prefab_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        editor: &mut Editor,
+        node: NodeHandle,
+        desc: &NodeDesc,
+    ) {
+        let path = desc.instance.clone().unwrap_or_default();
+        let overrides = desc.overrides.len();
+        section(ui, "prefab", icon::LINK_SIMPLE, "Prefab", |ui| {
+            ui.label(RichText::new(&path).monospace().color(theme::ACCENT));
+            let text = match overrides {
+                0 => "No overrides: the instance is the prefab as it is.".to_owned(),
+                1 => "1 node changed in this instance.".to_owned(),
+                n => format!("{n} nodes changed in this instance."),
+            };
+            ui.label(RichText::new(text).color(theme::TEXT_DIM));
+            for o in &desc.overrides {
+                let target = o.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+                let keys: Vec<&str> = o
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|k| *k != "path")
+                    .collect();
+                ui.label(
+                    RichText::new(format!(
+                        "{}  {target}: {}",
+                        icon::DOT_OUTLINE,
+                        keys.join(", ")
+                    ))
+                    .small()
+                    .color(theme::TEXT_DIM),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(format!("{}  Open prefab", icon::ARROW_SQUARE_OUT))
+                    .clicked()
+                {
+                    crate::app::request_open(ui.ctx(), path.clone());
+                }
+                if ui
+                    .add_enabled(
+                        overrides > 0,
+                        egui::Button::new(format!("{}  Apply to prefab", icon::UPLOAD_SIMPLE)),
+                    )
+                    .on_hover_text(
+                        "Write this instance's changes into the prefab: every instance gets them",
+                    )
+                    .clicked()
+                {
+                    if let Err(err) = editor.apply_to_prefab(node) {
+                        editor.fail(err);
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        overrides > 0,
+                        egui::Button::new(format!("{}  Revert", icon::ARROW_COUNTER_CLOCKWISE)),
+                    )
+                    .on_hover_text("Drop this instance's changes: back to the prefab")
+                    .clicked()
+                {
+                    editor.revert_overrides(node);
+                }
+            });
+        });
     }
 
     fn transform(&mut self, ui: &mut egui::Ui, editor: &mut Editor, node: NodeHandle) {
@@ -290,7 +377,7 @@ impl InspectorPanel {
                         .collect();
                     egui::ComboBox::from_id_salt("add_script")
                         .selected_text(
-                            RichText::new(format!("{}  Add script (or drop one here)", icon::PLUS))
+                            RichText::new(format!("{}  Add script…", icon::PLUS))
                                 .color(theme::TEXT_DIM),
                         )
                         .width(ui.available_width() - 16.0)
@@ -385,7 +472,7 @@ fn class_sections(
         "MeshInstance3D" if desc.mesh.is_some() => {
             mesh_section(ui, desc);
             let material = desc.material.get_or_insert_with(MaterialDesc::default);
-            material_section(ui, material);
+            material_section(ui, editor, material);
             section(ui, "shadows", icon::SUN_HORIZON, "Shadows", |ui| {
                 grid(ui, "shadows_grid", |ui| {
                     label(ui, "Cast shadows");
@@ -393,6 +480,18 @@ fn class_sections(
                     ui.end_row();
                 });
             });
+        }
+        ab_engine::scene_file::path::PATH_3D => {
+            let mut path = desc.path.clone().unwrap_or_default();
+            path_section(ui, editor, &mut path);
+            if desc.path.clone().unwrap_or_default() != path {
+                desc.path = Some(path);
+            }
+            let mut material = desc.material.clone().unwrap_or_default();
+            material_section(ui, editor, &mut material);
+            if desc.material.clone().unwrap_or_default() != material {
+                desc.material = Some(material);
+            }
         }
         "Camera3D" => camera_section(ui, desc.camera.get_or_insert_with(Default::default)),
         "DirectionalLight3D" | "OmniLight3D" | "SpotLight3D" => {
@@ -404,9 +503,22 @@ fn class_sections(
                 character_section(ui, desc.character.get_or_insert_with(Default::default));
             }
         }
-        "CollisionShape3D" => {
-            shape_section(ui, desc.shape.get_or_insert(ShapeDesc::Box([1.0; 3])));
-        }
+        "CollisionShape3D" => match desc.shape.as_mut() {
+            Some(shape) => shape_section(ui, shape),
+            // A hull or triangle mesh made by code: shown, never replaced by a box.
+            None => {
+                section(ui, "shape", icon::SHAPES, "Collision shape", |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  A convex hull or triangle mesh made by a script: it cannot \
+                             be edited here.",
+                            icon::INFO
+                        ))
+                        .color(theme::TEXT_DIM),
+                    );
+                });
+            }
+        },
         "AudioStreamPlayer" | "AudioStreamPlayer3D" => {
             audio_section(
                 ui,
@@ -816,9 +928,84 @@ fn mesh_section(ui: &mut egui::Ui, desc: &mut NodeDesc) {
     });
 }
 
-fn material_section(ui: &mut egui::Ui, m: &mut MaterialDesc) {
+/// A pick of one of the project's files of `kind` (or none).
+fn asset_choice(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    id: &str,
+    kind: AssetKind,
+    value: &mut Option<String>,
+) {
+    let shown = value.clone().unwrap_or_else(|| "None".into());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .width(ui.available_width() - 4.0)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(value.is_none(), "None").clicked() {
+                *value = None;
+            }
+            for asset in editor.assets.of_kind(kind) {
+                let chosen = value.as_deref() == Some(asset.path.as_str());
+                if ui.selectable_label(chosen, &asset.path).clicked() {
+                    *value = Some(asset.path.clone());
+                }
+            }
+        });
+}
+
+fn material_section(ui: &mut egui::Ui, editor: &Editor, m: &mut MaterialDesc) {
     section(ui, "material", icon::PALETTE, "Material", |ui| {
         grid(ui, "material_grid", |ui| {
+            label(ui, "Material file");
+            asset_choice(
+                ui,
+                editor,
+                "material_file",
+                AssetKind::Material,
+                &mut m.file,
+            );
+            ui.end_row();
+            if m.file.is_some() {
+                label(ui, "");
+                ui.label(
+                    RichText::new("Values set below override the file's.")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                ui.end_row();
+            }
+            label(ui, "Albedo map");
+            asset_choice(
+                ui,
+                editor,
+                "albedo_texture",
+                AssetKind::Image,
+                &mut m.albedo_texture,
+            );
+            ui.end_row();
+            label(ui, "Normal map");
+            asset_choice(
+                ui,
+                editor,
+                "normal_texture",
+                AssetKind::Image,
+                &mut m.normal_texture,
+            );
+            ui.end_row();
+            if m.normal_texture.is_some() {
+                label(ui, "Normal strength");
+                opt_f32(ui, &mut m.normal_scale, 1.0, 0.0..=4.0, 0.01);
+                ui.end_row();
+            }
+            label(ui, "Metal/rough map");
+            asset_choice(
+                ui,
+                editor,
+                "metallic_roughness_texture",
+                AssetKind::Image,
+                &mut m.metallic_roughness_texture,
+            );
+            ui.end_row();
             label(ui, "Albedo");
             opt_color(ui, &mut m.color, Color::WHITE, true);
             ui.end_row();
@@ -841,6 +1028,110 @@ fn material_section(ui: &mut egui::Ui, m: &mut MaterialDesc) {
             opt_bool(ui, &mut m.double_sided, false);
             ui.end_row();
         });
+    });
+}
+
+/// A path: what it builds, its settings, and its points.
+fn path_section(ui: &mut egui::Ui, editor: &Editor, p: &mut ab_engine::scene_file::PathDesc) {
+    use ab_engine::scene_file::path::PathMode;
+    section(ui, "path", icon::PATH, "Path", |ui| {
+        grid(ui, "path_grid", |ui| {
+            label(ui, "Builds");
+            let mode = PathMode::of(p).unwrap_or(PathMode::None);
+            egui::ComboBox::from_id_salt("path_mode")
+                .selected_text(mode.name())
+                .show_ui(ui, |ui| {
+                    for m in PathMode::ALL {
+                        if ui.selectable_label(mode == m, m.name()).clicked() {
+                            p.mode = (m != PathMode::None).then(|| m.name().to_owned());
+                        }
+                    }
+                });
+            ui.end_row();
+            label(ui, "Closed loop");
+            opt_bool(ui, &mut p.closed, false);
+            ui.end_row();
+            match mode {
+                PathMode::Ribbon => {
+                    label(ui, "Width (m)");
+                    opt_f32(ui, &mut p.width, 3.0, 0.01..=200.0, 0.05);
+                    ui.end_row();
+                }
+                PathMode::Tube => {
+                    label(ui, "Radius (m)");
+                    opt_f32(ui, &mut p.radius, 0.15, 0.001..=50.0, 0.005);
+                    ui.end_row();
+                    label(ui, "Sides");
+                    opt_u32(ui, &mut p.sides, 10, 3..=64);
+                    ui.end_row();
+                    label(ui, "Sag (m)");
+                    opt_f32(ui, &mut p.sag, 0.0, -50.0..=50.0, 0.02);
+                    ui.end_row();
+                }
+                PathMode::Instances => {
+                    label(ui, "Piece");
+                    let shown = p.piece.clone().unwrap_or_else(|| "None".into());
+                    egui::ComboBox::from_id_salt("path_piece")
+                        .selected_text(shown)
+                        .width(ui.available_width() - 4.0)
+                        .show_ui(ui, |ui| {
+                            for asset in editor
+                                .assets
+                                .entries
+                                .iter()
+                                .filter(|e| matches!(e.kind, AssetKind::Model | AssetKind::Scene))
+                            {
+                                if ui
+                                    .selectable_label(p.piece.as_deref() == Some(&asset.path), &asset.path)
+                                    .clicked()
+                                {
+                                    p.piece = Some(asset.path.clone());
+                                }
+                            }
+                        });
+                    ui.end_row();
+                    label(ui, "Spacing (m)");
+                    opt_f32(ui, &mut p.spacing, 2.0, 0.05..=500.0, 0.05);
+                    ui.end_row();
+                    label(ui, "Face along");
+                    opt_bool(ui, &mut p.align, true);
+                    ui.end_row();
+                }
+                PathMode::None => {}
+            }
+            if matches!(mode, PathMode::Ribbon | PathMode::Tube) {
+                label(ui, "Collision");
+                opt_bool(ui, &mut p.collide, false);
+                ui.end_row();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Points: drag them in the viewport · Ctrl+click adds one · right-click one to delete it")
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        let mut remove = None;
+        for (i, point) in p.points.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{i}")).monospace().color(theme::TEXT_DIM));
+                vec3(ui, point, 0.05, "");
+                if ui.small_button(icon::X).on_hover_text("Remove this point").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            p.points.remove(i);
+        }
+        if ui.button(format!("{}  Add point", icon::PLUS)).clicked() {
+            let next = match p.points.as_slice() {
+                [] => [0.0; 3],
+                [only] => [only[0] + 4.0, only[1], only[2]],
+                [.., a, b] => std::array::from_fn(|c| b[c] + (b[c] - a[c])),
+            };
+            p.points.push(next);
+        }
     });
 }
 
@@ -1499,6 +1790,47 @@ fn choice(
         });
 }
 
+/// A label's or button's translation key, with its text in the game's language.
+fn key_field(ui: &mut egui::Ui, editor: &Editor, key: &mut Option<String>) {
+    label(ui, "Translation key");
+    let mut text = key.clone().unwrap_or_default();
+    let edit = ui
+        .add(
+            egui::TextEdit::singleline(&mut text)
+                .hint_text("hud.score")
+                .desired_width(ui.available_width() - 4.0),
+        )
+        .on_hover_text(
+            "Shows this key's text in the game's language (locales/*.toml, listed under \
+             [localization] in game.toml). Text is what shows without a translation.",
+        );
+    if edit.changed() {
+        let trimmed = text.trim();
+        *key = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+    }
+    ui.end_row();
+    if let Some(key) = key.as_deref() {
+        let localization = editor
+            .tree()
+            .world()
+            .resource::<ab_engine::localization::Localization>()
+            .map(|l| {
+                (
+                    l.language().to_owned(),
+                    l.catalog.get(key).map(str::to_owned),
+                )
+            });
+        let (note, color) = match localization {
+            Some((language, Some(text))) => (format!("{language}: {text}"), theme::TEXT_DIM),
+            Some((language, None)) => (format!("No text for this key ({language})"), theme::WARN),
+            None => ("The project has no languages".to_owned(), theme::TEXT_DIM),
+        };
+        label(ui, "");
+        ui.label(RichText::new(note).small().color(color));
+        ui.end_row();
+    }
+}
+
 fn text_field(ui: &mut egui::Ui, text: &mut String) {
     ui.add(
         egui::TextEdit::multiline(text)
@@ -1727,6 +2059,7 @@ fn ui_sections(
                     label(ui, "Text");
                     text_field(ui, &mut l.text);
                     ui.end_row();
+                    key_field(ui, editor, &mut l.key);
                     label(ui, "Font size");
                     opt_f32(ui, &mut l.size, 24.0, 4.0..=400.0, 0.2);
                     ui.end_row();
@@ -1769,6 +2102,7 @@ fn ui_sections(
                     label(ui, "Text");
                     text_field(ui, &mut b.text);
                     ui.end_row();
+                    key_field(ui, editor, &mut b.key);
                     label(ui, "Font size");
                     opt_f32(ui, &mut b.size, default.text_style.size, 4.0..=400.0, 0.2);
                     ui.end_row();
@@ -1919,9 +2253,9 @@ mod tests {
     fn looking_at_a_node_changes_nothing() {
         let engine = crate::projects::engine_root().unwrap();
         for (assets, scene) in [
-            ("crates/ab-project/template/assets", "scenes/main.toml"),
-            ("assets", "slice/level.toml"),
-            ("assets", "slice/main.toml"),
+            ("crates/ab-project/template/assets", "scenes/main.abscene"),
+            ("assets", "slice/level.abscene"),
+            ("assets", "slice/main.abscene"),
         ] {
             check_scene(&engine.join(assets), scene);
         }

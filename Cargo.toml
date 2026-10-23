@@ -20,6 +20,7 @@ members = [
     "crates/ab-slice",
     "crates/ab-editor",
     "crates/ab-vfs",
+    "crates/ab-locale",
     "crates/ab-script-api",
     "crates/ab-script",
     "crates/ab-script-templates",
@@ -55,6 +56,7 @@ ab-ui = { path = "crates/ab-ui" }
 ab-demo-scripts = { path = "crates/ab-demo-scripts" }
 ab-engine = { path = "crates/ab-engine" }
 ab-vfs = { path = "crates/ab-vfs" }
+ab-locale = { path = "crates/ab-locale" }
 ab-script-api = { path = "crates/ab-script-api", version = "0.1.0" }
 ab-script = { path = "crates/ab-script", version = "0.1.0" }
 ab-project = { path = "crates/ab-project" }

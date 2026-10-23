@@ -3,6 +3,7 @@
 use super::ui::easing;
 use super::Builder;
 use crate::blood::{BloodNodes, BloodOptions};
+use crate::game_config::{ConfigValue, GameConfig};
 use crate::script_host::call::{Call, CallError};
 use crate::tween::{Repeat, TweenNodes};
 use ab_animation::{AnimationPlayer, Locomotion};
@@ -100,7 +101,92 @@ fn locomotion_node(tree: &mut SceneTree, node: NodeHandle) -> Result<NodeHandle,
     Ok(player)
 }
 
+fn game_config<'t>(c: &'t Call<'_>) -> Result<std::cell::Ref<'t, GameConfig>, CallError> {
+    c.tree.world().resource::<GameConfig>().ok_or_else(|| {
+        CallError::failed("the game has no config (config = \"config.toml\" in game.toml)")
+    })
+}
+
+fn path_of<'t>(c: &'t Call<'_>, node: NodeHandle) -> Result<std::cell::Ref<'t, crate::scene_file::path::Path3D>, CallError> {
+    c.tree
+        .component::<crate::scene_file::path::Path3D>(node)
+        .ok_or_else(|| CallError::Failed(format!("{node} is not a Path3D")))
+}
+
 pub(super) fn add(b: &mut Builder) {
+    b.add("path.length", |c| {
+        let node = c.node(0)?;
+        let scale = c.tree.global_transform(node).map_or(1.0, |g| Vec3::from(g.matrix3.x_axis).length());
+        let length = path_of(c, node)?.spline.length() * scale;
+        c.push_f64(f64::from(length));
+        Ok(())
+    });
+    b.add("path.point", |c| {
+        let node = c.node(0)?;
+        let global = c.tree.global_transform(node).unwrap_or_default();
+        let scale = Vec3::from(global.matrix3.x_axis).length().max(1e-6);
+        let distance = c.f32(1)? / scale;
+        let (p, d) = path_of(c, node)?
+            .spline
+            .at_distance(distance)
+            .ok_or_else(|| CallError::failed("the path has no points"))?;
+        c.push_vec3(global.transform_point3(p));
+        c.push_vec3(global.transform_vector3(d).normalize_or(Vec3::Z));
+        Ok(())
+    });
+    b.add("config.number", |c| {
+        let value = game_config(c)?
+            .number(c.str(0)?)
+            .map_err(CallError::failed)?;
+        c.push_f64(value);
+        Ok(())
+    });
+    b.add("config.int", |c| {
+        let value = game_config(c)?.int(c.str(0)?).map_err(CallError::failed)?;
+        c.push_int(value);
+        Ok(())
+    });
+    b.add("config.bool", |c| {
+        let value = game_config(c)?.bool(c.str(0)?).map_err(CallError::failed)?;
+        c.push_bool(value);
+        Ok(())
+    });
+    b.add("config.text", |c| {
+        let value = game_config(c)?
+            .text(c.str(0)?)
+            .map_err(CallError::failed)?
+            .to_owned();
+        c.push_str(&value);
+        Ok(())
+    });
+    b.add("config.set", |c| {
+        let key = c.str(0)?;
+        let raw = c.raw(1);
+        let mut config = c
+            .tree
+            .world()
+            .resource_mut::<GameConfig>()
+            .ok_or_else(|| CallError::failed("the game has no config"))?;
+        let is_int = matches!(
+            config.entry(key).map(|e| &e.default),
+            Ok(ConfigValue::Int(_))
+        );
+        // SAFETY: the value is an argument of the current call.
+        let value = if let Some(v) = raw.as_bool() {
+            ConfigValue::Bool(v)
+        } else if let Some(v) = unsafe { raw.as_str() } {
+            ConfigValue::Text(v.to_owned())
+        } else if let Some(v) = raw.as_int().filter(|_| is_int) {
+            ConfigValue::Int(v)
+        } else if let Some(v) = raw.as_float() {
+            ConfigValue::Float(v)
+        } else {
+            return Err(CallError::BadArguments(
+                "config values are bools, numbers or text".into(),
+            ));
+        };
+        config.set(key, value).map_err(CallError::failed)
+    });
     b.add("effects.spawn", |c| {
         let (parent, position) = (c.node(0)?, c.vec3(1)?);
         let name = c.str(2)?;

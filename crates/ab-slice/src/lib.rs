@@ -4,7 +4,7 @@
 //!
 //! Everything gameplay lives in scripts written with the `ab-script` SDK and registered here,
 //! so `cargo xtask hot slice` reloads them while playing. The level is
-//! `assets/slice/level.toml`; the game starts from this crate's `game.toml`.
+//! `assets/slice/level.abscene`; the game starts from this crate's `game.toml`.
 
 mod flicker;
 mod game;
@@ -20,7 +20,7 @@ pub use player::Player;
 use ab_script::Registry;
 
 /// Scene file of the level, relative to the asset directory.
-pub const LEVEL: &str = "slice/level.toml";
+pub const LEVEL: &str = "slice/level.abscene";
 /// Emitted by the player node when a relic is put on the altar.
 pub const RELIC_PLACED: &str = "relic_placed";
 /// Groups used by the level.

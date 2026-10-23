@@ -1,0 +1,20 @@
+# A 2 × 2 m floor tile to build rooms with (Build panel). Its origin is at its bottom.
+[[node]]
+name = "FloorTile"
+type = "StaticBody3D"
+
+[[node]]
+name = "Mesh"
+parent = "."
+type = "MeshInstance3D"
+position = [0.0, 0.1, 0.0]
+scale = [2.0, 0.2, 2.0]
+mesh = { primitive = "cube" }
+material = { color = "#6d6a66", roughness = 0.9 }
+
+[[node]]
+name = "Shape"
+parent = "."
+type = "CollisionShape3D"
+position = [0.0, 0.1, 0.0]
+shape = { box = [2.0, 0.2, 2.0] }

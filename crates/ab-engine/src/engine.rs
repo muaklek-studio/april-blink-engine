@@ -136,6 +136,10 @@ impl Engine {
             ab_ecs::named("ui_input", ui_input_system),
         );
         schedule.add_system(
+            ScheduleStage::PostUpdate,
+            ab_ecs::named("localize_ui", crate::localization::localize_ui_system),
+        );
+        schedule.add_system(
             ScheduleStage::PostFixedUpdate,
             ab_ecs::named("physics", physics_system),
         );

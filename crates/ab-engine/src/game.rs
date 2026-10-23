@@ -20,14 +20,18 @@
 //!
 //! ```toml
 //! title = "My Game"
-//! main_scene = "scenes/main.toml"  # in the assets
+//! main_scene = "scenes/main.abscene"  # in the assets
 //! input = "input.toml"            # optional action map, in the project folder
+//! config = "config.toml"          # optional named values (see crate::game_config)
 //! assets = "assets"               # asset folder, in the project folder (the default)
 //!
 //! [window]
 //! width = 1280
 //! height = 720
 //! fullscreen = false
+//!
+//! [localization]                  # optional: assets/locales/en.toml, th.toml
+//! languages = ["en", "th"]
 //! ```
 //!
 //! The executable understands `--headless <frames>`, `--scene <file>`, `--screenshot <png>
@@ -56,6 +60,10 @@ pub struct GameSettings {
     /// Action map, relative to the project folder, e.g. `input.toml`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
+    /// The game's named values (see [`crate::game_config`]), relative to the project
+    /// folder, e.g. `config.toml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
     /// Asset folder, relative to the project folder (default `assets`). Shipped games read
     /// their pack instead.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +77,13 @@ pub struct GameSettings {
     /// Worker threads for parallel engine work (default: every logical core but one).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_threads: Option<usize>,
+    /// The game's languages (see [`crate::localization`]).
+    #[serde(skip_serializing_if = "is_default")]
+    pub localization: crate::localization::LocalizationSettings,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// `[window]` of `game.toml`.
@@ -87,17 +102,24 @@ pub struct WindowSettings {
     pub msaa: u32,
 }
 
+/// The main scene when `game.toml` names none.
+const DEFAULT_MAIN_SCENE: &str = "main.abscene";
+/// The default main scene before scene files ended in `.abscene`.
+const LEGACY_MAIN_SCENE: &str = "main.toml";
+
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
             title: "April Blink Game".into(),
-            main_scene: "main.toml".into(),
+            main_scene: DEFAULT_MAIN_SCENE.into(),
             input: None,
+            config: None,
             assets: None,
             save_name: None,
             window: WindowSettings::default(),
             physics_hz: 60,
             worker_threads: None,
+            localization: Default::default(),
         }
     }
 }
@@ -428,8 +450,30 @@ impl Game {
         }
         tree.world_mut()
             .insert_resource(SaveStore::for_game(settings.save_folder()));
+        let mut localization = settings.localization.clone();
+        if let Some(file) = &settings.config {
+            let text = self
+                .project_file(file)
+                .with_context(|| format!("cannot read the config {file}"))?;
+            let config = crate::game_config::GameConfig::from_toml(&text)
+                .with_context(|| format!("invalid {file}"))?;
+            // `Game.DefaultLanguage` picks the language when game.toml does not.
+            if localization.default_language.is_none() {
+                localization.default_language =
+                    config.text("Game.DefaultLanguage").ok().map(str::to_owned);
+            }
+            info!(values = config.len(), "config loaded");
+            tree.world_mut().insert_resource(config);
+        }
+        if let Err(err) = crate::localization::install(tree.world_mut(), &localization) {
+            warn!("languages not loaded: {err}");
+        }
         let scene = scene.unwrap_or(&settings.main_scene);
-        Ok(change_scene(tree, scene)?)
+        match change_scene(tree, scene) {
+            // Projects from before `.abscene` that relied on the default name.
+            Err(_) if scene == DEFAULT_MAIN_SCENE => Ok(change_scene(tree, LEGACY_MAIN_SCENE)?),
+            result => Ok(result?),
+        }
     }
 
     /// Parses the command line and runs the game (windowed unless told otherwise).

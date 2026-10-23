@@ -63,6 +63,7 @@ const PROPERTIES: &[&str] = &[
     "control.expand",
     "control.mouse_filter",
     "label.text",
+    "label.key",
     "label.font_size",
     "label.color",
     "label.outline_width",
@@ -71,6 +72,7 @@ const PROPERTIES: &[&str] = &[
     "label.h_align",
     "label.v_align",
     "button.text",
+    "button.key",
     "button.disabled",
     "button.font_size",
     "progress.value",
@@ -161,6 +163,13 @@ fn unknown(path: &str) -> CallError {
 }
 
 /// Reads component `T` of `node`.
+/// A label's or button's translation key (empty without one).
+fn text_key(tree: &SceneTree, node: NodeHandle) -> String {
+    tree.component::<crate::localization::TextKey>(node)
+        .map(|k| k.key.clone())
+        .unwrap_or_default()
+}
+
 fn read<T: Component, R>(
     tree: &SceneTree,
     node: NodeHandle,
@@ -531,6 +540,10 @@ fn get(tree: &SceneTree, node: NodeHandle, path: &str) -> Result<Out, CallError>
         })?),
 
         "label.text" => Out::Str(read::<Label, _>(tree, node, "Label", |l| l.text.clone())?),
+        "label.key" => {
+            read::<Label, _>(tree, node, "Label", |_| ())?;
+            Out::Str(text_key(tree, node))
+        }
         "label.font_size" => float(read::<Label, _>(tree, node, "Label", |l| l.style.size)?),
         "label.color" => color(read::<Label, _>(tree, node, "Label", |l| l.style.color)?),
         "label.outline_width" => float(read::<Label, _>(tree, node, "Label", |l| {
@@ -548,6 +561,10 @@ fn get(tree: &SceneTree, node: NodeHandle, path: &str) -> Result<Out, CallError>
         })?),
 
         "button.text" => Out::Str(read::<Button, _>(tree, node, "Button", |b| b.text.clone())?),
+        "button.key" => {
+            read::<Button, _>(tree, node, "Button", |_| ())?;
+            Out::Str(text_key(tree, node))
+        }
         "button.disabled" => boolean(read::<Button, _>(tree, node, "Button", |b| b.disabled)?),
         "button.font_size" => float(read::<Button, _>(tree, node, "Button", |b| {
             b.text_style.size
@@ -854,6 +871,18 @@ fn set(c: &mut Call<'_>, node: NodeHandle, path: &str, value: ffi::Value) -> Cal
         "button.text" => {
             let v = s()?;
             write::<Button>(tree, node, "Button", |b| v.clone_into(&mut b.text))
+        }
+        "button.key" => {
+            let v = s()?;
+            let fallback = read::<Button, _>(tree, node, "Button", |b| b.text.clone())?;
+            crate::localization::set_text_key(c.tree, node, Some(v), &fallback);
+            Ok(())
+        }
+        "label.key" => {
+            let v = s()?;
+            let fallback = read::<Label, _>(tree, node, "Label", |l| l.text.clone())?;
+            crate::localization::set_text_key(c.tree, node, Some(v), &fallback);
+            Ok(())
         }
         "button.disabled" => {
             let v = b()?;

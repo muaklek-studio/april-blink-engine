@@ -1,7 +1,7 @@
 //! The Effect editor: every setting of a particle effect, a colour-over-life gradient with
 //! draggable stops, the layers of an effect (several emitters, a light flash), live preview
 //! controls, and saving the effect as a scene to instance or spawn from scripts
-//! (`tree.spawn_effect_scene("effects/blast.toml", ..)`).
+//! (`tree.spawn_effect_scene("effects/blast.abscene", ..)`).
 //!
 //! It edits the selected `Particles3D`, or the layers of a selected effect (a node whose
 //! children are `Particles3D`s).
@@ -316,7 +316,7 @@ impl EffectsPanel {
                 ui.horizontal(|ui| {
                     ui.label("effects/");
                     ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(140.0));
-                    ui.label(".toml");
+                    ui.label(format!(".{}", ab_engine::scene_file::SCENE_EXTENSION));
                 });
                 let name: String = self
                     .save_name
@@ -329,7 +329,7 @@ impl EffectsPanel {
                         }
                     })
                     .collect();
-                let relative = format!("effects/{name}.toml");
+                let relative = format!("effects/{name}.{}", ab_engine::scene_file::SCENE_EXTENSION);
                 if ui
                     .add_enabled(
                         !name.is_empty(),

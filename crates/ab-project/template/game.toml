@@ -1,9 +1,15 @@
 title = "{{title}}"
 # The scene the game starts with, in assets/.
-main_scene = "scenes/main.toml"
+main_scene = "scenes/main.abscene"
 # The input map, next to this file.
 input = "input.toml"
+# Named values for scripts (Player.MoveSpeed, …), next to this file.
+config = "config.toml"
 
 [window]
 width = 1280
 height = 720
+
+# Languages: assets/locales/<code>.toml; the first is the base the others fall back to.
+[localization]
+languages = ["en", "th"]

@@ -244,7 +244,7 @@ mod tests {
     fn development_reads_the_directory() {
         let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let vfs = mount_assets(&root, None);
-        assert!(vfs.exists("slice/level.toml"));
+        assert!(vfs.exists("slice/level.abscene"));
         assert!(list_assets(&vfs).iter().any(|p| p == "models/crate.glb"));
     }
 }

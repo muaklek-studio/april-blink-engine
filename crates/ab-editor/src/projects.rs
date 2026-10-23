@@ -166,6 +166,7 @@ mod tests {
             assets: dir.join(name).join("assets"),
             main_scene: None,
             input: None,
+            config: None,
             package: None,
         };
         let mut recent = RecentProjects::load(&store).unwrap();

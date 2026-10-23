@@ -10,14 +10,14 @@
 //! use ab_vfs::{FileSource, Pack, PackSource, PackWriter, Vfs};
 //!
 //! let mut writer = PackWriter::new();
-//! writer.add("scenes/main.toml", b"[[node]]\nname = \"Main\"\n".to_vec());
+//! writer.add("scenes/main.abscene", b"[[node]]\nname = \"Main\"\n".to_vec());
 //! let mut bytes = Vec::new();
 //! writer.write_to(&mut bytes).unwrap();
 //!
 //! let mut vfs = Vfs::new();
 //! vfs.mount(PackSource::new(Pack::from_bytes(bytes).unwrap()));
-//! assert!(vfs.exists("scenes/main.toml"));
-//! assert_eq!(vfs.read("scenes/main.toml").unwrap()[..8], *b"[[node]]");
+//! assert!(vfs.exists("scenes/main.abscene"));
+//! assert_eq!(vfs.read("scenes/main.abscene").unwrap()[..8], *b"[[node]]");
 //! ```
 
 mod pack;

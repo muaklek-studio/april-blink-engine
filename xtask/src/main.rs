@@ -235,7 +235,7 @@ fn editor(args: &[&str]) -> Result<()> {
         let child = command
             .arg("--project")
             .arg(workspace_root().join("assets"))
-            .args(["--scene", "slice/main.toml", "--scripts"])
+            .args(["--scene", "slice/main.abscene", "--scripts"])
             .arg(library_path(HOT_SLICE.library))
             .args(rest)
             .spawn()

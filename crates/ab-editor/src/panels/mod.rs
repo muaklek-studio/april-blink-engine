@@ -2,6 +2,8 @@
 
 pub mod animation;
 pub mod assets;
+pub mod build;
+pub mod config;
 pub mod console;
 pub mod debug;
 pub mod effects;
