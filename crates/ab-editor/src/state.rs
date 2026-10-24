@@ -13,6 +13,7 @@ use ab_engine::audio::{audio_system, AudioOutput};
 use ab_engine::effects::effects_system;
 use ab_engine::input::{InputMap, InputState};
 use ab_engine::prelude::*;
+use ab_engine::scene::ScriptPropertyDesc;
 use ab_engine::scene_file::{
     apply_environment, instantiate_scene, particle_emitter, save_scene, EnvironmentDesc, NodeDesc,
     SceneOrigin,
@@ -115,6 +116,20 @@ pub struct Editor {
     /// The build tool's copy of the piece following the pointer: outside the scene (not
     /// saved, not picked), with its bounds around its origin.
     ghost: Option<(BuildPiece, NodeHandle, ab_engine::rendering::Aabb)>,
+    /// Where [`Editor::write_project_file`] keeps the version of a file it replaces (`None`:
+    /// no backups, as in tests).
+    pub backups: Option<PathBuf>,
+}
+
+/// The folder in `store` (the editor's data folder) for backups of `project`'s files: one
+/// per project, named after it and its full path (two projects may share a name). The hash
+/// is FNV, so the folder stays the same across Rust versions.
+pub fn backup_dir(store: &Path, project: &Path) -> PathBuf {
+    let hash = ab_engine::core::utils::hash::fnv1a64_str(&project.to_string_lossy());
+    let name = project
+        .file_name()
+        .map_or_else(|| "project".into(), |n| n.to_string_lossy());
+    store.join("backups").join(format!("{name}-{hash:016x}"))
 }
 
 /// A piece of the build tool: what is placed, and how it is turned.
@@ -241,6 +256,7 @@ impl Editor {
             config_path: config_of(&project_dir),
             build: None,
             ghost: None,
+            backups: None,
         };
         editor.load_config();
         editor.new_scene();
@@ -253,6 +269,32 @@ impl Editor {
 
     pub fn tree_mut(&mut self) -> &mut SceneTree {
         self.engine.tree_mut()
+    }
+
+    /// Writes a file of the project crash-safely (the old file stays whole until the new
+    /// one is on disk), creating its folder, and keeps the version it replaces in
+    /// [`Editor::backups`].
+    pub fn write_project_file(
+        &self,
+        full: &Path,
+        contents: impl AsRef<[u8]>,
+    ) -> std::io::Result<()> {
+        if let Some(dir) = full.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let backup = self
+            .backups
+            .as_ref()
+            .zip(full.strip_prefix(self.project()).ok())
+            .map(|(dir, relative)| {
+                let mut backup = dir.join(relative).into_os_string();
+                backup.push(".bak");
+                PathBuf::from(backup)
+            });
+        match backup {
+            Some(backup) => ab_engine::core::fs::write_with_backup(full, contents, backup),
+            None => ab_engine::core::fs::atomic_write(full, contents),
+        }
     }
 
     pub fn project(&self) -> &Path {
@@ -296,6 +338,13 @@ impl Editor {
     /// Script names the game registers itself (in `lib.rs`), which new scripts must not take.
     pub fn registered_script_names(&self) -> Vec<String> {
         self.play_registry.names().map(str::to_owned).collect()
+    }
+
+    pub fn script_metadata(&self, name: &str) -> Option<Vec<ScriptPropertyDesc>> {
+        if let Some(m) = self.play_registry.metadata(name) {
+            return Some(m.to_vec());
+        }
+        self.edit_registry.metadata(name).map(|m| m.to_vec())
     }
 
     /// Adds script `name` to `node`'s scripts (one undo step), like adding a component in
@@ -390,10 +439,17 @@ impl Editor {
         let Some(path) = self.input_map.clone() else {
             return Ok(Vec::new());
         };
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        // A missing map starts empty; an unreadable one must not be replaced by the new
+        // actions alone.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        };
         let (text, added) = ab_project::script_templates::add_actions(&text, template)?;
         if !added.is_empty() {
-            std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            self.write_project_file(&path, text)
+                .with_context(|| format!("writing {}", path.display()))?;
             self.load_input_map();
         }
         Ok(added)
@@ -434,13 +490,14 @@ impl Editor {
     }
 
     fn write_scene(&mut self, path: String) {
+        if self.is_playing() {
+            // The tree holds the running game, not the scene being edited.
+            self.fail("Stop the game before saving");
+            return;
+        }
         let text = self.describe().to_toml();
         let full = self.project().join(&path);
-        let result = full
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&full, text));
-        match result {
+        match self.write_project_file(&full, text) {
             Ok(()) => {
                 self.scene_path = Some(path.clone());
                 self.modified = false;
@@ -555,6 +612,8 @@ impl Editor {
         if self.is_playing() {
             return;
         }
+        // An open gesture would merge the next edit into the restored state.
+        self.gesture = false;
         let current = self.snapshot();
         if let Some(previous) = self.history.undo(current) {
             self.restore(&previous);
@@ -567,6 +626,7 @@ impl Editor {
         if self.is_playing() {
             return;
         }
+        self.gesture = false;
         let current = self.snapshot();
         if let Some(next) = self.history.redo(current) {
             self.restore(&next);
@@ -785,6 +845,17 @@ impl Editor {
     // Edits
     // =========================================================================================
 
+    /// Whether nodes can be put under `parent`: a node of this scene, not an instance (an
+    /// instance is saved as its file, so what is added inside it would be lost).
+    pub fn can_add_children(&self, parent: NodeHandle) -> bool {
+        self.is_editable(parent) && !self.is_instance(parent)
+    }
+
+    /// Says why nodes inside an instance cannot be added, moved or deleted.
+    fn refuse_instance_contents(&mut self) {
+        self.fail(crate::i18n::t("status.instance_contents"));
+    }
+
     /// Where new nodes go: under the selection, unless it is an instance (whose contents are
     /// not saved), then beside it.
     fn insertion_parent(&self) -> NodeHandle {
@@ -813,6 +884,10 @@ impl Editor {
     /// Adds `scene` under `parent` and selects it (one undo step). Returns its root.
     fn add_scene_under(&mut self, mut scene: SceneFile, parent: NodeHandle) -> Option<NodeHandle> {
         if self.is_playing() || scene.nodes.is_empty() {
+            return None;
+        }
+        if !self.can_add_children(parent) {
+            self.refuse_instance_contents();
             return None;
         }
         scene.nodes[0].name = self.unique_name(parent, &scene.nodes[0].name, None);
@@ -876,12 +951,19 @@ impl Editor {
     /// Deletes `nodes` (with their children) as one undo step; the scene root and the
     /// contents of instances are left alone.
     pub fn delete_nodes(&mut self, nodes: &[NodeHandle]) {
+        let inside_instance = self.any_instance_contents(nodes);
         let nodes: Vec<NodeHandle> = nodes
             .iter()
             .copied()
             .filter(|&n| n != self.scene_root && self.is_editable(n))
             .collect();
-        if self.is_playing() || nodes.is_empty() {
+        if self.is_playing() {
+            return;
+        }
+        if nodes.is_empty() {
+            if inside_instance {
+                self.refuse_instance_contents();
+            }
             return;
         }
         let before = self.snapshot();
@@ -900,11 +982,20 @@ impl Editor {
         self.history.push(before);
         self.modified = true;
         self.prune_selection();
-        if nodes.len() == 1 {
+        if inside_instance {
+            self.refuse_instance_contents();
+        } else if nodes.len() == 1 {
             self.info(format!("Deleted {first}"));
         } else {
             self.info(format!("Deleted {} nodes", nodes.len()));
         }
+    }
+
+    /// Whether some of `nodes` are inside an instance (not nodes of this scene).
+    fn any_instance_contents(&self, nodes: &[NodeHandle]) -> bool {
+        nodes
+            .iter()
+            .any(|&n| n != self.scene_root && self.tree().is_valid(n) && !self.is_editable(n))
     }
 
     pub fn duplicate(&mut self, node: NodeHandle) {
@@ -919,12 +1010,19 @@ impl Editor {
 
     /// Duplicates each of `nodes` next to itself (one undo step) and selects the copies.
     pub fn duplicate_nodes(&mut self, nodes: &[NodeHandle]) {
+        let refused = self.any_instance_contents(nodes);
         let nodes: Vec<NodeHandle> = nodes
             .iter()
             .copied()
             .filter(|&n| n != self.scene_root && self.is_editable(n))
             .collect();
-        if self.is_playing() || nodes.is_empty() {
+        if self.is_playing() {
+            return;
+        }
+        if refused {
+            self.refuse_instance_contents();
+        }
+        if nodes.is_empty() {
             return;
         }
         let before = self.snapshot();
@@ -967,7 +1065,9 @@ impl Editor {
         self.modified = true;
         let count = copies.len();
         self.set_selection(copies, active);
-        if count == 1 {
+        if refused {
+            self.refuse_instance_contents();
+        } else if count == 1 {
             self.info(format!("Duplicated {first}"));
         } else {
             self.info(format!("Duplicated {count} nodes"));
@@ -1042,9 +1142,14 @@ impl Editor {
             self.fail(crate::i18n::t("status.nothing_to_paste"));
             return;
         }
-        let parent = parent
-            .filter(|&p| self.is_editable(p) && !self.is_instance(p))
-            .unwrap_or_else(|| self.paste_parent());
+        let parent = match parent {
+            Some(p) if !self.can_add_children(p) => {
+                self.refuse_instance_contents();
+                return;
+            }
+            Some(p) => p,
+            None => self.paste_parent(),
+        };
         let anchor = items
             .first()
             .and_then(|(_, global)| *global)
@@ -1066,6 +1171,8 @@ impl Editor {
                 pasted.push(node);
             }
         });
+        // Placing the nodes opened a gesture: the next edit is a step of its own.
+        self.end_gesture();
         if pasted.is_empty() {
             return;
         }
@@ -1445,7 +1552,7 @@ impl Editor {
             .collect();
         let mut own = self.describe_node(instance).ok_or("not described")?;
         own.overrides.clear();
-        std::fs::write(self.project().join(&path), contents.to_toml())
+        self.write_project_file(&self.project().join(&path), contents.to_toml())
             .map_err(|e| format!("{path}: {e}"))?;
         self.begin_edit();
         self.rebuild_node(instance, own);
@@ -1477,9 +1584,7 @@ impl Editor {
             root.rotation.take(),
             root.scale.take(),
         );
-        full.parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&full, prefab.to_toml()))
+        self.write_project_file(&full, prefab.to_toml())
             .map_err(|e| format!("{path}: {e}"))?;
         let tree = self.tree();
         let parent = tree.parent(node).ok_or("no parent")?;
@@ -1532,12 +1637,18 @@ impl Editor {
     /// Moves `node` under `new_parent` (keeping where it is in the world), at `index` among
     /// the new siblings when given.
     pub fn reparent(&mut self, node: NodeHandle, new_parent: NodeHandle, index: Option<usize>) {
-        if self.is_playing()
-            || node == self.scene_root
-            || !self.is_editable(node)
-            || !self.is_editable(new_parent)
-            || self.is_instance(new_parent)
-            || node == new_parent
+        if self.is_playing() || node == self.scene_root || node == new_parent {
+            return;
+        }
+        if self.tree().is_valid(node)
+            && self.tree().is_valid(new_parent)
+            && (!self.is_editable(node) || !self.can_add_children(new_parent))
+        {
+            self.refuse_instance_contents();
+            return;
+        }
+        if !self.is_editable(node)
+            || !self.can_add_children(new_parent)
             || self.tree().is_ancestor_of(node, new_parent)
         {
             return;
@@ -1568,6 +1679,9 @@ impl Editor {
 
     /// Moves `node` one place up (`-1`) or down (`1`) among its siblings.
     pub fn move_sibling(&mut self, node: NodeHandle, step: isize) {
+        if self.is_playing() {
+            return;
+        }
         let Some(parent) = self.tree().parent(node) else {
             return;
         };
@@ -1664,6 +1778,12 @@ impl Editor {
             tree.remove_script(node);
             for name in &scripts {
                 let _ = tree.add_script_named(node, name);
+            }
+        }
+        if scripts != old.script_list() || new.script_properties != old.script_properties {
+            for name in &scripts {
+                let properties = new.script_properties.get(name).cloned().unwrap_or_default();
+                tree.set_script_properties(node, name, properties);
             }
         }
         if new.particles != old.particles {
@@ -1995,6 +2115,55 @@ mod tests {
         });
         editor.select(None);
         nodes
+    }
+
+    /// What is added under an instance, moved into it or deleted inside it is not saved
+    /// (an instance is saved as its file): refused with a message, the scene unchanged.
+    #[test]
+    fn instance_contents_cannot_gain_or_lose_nodes() {
+        let dir = std::env::temp_dir().join(format!("ab-prefab-contents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut editor = Editor::new(dir.clone(), None, AudioOutput::Silent);
+        editor.new_scene();
+        editor.select(None);
+        editor.add_scene(crate::create::PHYSICS[0].scene(), None);
+        let wall = editor.selection.unwrap();
+        let instance = editor.create_prefab(wall, "prefabs/wall").unwrap();
+        let mesh = editor.tree().get_node(instance, "Mesh").unwrap();
+        editor.select(None);
+        editor.add_node(cube(), None);
+        let cube_node = editor.selection.unwrap();
+        editor.end_gesture();
+        let before = editor.describe();
+        let steps = editor.history.undo_len();
+        let refused = |editor: &Editor| {
+            editor
+                .status
+                .as_ref()
+                .is_some_and(|s| s.error && s.text == crate::i18n::t("status.instance_contents"))
+        };
+
+        editor.delete(mesh);
+        assert!(refused(&editor), "delete inside");
+        editor.status = None;
+        editor.reparent(cube_node, mesh, None);
+        assert!(refused(&editor), "move inside");
+        editor.status = None;
+        editor.select(Some(cube_node));
+        editor.copy_selected();
+        editor.paste(None, Some(mesh), None);
+        assert!(refused(&editor), "paste inside");
+        editor.status = None;
+        editor.duplicate(mesh);
+        assert!(refused(&editor), "duplicate inside");
+        // Rows of copies of a part of a prefab would go inside it.
+        editor.set_selection(vec![mesh], Some(mesh));
+        editor.duplicate_in_row(0, 2, 0.0);
+        assert_eq!(editor.describe(), before, "nothing changed");
+        assert_eq!(editor.history.undo_len(), steps, "no undo steps");
+        assert!(editor.tree().is_valid(mesh));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2486,6 +2655,60 @@ mod tests {
         assert_eq!(other.scene_path.as_deref(), Some("old.abscene"));
         assert!(dir.join("old.abscene").is_file() && dir.join("old.toml").is_file());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saving_keeps_the_replaced_version_as_a_backup() {
+        let root = std::env::temp_dir().join(format!("ab-editor-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("game");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut editor = Editor::new(project.clone(), None, AudioOutput::Silent);
+        let backups = backup_dir(&root.join("store"), &project);
+        assert_ne!(backups, backup_dir(&root.join("store"), &root.join("other/game")));
+        editor.backups = Some(backups.clone());
+
+        editor.save_as("levels/a");
+        let first = std::fs::read_to_string(project.join("levels/a.abscene")).unwrap();
+        assert!(!backups.exists(), "a new file has nothing to back up");
+        editor.add_node(
+            NodeDesc {
+                name: "Extra".into(),
+                ..Default::default()
+            },
+            None,
+        );
+        editor.save();
+        let backup = backups.join("levels/a.abscene.bak");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), first);
+        assert_ne!(
+            std::fs::read_to_string(project.join("levels/a.abscene")).unwrap(),
+            first
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_input_map_is_not_overwritten() {
+        let project = std::env::temp_dir().join(format!("ab-editor-input-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("game.toml"),
+            "title = \"T\"\ninput = \"input.toml\"\n",
+        )
+        .unwrap();
+        // Not UTF-8: reading it fails, and the map must stay as it is.
+        let original = b"[actions]\njump = [\"Space\"]\n# \xff\n".to_vec();
+        std::fs::write(project.join("input.toml"), &original).unwrap();
+        let mut editor = Editor::new(project.clone(), None, AudioOutput::Silent);
+        let template = ab_project::script_templates::SCRIPT_TEMPLATES
+            .iter()
+            .find(|t| t.actions().next().is_some())
+            .expect("a template with actions");
+        assert!(editor.add_template_actions(template).is_err());
+        assert_eq!(std::fs::read(project.join("input.toml")).unwrap(), original);
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]

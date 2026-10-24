@@ -408,7 +408,7 @@ impl Generator for Dungeon {
             let rz = rng.int(1, (d - rd - 1) as i64) as usize;
             // One cell apart from the others at least.
             let clear = rooms.iter().all(|&(x, z, ow, od)| {
-                rx + rw + 1 <= x || x + ow + 1 <= rx || rz + rd + 1 <= z || z + od + 1 <= rz
+                rx + rw < x || x + ow < rx || rz + rd < z || z + od < rz
             });
             if clear {
                 rooms.push((rx, rz, rw, rd));

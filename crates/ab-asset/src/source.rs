@@ -29,9 +29,29 @@ pub fn normalize_path(path: &str) -> Option<String> {
 /// Resolves `relative` against the directory containing `base` (both asset paths).
 pub(crate) fn resolve_relative(base: &str, relative: &str) -> Option<String> {
     let dir = base.rsplit_once('/').map_or("", |(dir, _)| dir);
-    // glTF URIs are percent-encoded; decode the common space escape.
-    let relative = relative.replace("%20", " ");
+    // glTF URIs are percent-encoded (RFC 3986).
+    let relative = percent_decode(relative);
     normalize_path(&format!("{dir}/{relative}"))
+}
+
+/// Decodes `%XX` escapes (UTF-8). Malformed escapes are kept as they are.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
 /// Reads assets from a directory on disk.
@@ -141,6 +161,15 @@ mod tests {
         assert_eq!(
             resolve_relative("models/hero/hero.gltf", "textures/skin%20d.png").as_deref(),
             Some("models/hero/textures/skin d.png")
+        );
+        assert_eq!(
+            resolve_relative("a/m.gltf", "t%23ex%C3%A9%2Bx.png").as_deref(),
+            Some("a/t#exé+x.png"),
+            "every escape is decoded, UTF-8 included"
+        );
+        assert_eq!(
+            resolve_relative("m.gltf", "100%.png").as_deref(),
+            Some("100%.png")
         );
         assert_eq!(
             resolve_relative("hero.gltf", "../x.png"),

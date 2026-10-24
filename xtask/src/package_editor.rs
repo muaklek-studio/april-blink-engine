@@ -87,7 +87,7 @@ pub fn package(args: &[&str]) -> Result<()> {
                     ab_project::archive::zip(&dir, &root, &file)?;
                     file
                 }
-                Platform::Linux => {
+                Platform::Linux | Platform::MacOs => {
                     let file = out.join(format!("{root}.tar.gz"));
                     ab_project::archive::tar_gz(&dir, &root, &file)?;
                     file
@@ -221,10 +221,10 @@ fn write_texts(dir: &Path, platform: Platform) -> Result<()> {
     let editor = platform.executable("ab-editor");
     let run = match platform {
         Platform::Windows => format!("Double-click `{editor}`."),
-        Platform::Linux => format!("Run `./{editor}`."),
+        Platform::Linux | Platform::MacOs => format!("Run `./{editor}`."),
     };
     let windows_from_linux = match platform {
-        Platform::Linux => {
+        Platform::Linux | Platform::MacOs => {
             "\nTo export Windows games from Linux, also install cargo-xwin, clang and lld:\n  \
              cargo install --locked cargo-xwin\n"
         }

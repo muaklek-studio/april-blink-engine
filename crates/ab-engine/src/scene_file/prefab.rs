@@ -14,6 +14,9 @@
 //! overrides = [{ path = "Light", light = { color = "#ff8040" } }, { path = "Shade", visible = false }]
 //! ```
 //!
+//! A key the instance went back to the default for, while the prefab sets it, is written
+//! as `{}` (unset): `{ path = "Shade", scale = {}, body = { mass = {} } }`.
+//!
 //! Loading builds the prefab as it is now with the overrides on top, so a change to the
 //! prefab reaches every instance while each keeps its own changes. Saving compares each
 //! instance with its prefab again and writes what differs.
@@ -65,16 +68,26 @@ fn to_table(desc: &NodeDesc) -> toml::Table {
     }
 }
 
-/// `over` merged into `base`: tables key by key, anything else replaced.
+/// `over` merged into `base`: tables key by key, anything else replaced. An empty table
+/// (`{}`) unsets the key (the instance went back to the default the prefab overrode; a
+/// key the prefab no longer sets stays unset).
 fn merge(base: &mut toml::Table, over: &toml::Table) {
     for (key, value) in over {
         match (base.get_mut(key), value) {
+            (_, toml::Value::Table(over)) if over.is_empty() => {
+                base.remove(key);
+            }
             (Some(toml::Value::Table(base)), toml::Value::Table(over)) => merge(base, over),
             _ => {
                 base.insert(key.clone(), value.clone());
             }
         }
     }
+}
+
+/// The override value that unsets a key (see [`merge`]).
+fn unset() -> toml::Value {
+    toml::Value::Table(toml::Table::new())
 }
 
 /// Applies `overrides` to the prefab `scene`. Returns the ones it could not apply, with
@@ -106,7 +119,11 @@ pub fn apply_overrides(
         fields.remove("path");
         merge(&mut table, &fields);
         match toml::Value::Table(table).try_into::<NodeDesc>() {
-            Ok(desc) => scene.nodes[index] = desc,
+            Ok(mut desc) => {
+                // `script` and `scripts` as saving writes them.
+                desc.set_script_list(desc.script_list());
+                scene.nodes[index] = desc;
+            }
             Err(err) => unmatched.push((o.clone(), format!("`{path}`: {err}"))),
         }
     }
@@ -114,8 +131,8 @@ pub fn apply_overrides(
 }
 
 /// The overrides that turn `prefab` into `live` (the same nodes, changed): per node, the
-/// keys whose values differ. A key the prefab sets and the instance no longer has is
-/// written as the empty or default value of its kind.
+/// keys whose values differ. A key the prefab sets and the instance no longer has (back to
+/// its default) is written as `{}`, which unsets it on load.
 pub fn diff_overrides(prefab: &SceneFile, live: &SceneFile) -> Vec<toml::Table> {
     let prefab_paths = node_paths(prefab);
     let live_paths = node_paths(live);
@@ -136,11 +153,9 @@ pub fn diff_overrides(prefab: &SceneFile, live: &SceneFile) -> Vec<toml::Table> 
                 changed.insert(key.clone(), diff_value(before.get(key), value));
             }
         }
-        for (key, value) in &before {
+        for key in before.keys() {
             if !skip(key) && !after.contains_key(key) {
-                if let Some(cleared) = cleared(key, value) {
-                    changed.insert(key.clone(), cleared);
-                }
+                changed.insert(key.clone(), unset());
             }
         }
         if !changed.is_empty() {
@@ -153,7 +168,7 @@ pub fn diff_overrides(prefab: &SceneFile, live: &SceneFile) -> Vec<toml::Table> 
     overrides
 }
 
-/// For tables, only the keys that changed (merged back on load).
+/// For tables, only the keys that changed (merged back on load), and the dropped ones unset.
 fn diff_value(before: Option<&toml::Value>, after: &toml::Value) -> toml::Value {
     match (before, after) {
         (Some(toml::Value::Table(b)), toml::Value::Table(a)) => {
@@ -163,24 +178,14 @@ fn diff_value(before: Option<&toml::Value>, after: &toml::Value) -> toml::Value 
                     changed.insert(key.clone(), diff_value(b.get(key), value));
                 }
             }
-            // Keys dropped from a table cannot be expressed by merging: write it whole.
-            if b.keys().any(|k| !a.contains_key(k)) {
-                return after.clone();
+            for key in b.keys() {
+                if !a.contains_key(key) {
+                    changed.insert(key.clone(), unset());
+                }
             }
             toml::Value::Table(changed)
         }
         _ => after.clone(),
-    }
-}
-
-/// The value meaning "not set" for a key the instance dropped.
-fn cleared(key: &str, value: &toml::Value) -> Option<toml::Value> {
-    match (key, value) {
-        ("visible", _) => Some(true.into()),
-        (_, toml::Value::Array(_)) => Some(toml::Value::Array(Vec::new())),
-        (_, toml::Value::Table(_)) => Some(toml::Value::Table(toml::Table::new())),
-        (_, toml::Value::Boolean(_)) => Some(false.into()),
-        _ => None,
     }
 }
 
@@ -227,6 +232,7 @@ pub fn is_prefab_instance(tree: &SceneTree, node: NodeHandle) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::format::BodyDesc;
     use super::*;
 
     const LAMP: &str = r##"
@@ -274,6 +280,57 @@ material = { color = "#808080", roughness = 0.5 }
         let light = diff[0]["light"].as_table().unwrap();
         assert_eq!(light.keys().collect::<Vec<_>>(), ["color"]);
         assert!(diff_overrides(&prefab, &prefab).is_empty());
+    }
+
+    /// Keys the instance no longer has (back to the default) come back from the diff: the
+    /// prefab's value does not return on load.
+    #[test]
+    fn dropped_keys_round_trip() {
+        const PREFAB: &str = r##"
+[[node]]
+name = "Crate"
+type = "Node3D"
+
+[[node]]
+name = "Body"
+parent = "."
+type = "RigidBody3D"
+position = [0.0, 2.0, 0.0]
+scale = [2.0, 2.0, 2.0]
+script = "Spin"
+body = { mass = 5.0, friction = 0.2 }
+
+[[node]]
+name = "Mesh"
+parent = "Body"
+type = "MeshInstance3D"
+cast_shadows = false
+mesh = { primitive = "cube" }
+"##;
+        let prefab = SceneFile::from_toml(PREFAB).unwrap();
+        let mut live = prefab.clone();
+        let body = &mut live.nodes[1];
+        body.position = None;
+        body.scale = None;
+        body.set_script_list(vec!["Spin".into(), "Wobble".into()]);
+        body.body.as_mut().unwrap().mass = None;
+        live.nodes[2].cast_shadows = None;
+
+        let diff = diff_overrides(&prefab, &live);
+        let mut loaded = prefab.clone();
+        let unmatched = apply_overrides(&mut loaded, &diff);
+        assert!(unmatched.is_empty(), "{unmatched:?}");
+        assert_eq!(loaded, live, "overrides: {diff:?}");
+
+        // A table the instance dropped entirely.
+        let mut live = prefab.clone();
+        live.nodes[1].body = None;
+        live.nodes[1].set_script_list(Vec::new());
+        let diff = diff_overrides(&prefab, &live);
+        let mut loaded = prefab.clone();
+        assert!(apply_overrides(&mut loaded, &diff).is_empty());
+        assert_eq!(loaded.nodes[1].script_list(), Vec::<String>::new());
+        assert_eq!(loaded.nodes[1].body.clone().unwrap_or_default(), BodyDesc::default());
     }
 
     #[test]

@@ -605,7 +605,7 @@ impl AnimationPanel {
     }
 
     /// Puts the animated nodes back where they were before the preview.
-    fn end_preview(&mut self, editor: &mut Editor) {
+    pub fn end_preview(&mut self, editor: &mut Editor) {
         self.playing = false;
         let Some(preview) = self.preview.take() else {
             return;
@@ -732,7 +732,7 @@ impl AnimationPanel {
         match file
             .to_toml()
             .map_err(|e| e.to_string())
-            .and_then(|text| std::fs::write(&full, text).map_err(|e| e.to_string()))
+            .and_then(|text| editor.write_project_file(&full, text).map_err(|e| e.to_string()))
         {
             Ok(()) => {
                 editor.info(format!("Saved {path}"));
@@ -938,9 +938,11 @@ impl AnimationPanel {
             && !ui.ctx().egui_wants_keyboard_input()
         {
             if let (Some(i), Some((track, key))) = (self.file_index(), self.selected_key.take()) {
-                let keys = &mut self.files[i].1.tracks[track].keys;
-                if key < keys.len() {
-                    keys.remove(key);
+                // The selection may be from another clip (the game switched it).
+                if let Some(t) = self.files[i].1.tracks.get_mut(track) {
+                    if key < t.keys.len() {
+                        t.keys.remove(key);
+                    }
                 }
                 self.changed(editor, player, i);
                 self.pose(editor, player);

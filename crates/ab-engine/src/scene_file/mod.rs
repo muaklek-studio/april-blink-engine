@@ -7,7 +7,12 @@
 //! The format is a flat list of nodes like Godot's `.tscn`: the first node is the scene's
 //! root, every other names its `parent` by path from the root (`"."` is the root itself).
 //!
+//! A file starts with its `format_version` ([`SCENE_FORMAT_VERSION`]; files without one are
+//! version 1). Older versions are upgraded when read; newer ones are refused.
+//!
 //! ```toml
+//! format_version = 1
+//!
 //! [environment]
 //! background = "#05060a"
 //! fog_density = 0.05
@@ -91,7 +96,7 @@ pub use format::{
     AnimationDesc, AudioDesc, BodyDesc, BoxDesc, ButtonDesc, CameraDesc, CanvasDesc, CharacterDesc,
     ColorDesc, ControlDesc, EnvironmentDesc, ImageDesc, JointDesc, LabelDesc, LightDesc,
     GeneratorDesc, MaterialDesc, MeshDesc, NodeDesc, PathDesc, PanelDesc, ParticlesDesc, ProgressDesc, RagdollDesc,
-    SceneFile, ShapeDesc, TimerDesc,
+    SceneFile, ShapeDesc, TimerDesc, SCENE_FORMAT_VERSION,
 };
 pub use load::{
     apply_environment, install_clips, instantiate_scene, load_animations, load_scene,

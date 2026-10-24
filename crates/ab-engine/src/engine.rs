@@ -274,6 +274,8 @@ impl Engine {
                 }
             }
         }
+        // Scripts a reload found running (one that asked for it from its own callback).
+        self.tree.reload_pending_scripts();
         let frame_start = Instant::now();
         self.handle_debug_keys();
         self.schedule.reset_timings();

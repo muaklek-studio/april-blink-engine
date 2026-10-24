@@ -545,6 +545,19 @@ fn scenes_and_files(b: &mut Builder) {
         }
         Ok(())
     });
+    // The slot as JSON (a text saved with `save.write` comes back quoted): what
+    // `Saves::load` parses, so a value saved as a JSON string (a `String`, an enum variant)
+    // loads back.
+    b.add("save.read_json", |c| {
+        let store = store(c.tree)?;
+        if let Some(value) = store
+            .load::<serde_json::Value>(c.str(0)?)
+            .map_err(CallError::failed)?
+        {
+            c.push_str(&value.to_string());
+        }
+        Ok(())
+    });
     b.add("save.exists", |c| {
         let store = store(c.tree)?;
         c.push_bool(store.exists(c.str(0)?));

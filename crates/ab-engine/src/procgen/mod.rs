@@ -295,7 +295,7 @@ impl<'a> Context<'a> {
             let inverse = global.inverse();
             let origin = inverse.transform_point3(Vec3::new(at.x, bounds.max.y + 1.0, at.z));
             let dir = inverse.transform_vector3(Vec3::NEG_Y);
-            for tri in mesh.indices.chunks_exact(3) {
+            for tri in mesh.indices.as_chunks::<3>().0 {
                 let p = |i: u32| Vec3::from(mesh.vertices[i as usize].position);
                 if let Some(t) = ray_triangle(origin, dir, p(tri[0]), p(tri[1]), p(tri[2])) {
                     let hit = global.transform_point3(origin + dir * t);

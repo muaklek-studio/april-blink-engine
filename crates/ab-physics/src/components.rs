@@ -61,9 +61,11 @@ pub struct PhysicsBody3D {
     pub friction: f32,
     /// Restitution: 0 = no bounce, 1 = perfectly elastic.
     pub bounce: f32,
-    /// Layers this body is on (bit mask).
+    /// Layers this body is on (bit mask): what it is.
     pub collision_layer: u32,
-    /// Layers this body interacts with (bit mask).
+    /// Layers this body responds to (bit mask), all by default. Two solid bodies collide
+    /// when each one's mask contains the other's layer, so either can opt out alone; an
+    /// area sees the bodies its own mask selects.
     pub collision_mask: u32,
     linear_velocity: Vec3,
     angular_velocity: Vec3,
@@ -86,7 +88,7 @@ impl PhysicsBody3D {
             friction: 0.5,
             bounce: 0.0,
             collision_layer: 1,
-            collision_mask: 1,
+            collision_mask: u32::MAX,
             linear_velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
             sleeping: false,

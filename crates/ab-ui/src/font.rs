@@ -44,7 +44,7 @@ const MAX_ATLAS_SIZE: u32 = 4096;
 
 /// Reference to a font in [`Fonts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct FontId(u32);
+pub struct FontId(pub(crate) u32);
 
 impl FontId {
     /// The built-in font, always present.
@@ -138,6 +138,9 @@ pub struct Fonts {
     packer: ShelfPacker,
     pixels: Vec<u8>,
     revision: u64,
+    /// Bumped whenever shaping results may change (fonts added, fallbacks changed), so
+    /// cached text layouts know to reshape.
+    generation: u64,
     snapshot: Option<GlyphAtlasImage>,
 }
 
@@ -152,6 +155,7 @@ impl Fonts {
             packer: ShelfPacker::new(size),
             pixels: vec![0; (size * size * 4) as usize],
             revision: 1,
+            generation: 0,
             snapshot: None,
         }
     }
@@ -160,6 +164,8 @@ impl Fonts {
     pub fn add(&mut self, bytes: impl Into<Vec<u8>>) -> Result<FontId, UiError> {
         let data = FontData::parse(bytes.into().into_boxed_slice())?;
         self.fonts.push(data);
+        // Text styled with this id was shaped with the default font until now.
+        self.generation += 1;
         Ok(FontId(self.fonts.len() as u32 - 1))
     }
 
@@ -170,6 +176,12 @@ impl Fonts {
             .into_iter()
             .filter(|f| (f.0 as usize) < self.fonts.len())
             .collect();
+        self.generation += 1;
+    }
+
+    /// Changes whenever the same text may shape differently (a font added, new fallbacks).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn fallbacks(&self) -> &[FontId] {

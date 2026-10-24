@@ -119,7 +119,7 @@ pub fn build(tree: &mut SceneTree, node: NodeHandle) -> Result<(), String> {
     let collide = d.collide.unwrap_or(false);
     let shape = collide.then(|| {
         let vertices: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(v.position)).collect();
-        let indices: Vec<[u32; 3]> = mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+        let indices: Vec<[u32; 3]> = mesh.indices.as_chunks::<3>().0.to_vec();
         Shape::trimesh(vertices, indices)
     });
     mesh.compute_tangents();

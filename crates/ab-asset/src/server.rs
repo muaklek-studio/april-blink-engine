@@ -20,6 +20,11 @@ pub struct AssetServer {
     scenes: HashMap<String, Arc<GltfScene>>,
     textures: HashMap<(String, ColorSpace), TextureHandle>,
     audio: HashMap<String, AudioStream>,
+    /// `RenderAssets::id` the cached textures and scenes were registered in, and
+    /// `AnimationLibrary::id` of the scenes' clips. Loading into other ones drops the stale
+    /// handles instead of returning them.
+    render_id: Option<u64>,
+    library_id: Option<u64>,
 }
 
 impl AssetServer {
@@ -29,6 +34,23 @@ impl AssetServer {
             scenes: HashMap::new(),
             textures: HashMap::new(),
             audio: HashMap::new(),
+            render_id: None,
+            library_id: None,
+        }
+    }
+
+    /// Forgets cached handles issued by a different `RenderAssets` than `render`.
+    fn bind_render(&mut self, render: &RenderAssets) {
+        if self.render_id.replace(render.id()) != Some(render.id()) {
+            self.textures.clear();
+            self.scenes.clear();
+        }
+    }
+
+    /// Forgets cached scenes whose clips live in a different library than `library`.
+    fn bind_library(&mut self, library: &AnimationLibrary) {
+        if self.library_id.replace(library.id()) != Some(library.id()) {
+            self.scenes.clear();
         }
     }
 
@@ -72,6 +94,7 @@ impl AssetServer {
         color_space: ColorSpace,
     ) -> Result<TextureHandle, AssetError> {
         let path = Self::normalize(path)?;
+        self.bind_render(render);
         if let Some(&handle) = self.textures.get(&(path.clone(), color_space)) {
             return Ok(handle);
         }
@@ -84,7 +107,9 @@ impl AssetServer {
         Ok(handle)
     }
 
-    /// Loads a `.gltf`/`.glb` (cached per path). Instantiate the result with
+    /// Loads a `.gltf`/`.glb` (cached per path, for the `render` / `animations` it was loaded
+    /// into: passing other ones reloads, since the cached handles would not be theirs).
+    /// Instantiate the result with
     /// [`instantiate_gltf`](crate::instantiate_gltf).
     pub fn load_gltf(
         &mut self,
@@ -93,6 +118,8 @@ impl AssetServer {
         path: &str,
     ) -> Result<Arc<GltfScene>, AssetError> {
         let path = Self::normalize(path)?;
+        self.bind_render(render);
+        self.bind_library(animations);
         if let Some(scene) = self.scenes.get(&path) {
             return Ok(scene.clone());
         }

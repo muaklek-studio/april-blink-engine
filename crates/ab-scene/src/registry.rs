@@ -1,4 +1,5 @@
 use crate::script::{Guarded, NodeScript};
+use crate::property::ScriptPropertyDesc;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub type ScriptFactory = Arc<dyn Fn() -> Box<dyn NodeScript> + Send + Sync>;
 pub struct ScriptRegistry {
     factories: BTreeMap<String, ScriptFactory>,
     fallback: Option<ScriptFactory>,
+    metadata: BTreeMap<String, Vec<ScriptPropertyDesc>>,
 }
 
 /// Monomorphised in the crate that registers `T`, so the panic guard uses that crate's `std`.
@@ -37,16 +39,33 @@ impl ScriptRegistry {
         factory: impl Fn() -> Box<dyn NodeScript> + Send + Sync + 'static,
     ) -> &mut Self {
         self.factories.insert(name.to_owned(), Arc::new(factory));
+        // A new script under this name does not export what the old one did.
+        self.metadata.remove(name);
         self
     }
 
     /// Takes over every entry of `other` (newer versions win); keeps this registry's
     /// fallback unless `other` has one.
     pub fn extend(&mut self, other: ScriptRegistry) {
+        for name in other.factories.keys() {
+            self.metadata.remove(name);
+        }
         self.factories.extend(other.factories);
+        self.metadata.extend(other.metadata);
         if other.fallback.is_some() {
             self.fallback = other.fallback;
         }
+    }
+
+    /// Describes the properties the script registered as `name` exports (replacing any
+    /// earlier description).
+    pub fn register_metadata(&mut self, name: &str, props: Vec<ScriptPropertyDesc>) {
+        self.metadata.insert(name.to_owned(), props);
+    }
+
+    /// The properties the script registered as `name` exports, if it describes them.
+    pub fn metadata(&self, name: &str) -> Option<&[ScriptPropertyDesc]> {
+        self.metadata.get(name).map(Vec::as_slice)
     }
 
     /// A new instance of the script registered as `name`, or of the fallback.

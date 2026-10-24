@@ -122,7 +122,7 @@ fn place(tree: &mut SceneTree, node: NodeHandle, outputs: Vec<Output>) -> Result
                 let shape = collide.then(|| {
                     Shape::trimesh(
                         mesh.vertices.iter().map(|v| Vec3::from(v.position)).collect::<Vec<_>>(),
-                        mesh.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect::<Vec<_>>(),
+                        mesh.indices.as_chunks::<3>().0.to_vec(),
                     )
                 });
                 mesh.compute_tangents();

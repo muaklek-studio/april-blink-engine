@@ -20,6 +20,9 @@ pub struct Snapshot {
 pub struct History {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// Old steps dropped over [`LIMIT`]: [`History::undo_len`] counts them, so a length
+    /// taken before a group of edits still finds the group after the oldest steps go.
+    dropped: usize,
 }
 
 impl History {
@@ -31,6 +34,7 @@ impl History {
         self.undo.push(before);
         if self.undo.len() > LIMIT {
             self.undo.remove(0);
+            self.dropped += 1;
         }
         self.redo.clear();
     }
@@ -48,14 +52,15 @@ impl History {
         Some(next)
     }
 
-    /// Undo steps recorded.
+    /// Undo steps recorded, counting those dropped over the limit (a position for
+    /// [`History::truncate_undo`], which stays valid while new steps push old ones out).
     pub fn undo_len(&self) -> usize {
-        self.undo.len()
+        self.dropped + self.undo.len()
     }
 
     /// Forgets the undo steps after the first `len` (they are replaced by one step).
     pub fn truncate_undo(&mut self, len: usize) {
-        self.undo.truncate(len);
+        self.undo.truncate(len.saturating_sub(self.dropped));
     }
 
     pub fn can_undo(&self) -> bool {
@@ -69,6 +74,7 @@ impl History {
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.dropped = 0;
     }
 }
 
@@ -103,5 +109,29 @@ mod tests {
         // A new edit drops the redo branch.
         history.push(snap("x"));
         assert!(!history.can_redo());
+    }
+
+    /// `Editor::as_one_step` groups edits by the undo length before them: with a full
+    /// history the length used to stay at the limit, so a group was never folded.
+    #[test]
+    fn grouping_works_with_a_full_history() {
+        let mut history = History::default();
+        for i in 0..LIMIT {
+            history.push(snap(&format!("old{i}")));
+        }
+        let steps = history.undo_len();
+        history.push(snap("a"));
+        history.push(snap("b"));
+        history.push(snap("c"));
+        assert!(history.undo_len() > steps, "the group's steps are seen");
+        history.truncate_undo(steps);
+        history.push(snap("before"));
+        assert_eq!(history.undo(snap("now")), Some(snap("before")), "one step");
+        // The older steps are still there (minus those pushed out by the group).
+        assert_eq!(
+            history.undo(snap("x")),
+            Some(snap(&format!("old{}", LIMIT - 1)))
+        );
+        assert!(history.undo.len() <= LIMIT);
     }
 }

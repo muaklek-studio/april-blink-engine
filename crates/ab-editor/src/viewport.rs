@@ -537,6 +537,13 @@ impl Viewport {
         }
     }
 
+    /// The view camera's rotation: the orbit camera's, or an orthographic view's own.
+    fn view_rotation(&self) -> Quat {
+        self.kind
+            .rotation()
+            .unwrap_or_else(|| self.camera.rotation())
+    }
+
     /// An orthographic view's height in world units: what a perspective camera at the
     /// same distance sees, so switching views keeps the scale.
     fn ortho_height(&self) -> Option<f32> {
@@ -922,8 +929,7 @@ impl Viewport {
                             hit = Vec3::new(world.x, hit.y, world.z);
                         }
                         if self.options.snap.enabled || ui.input(|i| i.modifiers.command) {
-                            let step = self.options.snap.translate;
-                            hit = (hit / step).round() * step;
+                            hit = snap_point(hit, self.options.snap.translate);
                         }
                         let local = global.inverse().transform_point3(hit);
                         let mut points = path.desc.points.clone();
@@ -1487,7 +1493,16 @@ impl Viewport {
             _ => [Vec3::X, Vec3::Y, Vec3::Z],
         };
         let colors = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z];
-        let pointer = ui.input(|i| i.pointer.hover_pos());
+        // A drag starts once the pointer has moved a few pixels: what it grabbed is what
+        // was under the pointer where the button went down (the centre handle is smaller
+        // than that move).
+        let starting =
+            response.drag_started_by(egui::PointerButton::Primary) && !ui.input(|i| i.modifiers.alt);
+        let pointer = if starting {
+            ui.input(|i| i.pointer.press_origin())
+        } else {
+            ui.input(|i| i.pointer.hover_pos())
+        };
 
         // Hover test.
         let mut hovered = None;
@@ -1515,16 +1530,19 @@ impl Viewport {
         }
 
         // Start a drag.
-        if response.drag_started_by(egui::PointerButton::Primary) && !ui.input(|i| i.modifiers.alt)
-        {
-            if let (Some(handle), Some(start)) = (hovered, response.interact_pointer_pos()) {
+        if starting {
+            if let (Some(handle), Some(start)) = (hovered, pointer) {
                 let (axis_screen, pixels_per_unit) = match handle {
                     Handle::Axis(i) => {
                         let tip = projector.project(origin + axes[i]).unwrap_or(center);
                         let dir = tip - center;
                         (dir.normalized(), dir.length().max(1e-3))
                     }
-                    Handle::Center => (Vec2::X, projector.pixels_per_unit(origin, Vec3::X)),
+                    // Along the view's right: world X can point into the screen.
+                    Handle::Center => (
+                        Vec2::X,
+                        projector.pixels_per_unit(origin, self.view_rotation() * Vec3::X),
+                    ),
                 };
                 let to_mouse = start - center;
                 // Every selected root moves; children follow their parent.
@@ -1639,7 +1657,7 @@ impl Viewport {
                         axes[i] * units
                     }
                     Handle::Center => {
-                        let rotation = self.camera.rotation();
+                        let rotation = self.view_rotation();
                         let scale = 1.0 / drag.pixels_per_unit;
                         let mut offset =
                             (rotation * Vec3::X * delta.x - rotation * Vec3::Y * delta.y) * scale;
@@ -1677,9 +1695,8 @@ impl Viewport {
                     Handle::Axis(i) => {
                         let mut factor =
                             (1.0 + delta.dot(drag.axis_screen) / drag.pixels_per_unit).max(0.01);
-                        let start = drag.start_local.scale[i];
                         if let Some(snap) = snap {
-                            factor = snap.scale(start * factor) / start;
+                            factor = snap_scale_factor(&snap, drag.start_local.scale[i], factor);
                         }
                         let mut factors = Vec3::ONE;
                         factors[i] = factor;
@@ -2170,6 +2187,24 @@ fn brighten(world: &ab_engine::ecs::World) -> Option<Environment> {
 // =============================================================================================
 // Scene queries
 // =============================================================================================
+
+/// `p` on the grid of `step` (unchanged for a zero step, which has no grid).
+fn snap_point(p: Vec3, step: f32) -> Vec3 {
+    Vec3::new(
+        crate::settings::snap(p.x, step),
+        crate::settings::snap(p.y, step),
+        crate::settings::snap(p.z, step),
+    )
+}
+
+/// The scale factor that puts a scale of `start` on the snap steps (by its size, keeping a
+/// mirrored axis mirrored). A zero scale has no steps to snap to: the factor stays.
+fn snap_scale_factor(snap: &SnapSettings, start: f32, factor: f32) -> f32 {
+    if start.abs() < 1e-6 {
+        return factor;
+    }
+    snap.scale((start * factor).abs()) / start.abs()
+}
 
 /// Ray / box slab test; distance along the ray.
 fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
@@ -2986,6 +3021,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snapping_with_a_zero_step_or_a_zero_scale_stays_finite() {
+        let p = Vec3::new(1.26, 0.4, -2.74);
+        assert_eq!(snap_point(p, 0.0), p, "no grid");
+        assert_eq!(snap_point(p, 0.5), Vec3::new(1.5, 0.5, -2.5));
+        let snap = SnapSettings::default();
+        assert_eq!(snap_scale_factor(&snap, 0.0, 1.7), 1.7, "a zero scale");
+        assert!((snap_scale_factor(&snap, 1.0, 1.26) - 1.3).abs() < 1e-5);
+        // A mirrored axis (negative scale) stays mirrored: factor > 0.
+        assert!((snap_scale_factor(&snap, -1.0, 1.26) - 1.3).abs() < 1e-5);
+    }
+
+    #[test]
     fn ray_box_hits_and_misses() {
         let (min, max) = (Vec3::splat(-1.0), Vec3::splat(1.0));
         assert_eq!(
@@ -3336,6 +3383,43 @@ mod tests {
         assert!(viewport.camera.yaw != yaw, "the camera turned");
         assert!(viewport.menu_target.is_none());
         assert!(!egui::Popup::is_any_open(&ctx));
+    }
+
+    /// The gizmo's centre handle moves in the plane of the view: in the side view (which
+    /// looks along -X) it used to scale by world X's on-screen length (nothing) and move
+    /// along the perspective camera's axes, throwing the object far away.
+    #[test]
+    fn the_centre_handle_moves_in_the_plane_of_an_orthographic_view() {
+        let (mut editor, _) = shapes_scene();
+        let pivot = EditorCamera::default().pivot;
+        editor.add_scene(crate::create::MESHES[0].scene(), Some(pivot));
+        let cube = editor.selection.unwrap();
+        editor.end_gesture();
+        let ctx = egui::Context::default();
+        let mut viewport = Viewport::new(None);
+        viewport.kind = ViewKind::Side;
+        viewport.options.gizmo = GizmoMode::Translate;
+        frame(&ctx, &mut viewport, &mut editor, Vec::new());
+        // The pivot is in the middle of the view.
+        let start = Pos2::new(600.0, 400.0);
+        let primary = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(start)]);
+        frame(&ctx, &mut viewport, &mut editor, vec![primary(start, true)]);
+        for step in 1..=10 {
+            let pos = start + Vec2::new(step as f32 * 3.0, 0.0);
+            frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(pos)]);
+        }
+        let end = start + Vec2::new(30.0, 0.0);
+        frame(&ctx, &mut viewport, &mut editor, vec![primary(end, false)]);
+        let moved = editor.tree().global_position(cube).unwrap() - pivot;
+        // Screen right in the side view is world -Z.
+        assert!(moved.z < -0.1 && moved.z > -2.0, "{moved}");
+        assert!(moved.x.abs() < 1e-3 && moved.y.abs() < 1e-3, "{moved}");
     }
 
     #[test]

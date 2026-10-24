@@ -280,14 +280,15 @@ impl Body<'_, '_> {
         set_collision_layer,
         u32,
         "body.collision_layer",
-        "Layers the body is on (bit mask)."
+        "Layers the body is on (bit mask): what it is."
     );
     property!(
         collision_mask,
         set_collision_mask,
         u32,
         "body.collision_mask",
-        "Layers the body collides with (bit mask)."
+        "Layers the body responds to (bit mask, all by default). Two solid bodies collide \
+         when each one's mask has the other's layer; an area sees what its own mask selects."
     );
     property!(
         gravity_scale,

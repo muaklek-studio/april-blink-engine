@@ -694,6 +694,10 @@ fn write_extras(
             format!("Run `./{exe_name}` (or double-click it in your file manager)."),
             "~/.local/share/<game>",
         ),
+        Platform::MacOs => (
+            format!("Run `./{exe_name}` from Terminal."),
+            "~/Library/Application Support/<game>",
+        ),
     };
     let text = format!(
         "{title} {version}\n\n{run} Keep the other files next to it.\n\n\
@@ -825,7 +829,9 @@ fn verify_export(exe: &Path, pack_path: &Path, log: Log<'_>) -> Result<()> {
     let sandbox = std::env::temp_dir().join(format!("ab-export-check-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sandbox);
     std::fs::create_dir_all(&sandbox)?;
-    let output = process::command(exe)
+    // A relative path (`--out dist`) would be looked up from the sandbox on Unix.
+    let exe = std::path::absolute(exe)?;
+    let output = process::command(&exe)
         // `--overlay` proves a shipping build: it must be ignored, with a warning.
         .args(["--overlay", "--headless", "180"])
         .current_dir(&sandbox)
@@ -894,8 +900,8 @@ mod tests {
 
     #[test]
     fn options_and_games() {
-        let options =
-            Options::new("/tmp/out").with_platforms(&[Platform::Linux, Platform::Windows]);
+        let platforms = Platform::parse("all,host").unwrap();
+        let options = Options::new("/tmp/out").with_platforms(&platforms);
         assert!(options.suffix_platform);
         let host = options
             .builds
@@ -903,7 +909,7 @@ mod tests {
             .find(|b| b.platform == Platform::host())
             .unwrap();
         assert!(host.triple.is_none(), "the host builds natively");
-        assert_eq!(options.builds.len(), 2);
+        assert_eq!(options.builds.len(), platforms.len());
         assert!(Options::new("x").builds[0].triple.is_none());
         let engine = engine_root().unwrap();
         let slice = Game::slice(&engine);

@@ -60,7 +60,7 @@ pub use physics::{
     signals, Body, BodyKind, Character, ClimbRef, ClimbState, Physics, PhysicsEvent, QueryOptions,
     RayHit,
 };
-pub use script::{script_type, Registry, Script, Signal};
+pub use script::{script_type, Property, Registry, Script, Signal};
 pub use tree::{Connection, Engine, Input, RenderStats, Saves, Tree};
 pub use ui::{
     BoxContainerRef, ButtonRef, ControlRef, Easing, HAlign, LabelRef, LayoutPreset, MouseFilter,
@@ -78,9 +78,9 @@ pub use world::{
 pub mod prelude {
     pub use crate::{
         debug, error, info, serde_state, trace, warn, Arg, Blood, BodyKind, Color, Easing,
-        EulerRot, Explosion, HAlign, LayoutPreset, MouseFilter, NavBakeSettings, Node,
-        ParticleEffect, PathFollower, PhysicsEvent, Quat, QueryOptions, Registry, Repeat, Rng,
-        Script, Signal, SoundOptions, Transform, Tree, VAlign, Vec2, Vec3,
+        EulerRot, Explosion, ffi, HAlign, LayoutPreset, MouseFilter, NavBakeSettings, Node,
+        ParticleEffect, PathFollower, PhysicsEvent, Property, Quat, QueryOptions, Registry,
+        Repeat, Rng, Script, Signal, SoundOptions, Transform, Tree, VAlign, Vec2, Vec3,
     };
     pub use serde::{Deserialize, Serialize};
 }

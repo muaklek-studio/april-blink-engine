@@ -7,6 +7,9 @@ use anyhow::{bail, Result};
 pub enum Platform {
     Linux,
     Windows,
+    /// Only as the host (the editor and Play mode on a Mac): games are not cross-compiled
+    /// for it.
+    MacOs,
 }
 
 impl Platform {
@@ -14,6 +17,8 @@ impl Platform {
     pub fn host() -> Self {
         if cfg!(windows) {
             Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
         } else {
             Self::Linux
         }
@@ -23,6 +28,7 @@ impl Platform {
         match self {
             Self::Linux => "linux",
             Self::Windows => "windows",
+            Self::MacOs => "macos",
         }
     }
 
@@ -31,12 +37,16 @@ impl Platform {
         match self {
             Self::Linux => "x86_64-unknown-linux-gnu",
             Self::Windows => "x86_64-pc-windows-msvc",
+            Self::MacOs if cfg!(target_arch = "x86_64") => "x86_64-apple-darwin",
+            Self::MacOs => "aarch64-apple-darwin",
         }
     }
 
     pub fn of_triple(triple: &str) -> Self {
         if triple.contains("windows") {
             Self::Windows
+        } else if triple.contains("apple") {
+            Self::MacOs
         } else {
             Self::Linux
         }
@@ -51,6 +61,7 @@ impl Platform {
                 "windows" | "win" => &[Self::Windows],
                 "all" => &[Self::Linux, Self::Windows],
                 "host" => &[Self::host()],
+                "macos" | "mac" if Self::host() == Self::MacOs => &[Self::MacOs],
                 other => bail!("unknown platform `{other}`: use linux, windows or all"),
             };
             for &p in platforms {
@@ -65,16 +76,18 @@ impl Platform {
     /// An executable's file name: `name` or `name.exe`.
     pub fn executable(self, stem: &str) -> String {
         match self {
-            Self::Linux => stem.to_owned(),
+            Self::Linux | Self::MacOs => stem.to_owned(),
             Self::Windows => format!("{stem}.exe"),
         }
     }
 
-    /// A dynamic library's file name as cargo builds it: `lib<stem>.so`, `<stem>.dll`.
+    /// A dynamic library's file name as cargo builds it: `lib<stem>.so`, `<stem>.dll`,
+    /// `lib<stem>.dylib`.
     pub fn library(self, stem: &str) -> String {
         match self {
             Self::Linux => format!("lib{stem}.so"),
             Self::Windows => format!("{stem}.dll"),
+            Self::MacOs => format!("lib{stem}.dylib"),
         }
     }
 
@@ -99,7 +112,10 @@ mod tests {
             Platform::parse("windows, linux,win").unwrap(),
             [Platform::Windows, Platform::Linux]
         );
-        assert!(Platform::parse("macos").is_err());
+        assert_eq!(
+            Platform::parse("macos").is_ok(),
+            Platform::host() == Platform::MacOs
+        );
         assert_eq!(Platform::Windows.executable("game"), "game.exe");
         assert_eq!(
             Platform::Linux.shipped_library("my-game"),
@@ -123,5 +139,10 @@ mod tests {
             Platform::of_triple(Platform::Windows.triple()),
             Platform::Windows
         );
+        assert_eq!(
+            Platform::of_triple("aarch64-apple-darwin"),
+            Platform::MacOs
+        );
+        assert_eq!(Platform::MacOs.library("x"), "libx.dylib");
     }
 }

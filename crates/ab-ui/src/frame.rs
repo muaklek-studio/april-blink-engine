@@ -93,6 +93,7 @@ pub fn prepare_ui(world: &World, width: u32, height: u32) {
     state.scale = scale;
     state.viewport = viewport;
     state.targets.clear();
+    state.focus_since_layout = false;
     list.clear();
     list.size = [width, height];
 

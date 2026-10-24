@@ -10,7 +10,16 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use tracing::{error, info};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use tracing::{error, info, warn};
+
+/// Library files loaded in this process, and their total size: they are never unloaded, so
+/// a long session of hot reloads keeps every version in memory.
+static LOADED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LOADED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Every this many loaded versions, a warning suggests restarting.
+const WARN_EVERY: usize = 25;
 
 /// A loaded script library: the scripts of a game, built with the `ab-script` SDK.
 ///
@@ -31,6 +40,7 @@ struct Loaded {
 struct ScriptTypeInfo {
     name: &'static str,
     vtable: *const ffi::ScriptType,
+    properties: Vec<ab_scene::ScriptPropertyDesc>,
 }
 
 // SAFETY: the library's description is immutable and lives forever (the library is never
@@ -49,6 +59,26 @@ impl fmt::Debug for ScriptLibrary {
     }
 }
 
+/// How many library files this process has loaded, and their total size in bytes.
+pub fn loaded_libraries() -> (usize, u64) {
+    (
+        LOADED_COUNT.load(Ordering::Relaxed),
+        LOADED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+fn note_loaded(bytes: u64) {
+    let count = LOADED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let total = LOADED_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    if count.is_multiple_of(WARN_EVERY) {
+        warn!(
+            "{count} versions of the game's scripts are loaded ({} MB): old versions stay in \
+             memory until the program restarts, so restart it when convenient",
+            total / (1024 * 1024)
+        );
+    }
+}
+
 impl ScriptLibrary {
     /// Loads a script library file (`.so`, `.dll`, `.dylib`). The file is copied first, so
     /// the original can be rebuilt while the game runs and each version loads separately.
@@ -61,6 +91,7 @@ impl ScriptLibrary {
         // library is loaded; the next start clears the staging folder).
         let _ = std::fs::remove_file(&copy);
         let library = library.with_context(|| format!("cannot load {}", path.display()))?;
+        note_loaded(std::fs::metadata(path).map_or(0, |m| m.len()));
         // SAFETY: `ab_script::export!` defines the entry point with this signature.
         let entry = unsafe { library.get::<ffi::EntryPoint>(ffi::ENTRY_SYMBOL_NUL) }
             .map(|symbol| *symbol)
@@ -112,9 +143,20 @@ impl ScriptLibrary {
             let Some(name) = (unsafe { vtable.name.to_str() }) else {
                 bail!("{origin} has a script whose name is not UTF-8");
             };
+            let properties = if vtable.properties.is_null() || vtable.property_count == 0 {
+                Vec::new()
+            } else {
+                // SAFETY: the library describes `property_count` properties, whose strings
+                // live as long as the library (which is never unloaded).
+                unsafe { std::slice::from_raw_parts(vtable.properties, vtable.property_count) }
+                    .iter()
+                    .map(|p| unsafe { ab_scene::ScriptPropertyDesc::from_ffi(p) })
+                    .collect()
+            };
             types.push(ScriptTypeInfo {
                 name: super::call::intern(name),
                 vtable,
+                properties,
             });
         }
         // SAFETY: as above.
@@ -151,6 +193,7 @@ impl ScriptLibrary {
         for index in 0..self.inner.types.len() {
             let library = self.inner.clone();
             let name = library.types[index].name;
+            let props = library.types[index].properties.clone();
             registry.register_factory(name, move || -> Box<dyn NodeScript> {
                 match ForeignScript::new(library.clone(), index) {
                     Some(script) => Box::new(script),
@@ -158,6 +201,7 @@ impl ScriptLibrary {
                     None => Box::new(Inert),
                 }
             });
+            registry.register_metadata(name, props);
         }
     }
 
@@ -172,7 +216,7 @@ impl ScriptLibrary {
 /// Copies `path` into a per-process staging folder under a fresh name (dynamic loaders cache
 /// libraries by path, and the original must stay free for the next build).
 fn staging_copy(path: &Path) -> anyhow::Result<PathBuf> {
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let staging = staging_dir();
     std::fs::create_dir_all(&staging)
@@ -379,5 +423,50 @@ impl NodeScript for ForeignScript {
 
     fn foreign_instance(&mut self) -> Option<(*const (), *mut ())> {
         Some((self.info().vtable.cast(), self.instance.as_ptr().cast()))
+    }
+
+    fn get_exported_property(&self, name: &str) -> Option<ffi::Value> {
+        if self.failed {
+            return None;
+        }
+        let get = self.vtable().get_property?;
+        let mut out = ffi::Value::NIL;
+        // SAFETY: the instance is alive and of this type; `name` outlives the call.
+        let status = unsafe { get(self.instance.as_ptr(), ffi::Str::new(name), &mut out) };
+        status.is_ok().then_some(out)
+    }
+
+    fn set_exported_property(&mut self, name: &str, value: ffi::Value) -> bool {
+        if self.failed {
+            return false;
+        }
+        let Some(set) = self.vtable().set_property else {
+            return false;
+        };
+        // SAFETY: as above; `value` (and any string in it) outlives the call.
+        let status = unsafe { set(self.instance.as_ptr(), ffi::Str::new(name), &value) };
+        if status == ffi::Status::PANICKED {
+            error!(
+                script = self.info().name,
+                property = name,
+                "set_property panicked; the script is disabled until replaced"
+            );
+            self.failed = true;
+        }
+        status.is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loaded_libraries_are_counted() {
+        let (count, bytes) = loaded_libraries();
+        note_loaded(1000);
+        let (after, after_bytes) = loaded_libraries();
+        // Other tests may load libraries meanwhile: at least this one is counted.
+        assert!(after > count && after_bytes >= bytes + 1000);
     }
 }

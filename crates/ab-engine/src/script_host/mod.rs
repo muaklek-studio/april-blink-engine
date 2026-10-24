@@ -21,7 +21,7 @@ mod bindings;
 mod call;
 mod library;
 
-pub use library::ScriptLibrary;
+pub use library::{loaded_libraries, ScriptLibrary};
 
 use ab_scene::NodeHandle;
 use ab_script_api as ffi;

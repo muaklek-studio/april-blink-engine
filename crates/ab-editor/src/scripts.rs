@@ -484,7 +484,7 @@ impl GameScripts {
         }
         let wanted = module_file(&self.files);
         if current.as_deref() != Some(wanted.as_str()) {
-            std::fs::write(&module, wanted)
+            ab_engine::core::fs::atomic_write(&module, wanted)
                 .with_context(|| format!("writing {}", module.display()))?;
         }
         let lib = self.crate_root.join("src/lib.rs");
@@ -492,7 +492,8 @@ impl GameScripts {
             std::fs::read_to_string(&lib).with_context(|| format!("reading {}", lib.display()))?;
         match wire_lib(&text) {
             Ok(Some(wired)) => {
-                std::fs::write(&lib, wired).with_context(|| format!("writing {}", lib.display()))?
+                ab_engine::core::fs::atomic_write(&lib, wired)
+                    .with_context(|| format!("writing {}", lib.display()))?
             }
             Ok(None) => {}
             Err(reason) => bail!(
@@ -659,16 +660,15 @@ pub fn code_editor() -> Option<CodeEditor> {
 /// rust-analyzer finds the crate).
 fn open_command(editor: &CodeEditor, file: &Path, line: usize, folder: &Path) -> Command {
     let target = format!("{}:{line}", file.display());
-    // Windows runs `.cmd` launchers (VS Code's `code.cmd`) through cmd.
-    let mut command = if cfg!(windows)
-        && editor
-            .program
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
-    {
-        let mut command = ab_project::process::command("cmd");
-        command.arg("/C").arg(&editor.program);
-        command
+    // `.cmd` launchers (VS Code's `code.cmd`) run directly: the standard library quotes
+    // their arguments for cmd.exe, `%` included. Through `cmd /C` a `%NAME%` in a path was
+    // expanded. No console window for them either.
+    let launcher = editor
+        .program
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    let mut command = if launcher {
+        ab_project::process::command(&editor.program)
     } else {
         Command::new(&editor.program)
     };
@@ -961,6 +961,19 @@ impl Script for Enemy {}
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, ["/g", "/g/a.rs:3"]);
+        // A `.cmd` launcher runs itself (not through `cmd /C`, which expands `%…%`).
+        let cmd = CodeEditor {
+            name: "VS Code",
+            program: PathBuf::from("C:/VS Code/bin/code.cmd"),
+            kind: EditorKind::VsCode,
+        };
+        let command = open_command(&cmd, Path::new("/g/100%DONE%/a.rs"), 1, Path::new("/g"));
+        assert_eq!(command.get_program(), cmd.program.as_os_str());
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["/g", "-g", "/g/100%DONE%/a.rs:1"]);
     }
 
     #[test]

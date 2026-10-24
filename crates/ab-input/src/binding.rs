@@ -42,17 +42,26 @@ pub(crate) fn apply_deadzone(value: f32, deadzone: f32) -> f32 {
 
 impl Binding {
     /// Current strength 0..1. Gamepad bindings take the strongest value across all pads.
+    ///
+    /// A button pressed during this frame counts as down even if it was already released
+    /// again (a quick tap, a touchpad click, a low frame rate), so the action still gets
+    /// its pressed edge.
     pub fn strength(&self, input: &InputState, deadzone: f32) -> f32 {
         match *self {
-            Binding::Key(key) => input.is_key_pressed(key) as u8 as f32,
-            Binding::Mouse(button) => input.is_mouse_pressed(button) as u8 as f32,
+            Binding::Key(key) => {
+                (input.is_key_pressed(key) || input.is_key_just_pressed(key)) as u8 as f32
+            }
+            Binding::Mouse(button) => {
+                (input.is_mouse_pressed(button) || input.is_mouse_just_pressed(button)) as u8 as f32
+            }
             Binding::Wheel { up } => {
                 let dy = input.wheel_delta().y;
                 ((up && dy > 0.0) || (!up && dy < 0.0)) as u8 as f32
             }
-            Binding::GamepadButton(button) => {
-                input.gamepads().any(|(_, pad)| pad.is_pressed(button)) as u8 as f32
-            }
+            Binding::GamepadButton(button) => input
+                .gamepads()
+                .any(|(_, pad)| pad.is_pressed(button) || pad.buttons.is_just_pressed(button))
+                as u8 as f32,
             Binding::GamepadAxis { axis, positive } => input
                 .gamepads()
                 .map(|(_, pad)| {
@@ -60,6 +69,21 @@ impl Binding {
                     apply_deadzone(if positive { value } else { -value }, deadzone)
                 })
                 .fold(0.0, f32::max),
+        }
+    }
+}
+
+impl Binding {
+    /// Whether this button was released and pressed again since the last frame (it reads
+    /// as held throughout, but is a new press). Always `false` for analog inputs.
+    pub fn repressed(&self, input: &InputState) -> bool {
+        match *self {
+            Binding::Key(key) => input.keys.is_repressed(key),
+            Binding::Mouse(button) => input.mouse_buttons.is_repressed(button),
+            Binding::GamepadButton(button) => input
+                .gamepads()
+                .any(|(_, pad)| pad.buttons.is_repressed(button)),
+            Binding::Wheel { .. } | Binding::GamepadAxis { .. } => false,
         }
     }
 }

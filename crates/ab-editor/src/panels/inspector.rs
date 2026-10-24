@@ -19,6 +19,9 @@ use ab_engine::scene_file::{
 };
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
+use ab_engine::scene::script_property;
+use ab_engine::scene::ScriptPropertyDesc;
+use ab_script_api as ffi;
 
 #[derive(Default)]
 pub struct InspectorPanel {
@@ -439,6 +442,124 @@ impl InspectorPanel {
                 ui.end_row();
             });
         });
+
+        for script in desc.script_list() {
+            let Some(props) = editor.script_metadata(&script) else {
+                continue;
+            };
+            if props.iter().all(ScriptPropertyDesc::hidden) {
+                continue;
+            }
+            let id = format!("script_props_{script}");
+            section(ui, &id, icon::CODE, &script, |ui| {
+                grid(ui, &format!("{id}_grid"), |ui| {
+                    for prop in props.iter().filter(|p| !p.hidden()) {
+                        let set = desc.script_properties.get(&script).and_then(|t| t.get(&prop.name));
+                        let response = ui.label(RichText::new(&prop.name).color(theme::TEXT_DIM));
+                        if !prop.doc.is_empty() {
+                            response.on_hover_text(&prop.doc);
+                        }
+                        if let Some(value) = script_property(ui, prop, set) {
+                            desc.script_properties
+                                .entry(script.clone())
+                                .or_default()
+                                .insert(prop.name.clone(), value);
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+    }
+}
+
+/// An exported script property's editor: shows the value set on the node (or the script's
+/// default) and returns the new value when it is changed.
+fn script_property(
+    ui: &mut egui::Ui,
+    prop: &ScriptPropertyDesc,
+    set: Option<&toml::Value>,
+) -> Option<toml::Value> {
+    let current = set
+        .or(prop.default.as_ref())
+        .and_then(|v| script_property::to_ffi(Some(prop.kind), v));
+    let floats = |v: &[f32]| {
+        toml::Value::Array(v.iter().map(|&x| toml::Value::Float(f64::from(x))).collect())
+    };
+    let drags = |ui: &mut egui::Ui, values: &mut [f32]| {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            for v in values.iter_mut() {
+                changed |= ui.add(egui::DragValue::new(v).speed(0.01)).changed();
+            }
+        });
+        changed
+    };
+    match prop.kind {
+        ffi::Tag::BOOL => {
+            let mut v = current.and_then(|c| c.as_bool()).unwrap_or(false);
+            ui.checkbox(&mut v, "")
+                .changed()
+                .then_some(toml::Value::Boolean(v))
+        }
+        ffi::Tag::INT => {
+            let mut v = current.and_then(|c| c.as_int()).unwrap_or(0);
+            ui.add(egui::DragValue::new(&mut v))
+                .changed()
+                .then_some(toml::Value::Integer(v))
+        }
+        ffi::Tag::FLOAT => {
+            let mut v = current.and_then(|c| c.as_float()).unwrap_or(0.0);
+            ui.add(egui::DragValue::new(&mut v).speed(0.01))
+                .changed()
+                .then_some(toml::Value::Float(v))
+        }
+        ffi::Tag::VEC2 => {
+            let v = current.and_then(|c| c.as_vec2()).unwrap_or_default();
+            let mut a = [v.x, v.y];
+            drags(ui, &mut a).then(|| floats(&a))
+        }
+        ffi::Tag::VEC3 => {
+            let v = current.and_then(|c| c.as_vec3()).unwrap_or_default();
+            let mut a = [v.x, v.y, v.z];
+            vec3(ui, &mut a, 0.01, "").then(|| floats(&a))
+        }
+        ffi::Tag::QUAT => {
+            let q = current.and_then(|c| c.as_quat()).unwrap_or_default();
+            let mut a = [q.x, q.y, q.z, q.w];
+            drags(ui, &mut a).then(|| floats(&a))
+        }
+        ffi::Tag::COLOR => {
+            let c = current.and_then(|c| c.as_color()).unwrap_or(ffi::Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            });
+            // Linear, like the colors scripts receive.
+            let mut rgba = [c.r, c.g, c.b, c.a];
+            ui.color_edit_button_rgba_unmultiplied(&mut rgba)
+                .changed()
+                .then(|| {
+                    let [r, g, b, a] = rgba;
+                    toml::Value::String(script_property::color_hex(ffi::Color { r, g, b, a }))
+                })
+        }
+        ffi::Tag::STR => {
+            // SAFETY: the string borrows `set` or the default, both alive here.
+            let mut text = current
+                .and_then(|c| unsafe { c.as_str() })
+                .unwrap_or("")
+                .to_owned();
+            ui.text_edit_singleline(&mut text)
+                .changed()
+                .then_some(toml::Value::String(text))
+        }
+        _ => {
+            ui.label(RichText::new("(not editable)").color(theme::TEXT_DIM));
+            None
+        }
     }
 }
 
@@ -1233,18 +1354,18 @@ fn body_section(ui: &mut egui::Ui, class: &str, b: &mut BodyDesc) {
                 ui.end_row();
             }
             label(ui, "Layer");
-            layer_bits(ui, "layer", &mut b.layer);
+            layer_bits(ui, "layer", &mut b.layer, 1);
             ui.end_row();
             label(ui, "Mask");
-            layer_bits(ui, "mask", &mut b.mask);
+            layer_bits(ui, "mask", &mut b.mask, u32::MAX);
             ui.end_row();
         });
     });
 }
 
 /// Eight toggles for the first collision layers.
-fn layer_bits(ui: &mut egui::Ui, id: &str, value: &mut Option<u32>) {
-    let mut bits = value.unwrap_or(1);
+fn layer_bits(ui: &mut egui::Ui, id: &str, value: &mut Option<u32>, default: u32) {
+    let mut bits = value.unwrap_or(default);
     let before = bits;
     ui.push_id(id, |ui| {
         ui.horizontal(|ui| {

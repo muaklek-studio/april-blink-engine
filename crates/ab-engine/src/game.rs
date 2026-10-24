@@ -407,6 +407,22 @@ impl Game {
         self
     }
 
+    /// The library `--hot` watches: the one given, else [`Game::hot_library`]'s. An error
+    /// when there is neither (there would be no file to watch).
+    fn hot_library_for(&self, hot: Option<Option<PathBuf>>) -> anyhow::Result<Option<PathBuf>> {
+        match hot {
+            None => Ok(None),
+            Some(Some(path)) => Ok(Some(path)),
+            Some(None) => match &self.hot_library {
+                Some(path) => Ok(Some(path.clone())),
+                None => bail!(
+                    "--hot needs the script library to watch (`--hot <library>`): this game \
+                     names none"
+                ),
+            },
+        }
+    }
+
     /// Reads `game.toml`.
     pub fn settings(&self) -> anyhow::Result<GameSettings> {
         let text = self
@@ -531,10 +547,7 @@ impl Game {
             scene = settings.main_scene,
             "starting game"
         );
-        let hot = cli.hot.clone().map(|path| {
-            path.or_else(|| self.hot_library.clone())
-                .unwrap_or_default()
-        });
+        let hot = self.hot_library_for(cli.hot.clone())?;
         let scene = cli.scene.clone();
         let overlay = cli.overlay;
         let game = self.clone();
@@ -556,7 +569,8 @@ impl Game {
         };
 
         if let Some(path) = cli.screenshot {
-            let (width, height) = (settings.window.width, settings.window.height);
+            // The window's size as the engine uses it (clamped like `engine_config` does).
+            let (width, height) = (config.window.width, config.window.height);
             let engine =
                 crate::run_headless(config.clone(), cli.frames.unwrap_or(90), 1.0 / 60.0, setup)?;
             let pixels = crate::render_offscreen(&engine, &config.renderer, width, height)?;
@@ -631,6 +645,10 @@ mod tests {
         assert_eq!(config.renderer.msaa_samples, 1);
         assert_eq!(settings.save_folder(), "T");
         assert!(GameSettings::from_toml("titel = \"typo\"").is_err());
+        // What `--screenshot` renders at: never a zero-sized image.
+        let tiny = GameSettings::from_toml("[window]\nwidth = 0\nheight = 0\n").unwrap();
+        let config = tiny.engine_config("x".into());
+        assert_eq!((config.window.width, config.window.height), (320, 200));
     }
 
     #[test]
@@ -648,6 +666,15 @@ mod tests {
         assert_eq!(cli.hot, Some(Some(PathBuf::from("lib.so"))));
         assert_eq!(cli.fullscreen, Some(false));
         assert!(Cli::parse(args(&["--nope"])).is_err());
+        // `--hot` without a library: the game's, or a clear error (not an empty path).
+        let game = Game::new("game.toml", |_| {});
+        assert!(game.hot_library_for(Some(None)).is_err());
+        assert_eq!(game.hot_library_for(None).unwrap(), None);
+        let given = game.hot_library_for(Some(Some("x.so".into()))).unwrap();
+        assert_eq!(given, Some(PathBuf::from("x.so")));
+        let game = game.hot_library_path("lib.so");
+        let default = game.hot_library_for(Some(None)).unwrap();
+        assert_eq!(default, Some(PathBuf::from("lib.so")));
         assert!(Cli::parse(args(&["--headless"])).is_err());
     }
 }

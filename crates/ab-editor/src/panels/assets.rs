@@ -552,7 +552,7 @@ impl AssetsPanel {
                     metallic: Some(0.0),
                     ..Default::default()
                 };
-                std::fs::write(&path, material.to_toml()).map_err(|e| e.to_string())?;
+                editor.write_project_file(&path, material.to_toml()).map_err(|e| e.to_string())?;
                 editor.assets.request_rescan();
                 self.selected = Some(relative.clone());
                 editor.info(format!(

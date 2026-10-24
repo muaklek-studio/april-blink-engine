@@ -49,6 +49,43 @@ pub trait Script: Default + 'static {
 
     /// Hot reload: restores what [`Script::save_state`] returned in the old version.
     fn load_state(&mut self, state: &str) {}
+
+    /// Exported properties shown in the editor inspector.
+    fn properties() -> &'static [Property] {
+        &[]
+    }
+
+    /// Get an exported property by name.
+    fn get_property(&self, _name: &str) -> Option<ffi::Value> {
+        None
+    }
+
+    /// Set an exported property by name. Returns true if it was set.
+    fn set_property(&mut self, _name: &str, _value: ffi::Value) -> bool {
+        false
+    }
+}
+
+/// An exported property definition for the editor inspector.
+#[derive(Debug, Clone)]
+pub struct Property {
+    pub name: &'static str,
+    pub kind: ffi::Tag,
+    pub default_value: ffi::Value,
+    pub flags: u32,
+    pub doc: &'static str,
+}
+
+impl Property {
+    pub const fn new(name: &'static str, kind: ffi::Tag, default_value: ffi::Value) -> Self {
+        Self {
+            name,
+            kind,
+            default_value,
+            flags: 0,
+            doc: "",
+        }
+    }
 }
 
 /// A signal received in [`Script::on_signal`].
@@ -99,6 +136,7 @@ struct Entry {
     name: String,
     type_id: TypeId,
     vtable: Vtable,
+    properties: &'static [Property],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +151,8 @@ struct Vtable {
     ) -> ffi::Status,
     save_state: unsafe extern "C" fn(*const c_void, *mut ffi::StrSink) -> bool,
     load_state: unsafe extern "C" fn(*mut c_void, ffi::Str, *mut ffi::StrSink) -> ffi::Status,
+    get_property: unsafe extern "C" fn(*const c_void, ffi::Str, *mut ffi::Value) -> ffi::Status,
+    set_property: unsafe extern "C" fn(*mut c_void, ffi::Str, *const ffi::Value) -> ffi::Status,
 }
 
 impl Registry {
@@ -128,7 +168,10 @@ impl Registry {
                 event: event::<T>,
                 save_state: save_state::<T>,
                 load_state: load_state::<T>,
+                get_property: get_property::<T>,
+                set_property: set_property::<T>,
             },
+            properties: T::properties(),
         });
         self
     }
@@ -150,6 +193,8 @@ impl Registry {
 struct LibraryData {
     /// Owns the names the script types point to.
     _names: Vec<Box<str>>,
+    _prop_names: Vec<Box<str>>,
+    _prop_descs: Vec<Vec<ffi::PropertyDesc>>,
     types: Vec<ffi::ScriptType>,
     type_ids: Vec<TypeId>,
     library: ffi::Library,
@@ -171,11 +216,30 @@ fn build(registry: Registry) -> LibraryData {
         .iter()
         .map(|e| e.name.clone().into_boxed_str())
         .collect();
-    let types: Vec<ffi::ScriptType> = registry
-        .entries
-        .iter()
-        .zip(&names)
-        .map(|(entry, name)| ffi::ScriptType {
+    let mut prop_names: Vec<Box<str>> = Vec::new();
+    let mut prop_descs: Vec<Vec<ffi::PropertyDesc>> = Vec::new();
+    let mut types: Vec<ffi::ScriptType> = Vec::with_capacity(registry.entries.len());
+    for (entry, name) in registry.entries.iter().zip(&names) {
+        let mut descs = Vec::with_capacity(entry.properties.len());
+        for prop in entry.properties {
+            let n = prop.name.to_string().into_boxed_str();
+            let ptr = n.as_ptr();
+            let len = n.len();
+            prop_names.push(n);
+            descs.push(ffi::PropertyDesc {
+                name: ffi::Str { ptr, len },
+                kind: prop.kind,
+                default_value: prop.default_value,
+                flags: prop.flags,
+                doc: ffi::Str::new(prop.doc),
+            });
+        }
+        let (props_ptr, props_count) = if descs.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            (descs.as_ptr(), descs.len())
+        };
+        types.push(ffi::ScriptType {
             name: ffi::Str::new(name),
             flags: 0,
             create: entry.vtable.create,
@@ -183,8 +247,14 @@ fn build(registry: Registry) -> LibraryData {
             event: entry.vtable.event,
             save_state: entry.vtable.save_state,
             load_state: entry.vtable.load_state,
-        })
-        .collect();
+            properties: props_ptr,
+            property_count: props_count,
+            get_property: Some(entry.vtable.get_property),
+            set_property: Some(entry.vtable.set_property),
+        });
+        // Moving the Vec keeps its heap buffer, so `props_ptr` stays valid.
+        prop_descs.push(descs);
+    }
     let library = ffi::Library {
         abi_version: ffi::ABI_VERSION,
         sdk_version: ffi::Str::new(env!("CARGO_PKG_VERSION")),
@@ -194,6 +264,8 @@ fn build(registry: Registry) -> LibraryData {
     LibraryData {
         type_ids: registry.entries.iter().map(|e| e.type_id).collect(),
         _names: names,
+        _prop_names: prop_names,
+        _prop_descs: prop_descs,
         types,
         library,
     }
@@ -389,6 +461,54 @@ unsafe extern "C" fn load_state<T: Script>(
             push_str(error, &panic_message(payload.as_ref()));
             ffi::Status::PANICKED
         }
+    }
+}
+
+unsafe extern "C" fn get_property<T: Script>(
+    instance: *const c_void,
+    name: ffi::Str,
+    out: *mut ffi::Value,
+) -> ffi::Status {
+    if instance.is_null() || out.is_null() {
+        return ffi::Status::BAD_ARGUMENTS;
+    }
+    // SAFETY: the engine passes an instance `create::<T>` made.
+    let script = unsafe { &*instance.cast::<T>() };
+    // SAFETY: the engine's name outlives the call.
+    let Some(name) = (unsafe { name.to_str() }) else {
+        return ffi::Status::BAD_ARGUMENTS;
+    };
+    match catch_unwind(AssertUnwindSafe(|| script.get_property(name))) {
+        Ok(Some(value)) => {
+            // SAFETY: checked non-null; the engine passes a writable value.
+            unsafe { *out = value };
+            ffi::Status::OK
+        }
+        Ok(None) => ffi::Status::ERROR,
+        Err(_) => ffi::Status::PANICKED,
+    }
+}
+
+unsafe extern "C" fn set_property<T: Script>(
+    instance: *mut c_void,
+    name: ffi::Str,
+    value: *const ffi::Value,
+) -> ffi::Status {
+    if instance.is_null() || value.is_null() {
+        return ffi::Status::BAD_ARGUMENTS;
+    }
+    // SAFETY: the engine passes an instance `create::<T>` made, not in use elsewhere.
+    let script = unsafe { &mut *instance.cast::<T>() };
+    // SAFETY: the engine's name outlives the call.
+    let Some(name) = (unsafe { name.to_str() }) else {
+        return ffi::Status::BAD_ARGUMENTS;
+    };
+    // SAFETY: checked non-null; the engine passes a valid value.
+    let value = unsafe { *value };
+    match catch_unwind(AssertUnwindSafe(|| script.set_property(name, value))) {
+        Ok(true) => ffi::Status::OK,
+        Ok(false) => ffi::Status::ERROR,
+        Err(_) => ffi::Status::PANICKED,
     }
 }
 

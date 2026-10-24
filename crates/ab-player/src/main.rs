@@ -83,4 +83,31 @@ mod tests {
         assert_eq!(assets.is_some(), !ab_engine::SHIPPING);
         assert_eq!(take_option(&mut args, "--scripts"), None);
     }
+
+    #[test]
+    fn a_trailing_option_without_value_is_removed() {
+        let mut args: Vec<String> = ["--headless", "5", "--project"].map(String::from).into();
+        assert_eq!(take_option(&mut args, "--project"), None);
+        assert_eq!(args, ["--headless", "5"]);
+    }
+
+    #[test]
+    fn only_the_first_occurrence_is_taken() {
+        let mut args: Vec<String> = ["--assets", "a", "--assets", "b"].map(String::from).into();
+        let first = take_option(&mut args, "--assets");
+        assert_eq!(args, ["--assets", "b"]);
+        let second = take_option(&mut args, "--assets");
+        assert!(args.is_empty());
+        if !ab_engine::SHIPPING {
+            assert_eq!(first.as_deref(), Some("a"));
+            assert_eq!(second.as_deref(), Some("b"));
+        }
+    }
+
+    #[test]
+    fn option_names_match_exactly() {
+        let mut args: Vec<String> = ["--assets=x", "--assetsdir", "y"].map(String::from).into();
+        assert_eq!(take_option(&mut args, "--assets"), None);
+        assert_eq!(args.len(), 3);
+    }
 }

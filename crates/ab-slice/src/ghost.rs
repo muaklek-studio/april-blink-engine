@@ -90,3 +90,60 @@ impl Script for Ghost {
         let _ = tree.move_and_slide(node, delta);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hunts_only_after_the_grace_period() {
+        let mut ghost = Ghost::default();
+        assert!(!ghost.is_hunting());
+        assert_eq!(ghost.path_len(), 0);
+        ghost.grace = 0.0;
+        assert!(ghost.is_hunting());
+        ghost.grace = -0.01;
+        assert!(ghost.is_hunting());
+    }
+
+    #[test]
+    fn hot_reload_keeps_tuning_and_resets_the_path() {
+        let mut ghost = Ghost {
+            speed: 3.1,
+            grace: 2.5,
+            time: 9.0,
+            ..Ghost::default()
+        };
+        ghost.follower.set_path(vec![Vec3::X, Vec3::Z]);
+        ghost.repath_in = 0.3;
+        let state = ghost.save_state().expect("ghost state");
+
+        let mut reloaded = Ghost::default();
+        reloaded.load_state(&state);
+        assert_eq!(reloaded.speed, 3.1);
+        assert_eq!(reloaded.grace, 2.5);
+        assert_eq!(reloaded.time, 9.0);
+        // The path is re-planned right away.
+        assert_eq!(reloaded.path_len(), 0);
+        assert_eq!(reloaded.repath_in, 0.0);
+    }
+
+    #[test]
+    fn state_from_an_older_version_fills_in_defaults() {
+        let mut ghost = Ghost::default();
+        ghost.load_state(r#"{"speed": 4.0}"#);
+        assert_eq!(ghost.speed, 4.0);
+        assert_eq!(ghost.grace, Ghost::default().grace);
+        assert_eq!(ghost.repath_interval, Ghost::default().repath_interval);
+    }
+
+    #[test]
+    fn unreadable_state_is_ignored() {
+        let mut ghost = Ghost {
+            speed: 1.25,
+            ..Ghost::default()
+        };
+        ghost.load_state("not json");
+        assert_eq!(ghost.speed, 1.25);
+    }
+}

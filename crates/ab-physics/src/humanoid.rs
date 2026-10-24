@@ -662,7 +662,7 @@ impl Default for HumanoidRagdollSettings {
             thickness: 1.0,
             active: false,
             collision_layer: 1,
-            collision_mask: 1,
+            collision_mask: u32::MAX,
         }
     }
 }
@@ -1423,6 +1423,72 @@ mod tests {
         let axis = hinge_axis(Vec3::NEG_Y, Vec3::Z, Vec3::Y);
         let bent = Quat::from_axis_angle(axis, 0.5) * Vec3::NEG_Y;
         assert!(bent.z > 0.0, "{bent}");
+    }
+
+    /// Swings a limb hanging from a hinge built like the ragdoll's elbows and knees
+    /// (axis from `hinge_axis`, character facing +Z) with a push, and returns how far
+    /// forward (+Z) its tip ends up.
+    fn swing(limits: [f32; 2], push: Vec3) -> f32 {
+        use crate::{physics_system, PhysicsWorld};
+        let mut tree = SceneTree::new();
+        let mut world = PhysicsWorld::new();
+        world.gravity = Vec3::ZERO;
+        tree.world_mut().insert_resource(world);
+        let upper = tree.create_physics_body3d("Upper", PhysicsBody3D::fixed());
+        tree.add_collision_shape(upper, Shape::sphere(0.05))
+            .unwrap();
+        tree.set_position(upper, Vec3::new(0.0, 2.0, 0.0)).unwrap();
+        tree.add_child(tree.root(), upper).unwrap();
+        let lower = tree.create_physics_body3d("Lower", PhysicsBody3D::rigid());
+        tree.add_collision_shape(lower, Shape::capsule(0.05, 0.6))
+            .unwrap();
+        tree.set_position(lower, Vec3::new(0.0, 1.7, 0.0)).unwrap();
+        tree.add_child(tree.root(), lower).unwrap();
+        let axis = hinge_axis(Vec3::NEG_Y, Vec3::Z, Vec3::Y);
+        let joint = tree.create_joint3d(
+            "Hinge",
+            Joint3D::new(
+                JointKind::Hinge {
+                    limits: Some(limits),
+                },
+                upper,
+                lower,
+            ),
+        );
+        tree.add_child(tree.root(), joint).unwrap();
+        tree.set_global_transform(
+            joint,
+            Affine3A::from_rotation_translation(
+                Quat::from_rotation_arc(Vec3::X, axis),
+                Vec3::new(0.0, 2.0, 0.0),
+            ),
+        )
+        .unwrap();
+        physics_system(tree.world_mut());
+        tree.component_mut::<PhysicsBody3D>(lower)
+            .unwrap()
+            .apply_impulse_at(push, Vec3::new(0.0, 1.4, 0.0));
+        for _ in 0..60 {
+            physics_system(tree.world_mut());
+            tree.update_transforms();
+        }
+        let transform = tree.global_transform(lower).unwrap();
+        (transform.transform_point3a(ab_core::Vec3A::new(0.0, -0.3, 0.0))).z
+    }
+
+    #[test]
+    fn elbows_bend_forwards_and_knees_backwards_in_the_simulation() {
+        // The limits the ragdoll gives elbows and knees.
+        let elbow = [0f32.to_radians(), 145f32.to_radians()];
+        let knee = [(-145f32).to_radians(), 0f32.to_radians()];
+        let (forward, back) = (Vec3::new(0.0, 0.0, 0.3), Vec3::new(0.0, 0.0, -0.3));
+        assert!(swing(elbow, forward) > 0.2, "an elbow bends forwards");
+        assert!(
+            swing(elbow, back) > -0.02,
+            "an elbow does not bend backwards"
+        );
+        assert!(swing(knee, back) < -0.2, "a knee bends backwards");
+        assert!(swing(knee, forward) < 0.02, "a knee does not bend forwards");
     }
 
     #[test]

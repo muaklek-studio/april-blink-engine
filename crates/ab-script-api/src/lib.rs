@@ -38,7 +38,7 @@ use core::fmt;
 use core::marker::{PhantomData, PhantomPinned};
 
 /// Version of this ABI. Incremented on any incompatible change.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Name of the [`EntryPoint`] a script library exports.
 pub const ENTRY_SYMBOL: &str = "ab_script_library";
@@ -84,6 +84,9 @@ impl Str {
     pub unsafe fn to_str<'a>(self) -> Option<&'a str> {
         if self.len == 0 {
             return Some("");
+        }
+        if self.ptr.is_null() {
+            return None;
         }
         // SAFETY: the caller guarantees `len` readable bytes at `ptr`.
         let bytes = unsafe { core::slice::from_raw_parts(self.ptr, self.len) };
@@ -528,6 +531,21 @@ pub struct Library {
     pub script_type_count: usize,
 }
 
+/// A property exported by a script, shown in the editor inspector.
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct PropertyDesc {
+    pub name: Str,
+    /// The type of this property.
+    pub kind: Tag,
+    /// The default value.
+    pub default_value: Value,
+    /// Property flags (bit 0: hidden).
+    pub flags: u32,
+    /// Optional tooltip/documentation.
+    pub doc: Str,
+}
+
 /// One kind of script, attached to nodes by [`ScriptType::name`].
 #[repr(C)]
 #[derive(Debug)]
@@ -552,6 +570,13 @@ pub struct ScriptType {
     /// version of the library).
     pub load_state:
         unsafe extern "C" fn(instance: *mut c_void, state: Str, error: *mut StrSink) -> Status,
+    /// Exported properties (for the editor inspector). May be null if count is 0.
+    pub properties: *const PropertyDesc,
+    pub property_count: usize,
+    /// Get a property value by name. Returns `true` if the property exists.
+    pub get_property: Option<unsafe extern "C" fn(instance: *const c_void, name: Str, out: *mut Value) -> Status>,
+    /// Set a property value by name. Returns `true` if the property exists and was set.
+    pub set_property: Option<unsafe extern "C" fn(instance: *mut c_void, name: Str, value: *const Value) -> Status>,
 }
 
 /// Which [`Event`] it is.
@@ -609,8 +634,11 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
-    use core::mem::{align_of, size_of};
+    use core::mem::{align_of, offset_of, size_of};
+    use std::format;
 
     /// The layout is the ABI: these only change with [`ABI_VERSION`].
     #[test]
@@ -621,7 +649,7 @@ mod tests {
         assert_eq!(align_of::<Value>(), 8);
         assert_eq!(size_of::<Event>(), 64);
         assert_eq!(size_of::<HostApi>(), 64);
-        assert_eq!(size_of::<ScriptType>(), 64);
+        assert_eq!(size_of::<ScriptType>(), 96);
         assert_eq!(size_of::<Library>(), 40);
     }
 
@@ -653,5 +681,267 @@ mod tests {
         };
         // SAFETY: `bad` points to two bytes.
         assert_eq!(unsafe { bad.to_str() }, None);
+    }
+
+    /// Bumping [`ABI_VERSION`] must come with updating the layouts pinned in this module.
+    #[test]
+    fn abi_version_and_entry_symbol() {
+        assert_eq!(ABI_VERSION, 2);
+        assert_eq!(ENTRY_SYMBOL, "ab_script_library");
+        assert_eq!(
+            ENTRY_SYMBOL_NUL.split_last(),
+            Some((&0, ENTRY_SYMBOL.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn plain_data_layouts() {
+        assert_eq!((size_of::<Vec2>(), align_of::<Vec2>()), (8, 4));
+        assert_eq!((size_of::<Vec3>(), align_of::<Vec3>()), (12, 4));
+        assert_eq!((size_of::<Quat>(), align_of::<Quat>()), (16, 4));
+        assert_eq!((size_of::<Color>(), align_of::<Color>()), (16, 4));
+        assert_eq!(offset_of!(Quat, w), 12);
+        assert_eq!(offset_of!(Color, a), 12);
+        assert_eq!((size_of::<NodeId>(), align_of::<NodeId>()), (8, 8));
+        for size in [
+            size_of::<Tag>(),
+            size_of::<MethodId>(),
+            size_of::<Status>(),
+            size_of::<LogLevel>(),
+            size_of::<EventKind>(),
+        ] {
+            assert_eq!(size, 4);
+        }
+        assert_eq!(size_of::<Context>(), 0);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn field_offsets_are_frozen() {
+        assert_eq!(offset_of!(Str, ptr), 0);
+        assert_eq!(offset_of!(Str, len), 8);
+        assert_eq!(size_of::<Data>(), 16);
+        assert_eq!(offset_of!(Value, tag), 0);
+        assert_eq!(offset_of!(Value, data), 8);
+
+        assert_eq!(size_of::<ValueSink>(), 16);
+        assert_eq!(offset_of!(ValueSink, push), 8);
+        assert_eq!(size_of::<StrSink>(), 16);
+        assert_eq!(offset_of!(StrSink, push), 8);
+
+        assert_eq!(offset_of!(HostApi, abi_version), 0);
+        assert_eq!(offset_of!(HostApi, size), 4);
+        assert_eq!(offset_of!(HostApi, engine_version), 8);
+        assert_eq!(offset_of!(HostApi, log), 24);
+        assert_eq!(offset_of!(HostApi, method), 32);
+        assert_eq!(offset_of!(HostApi, call), 40);
+        assert_eq!(offset_of!(HostApi, error), 48);
+        assert_eq!(offset_of!(HostApi, script), 56);
+
+        assert_eq!(offset_of!(Library, abi_version), 0);
+        assert_eq!(offset_of!(Library, sdk_version), 8);
+        assert_eq!(offset_of!(Library, script_types), 24);
+        assert_eq!(offset_of!(Library, script_type_count), 32);
+
+        assert_eq!(size_of::<PropertyDesc>(), 72);
+        assert_eq!(offset_of!(PropertyDesc, name), 0);
+        assert_eq!(offset_of!(PropertyDesc, kind), 16);
+        assert_eq!(offset_of!(PropertyDesc, default_value), 24);
+        assert_eq!(offset_of!(PropertyDesc, flags), 48);
+        assert_eq!(offset_of!(PropertyDesc, doc), 56);
+
+        assert_eq!(offset_of!(ScriptType, name), 0);
+        assert_eq!(offset_of!(ScriptType, flags), 16);
+        assert_eq!(offset_of!(ScriptType, create), 24);
+        assert_eq!(offset_of!(ScriptType, destroy), 32);
+        assert_eq!(offset_of!(ScriptType, event), 40);
+        assert_eq!(offset_of!(ScriptType, save_state), 48);
+        assert_eq!(offset_of!(ScriptType, load_state), 56);
+        assert_eq!(offset_of!(ScriptType, properties), 64);
+        assert_eq!(offset_of!(ScriptType, property_count), 72);
+        assert_eq!(offset_of!(ScriptType, get_property), 80);
+        assert_eq!(offset_of!(ScriptType, set_property), 88);
+
+        assert_eq!(offset_of!(Event, kind), 0);
+        assert_eq!(offset_of!(Event, node), 8);
+        assert_eq!(offset_of!(Event, delta), 16);
+        assert_eq!(offset_of!(Event, signal), 24);
+        assert_eq!(offset_of!(Event, source), 40);
+        assert_eq!(offset_of!(Event, args), 48);
+        assert_eq!(offset_of!(Event, arg_count), 56);
+    }
+
+    /// The numeric values of the enum-like newtypes cross the boundary too.
+    #[test]
+    fn constants_are_frozen() {
+        let tags = [
+            Tag::NIL,
+            Tag::BOOL,
+            Tag::INT,
+            Tag::FLOAT,
+            Tag::VEC2,
+            Tag::VEC3,
+            Tag::QUAT,
+            Tag::COLOR,
+            Tag::NODE,
+            Tag::STR,
+        ];
+        for (i, tag) in tags.into_iter().enumerate() {
+            assert_eq!(tag.0 as usize, i);
+        }
+        let statuses = [
+            Status::OK,
+            Status::ERROR,
+            Status::UNKNOWN_METHOD,
+            Status::BAD_ARGUMENTS,
+            Status::NO_NODE,
+            Status::PANICKED,
+        ];
+        for (i, status) in statuses.into_iter().enumerate() {
+            assert_eq!(status.0 as usize, i);
+        }
+        let levels = [
+            LogLevel::ERROR,
+            LogLevel::WARN,
+            LogLevel::INFO,
+            LogLevel::DEBUG,
+            LogLevel::TRACE,
+        ];
+        for (i, level) in levels.into_iter().enumerate() {
+            assert_eq!(level.0 as usize, i + 1);
+        }
+        let kinds = [
+            EventKind::ENTER_TREE,
+            EventKind::READY,
+            EventKind::PROCESS,
+            EventKind::PHYSICS_PROCESS,
+            EventKind::EXIT_TREE,
+            EventKind::SIGNAL,
+            EventKind::RELOADED,
+        ];
+        for (i, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(kind.0 as usize, i + 1);
+        }
+        assert_eq!(MethodId::UNKNOWN, MethodId(0));
+    }
+
+    #[test]
+    fn status_is_ok_only_for_ok() {
+        assert!(Status::OK.is_ok());
+        assert!(!Status::ERROR.is_ok());
+        assert!(!Status::PANICKED.is_ok());
+        assert!(!Status(-1).is_ok());
+    }
+
+    #[test]
+    fn defaults() {
+        assert!(Value::default().is_nil());
+        assert_eq!(
+            Quat::default(),
+            Quat {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0
+            }
+        );
+        assert_eq!(
+            Vec3::default(),
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0
+            }
+        );
+        let empty = Str::default();
+        assert!(empty.ptr.is_null());
+        assert_eq!(empty.len, 0);
+    }
+
+    #[test]
+    fn values_only_answer_for_their_tag() {
+        let all = [
+            Value::NIL,
+            Value::bool(false),
+            Value::int(1),
+            Value::float(1.5),
+            Value::vec2(Vec2 { x: 1.0, y: 2.0 }),
+            Value::vec3(Vec3::default()),
+            Value::quat(Quat::default()),
+            Value::color(Color::default()),
+            Value::node(NodeId(1)),
+            Value::str(Str::new("x")),
+        ];
+        for (i, value) in all.iter().enumerate() {
+            assert_eq!(value.tag.0 as usize, i);
+            assert_eq!(value.is_nil(), i == 0);
+            assert_eq!(value.as_bool().is_some(), i == 1);
+            // Ints and floats convert into each other.
+            assert_eq!(value.as_float().is_some(), i == 2 || i == 3);
+            assert_eq!(value.as_vec2().is_some(), i == 4);
+            assert_eq!(value.as_vec3().is_some(), i == 5);
+            assert_eq!(value.as_quat().is_some(), i == 6);
+            assert_eq!(value.as_color().is_some(), i == 7);
+            assert_eq!(value.as_node().is_some(), i == 8);
+            // SAFETY: the only string value points to a static.
+            assert_eq!(unsafe { value.as_str() }.is_some(), i == 9);
+        }
+        assert_eq!(Value::bool(false).as_bool(), Some(false));
+        assert_eq!(Value::bool(true).as_int(), None);
+    }
+
+    #[test]
+    fn floats_become_ints_only_when_exact() {
+        assert_eq!(Value::float(-7.0).as_int(), Some(-7));
+        assert_eq!(Value::float(-0.0).as_int(), Some(0));
+        assert_eq!(Value::float(1e15).as_int(), Some(1_000_000_000_000_000));
+        assert_eq!(Value::float(1e16).as_int(), None);
+        assert_eq!(Value::float(f64::NAN).as_int(), None);
+        assert_eq!(Value::float(f64::INFINITY).as_int(), None);
+        assert_eq!(Value::float(f64::NEG_INFINITY).as_int(), None);
+        assert_eq!(Value::float(0.1).as_int(), None);
+    }
+
+    #[test]
+    fn null_strings_with_a_length_are_rejected() {
+        let null = Str {
+            ptr: core::ptr::null(),
+            len: 4,
+        };
+        // SAFETY: a null pointer is checked before reading.
+        assert_eq!(unsafe { null.to_str() }, None);
+        let dangling = Str {
+            ptr: core::ptr::null(),
+            len: 0,
+        };
+        // SAFETY: nothing is read for an empty string.
+        assert_eq!(unsafe { dangling.to_str() }, Some(""));
+    }
+
+    #[test]
+    fn value_debug_shows_the_payload() {
+        assert_eq!(format!("{:?}", Value::NIL), "Value(\"nil\")");
+        assert_eq!(format!("{:?}", Value::int(5)), "Value(Some(5))");
+        assert_eq!(
+            format!("{:?}", Value::node(NodeId(9))),
+            "Value(Some(NodeId(9)))"
+        );
+        let unknown = Value {
+            tag: Tag(77),
+            data: Data { int: 0 },
+        };
+        assert_eq!(format!("{unknown:?}"), "Value(Tag(77))");
+    }
+
+    #[test]
+    fn plain_events_have_no_signal_data() {
+        let event = Event::new(EventKind::PROCESS, NodeId(3), 0.016);
+        assert_eq!(event.kind, EventKind::PROCESS);
+        assert_eq!(event.node, NodeId(3));
+        assert_eq!(event.delta, 0.016);
+        assert_eq!(event.signal.len, 0);
+        assert_eq!(event.source, NodeId(0));
+        assert!(event.args.is_null());
+        assert_eq!(event.arg_count, 0);
     }
 }

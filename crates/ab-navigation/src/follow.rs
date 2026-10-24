@@ -42,8 +42,12 @@ impl PathFollower {
     pub fn direction(&mut self, position: Vec3) -> Option<Vec3> {
         while let Some(&target) = self.waypoints.get(self.next) {
             let offset = Vec3::new(target.x - position.x, 0.0, target.z - position.z);
+            // Standing exactly on a waypoint counts as reached even with a negative
+            // tolerance: a zero offset has no direction.
             if offset.length() > self.tolerance {
-                return Some(offset.normalize());
+                if let Some(direction) = offset.try_normalize() {
+                    return Some(direction);
+                }
             }
             self.next += 1;
         }
@@ -70,5 +74,15 @@ mod tests {
         assert_eq!(follower.remaining().len(), 1);
         assert!(follower.direction(Vec3::new(1.0, 0.0, 1.95)).is_none());
         assert!(follower.is_finished());
+    }
+
+    #[test]
+    fn standing_on_a_waypoint_never_gives_nan() {
+        for tolerance in [-1.0, 0.0] {
+            let mut follower = PathFollower::new(tolerance);
+            follower.set_path(vec![Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)]);
+            assert_eq!(follower.direction(Vec3::ZERO), Some(Vec3::X), "{tolerance}");
+            assert_eq!(follower.direction(Vec3::new(2.0, 1.0, 0.0)), None);
+        }
     }
 }

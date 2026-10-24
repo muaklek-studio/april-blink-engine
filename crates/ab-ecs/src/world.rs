@@ -94,7 +94,12 @@ impl World {
 
     /// Despawns every entity. Resources are kept.
     pub fn clear_entities(&mut self) {
-        self.entities = EntityAllocator::new();
+        // Free through the allocator so generations advance: a fresh allocator would hand
+        // out the old ids again and revive stale handles.
+        let live: Vec<Entity> = self.entities.iter().collect();
+        for entity in live {
+            self.entities.deallocate(entity);
+        }
         self.storages.clear();
     }
 
@@ -431,6 +436,20 @@ mod tests {
         world.flush();
         assert!(world.is_alive(a));
         assert!(!world.is_alive(b));
+    }
+
+    #[test]
+    fn clear_entities_invalidates_old_handles() {
+        let mut world = World::new();
+        let old = world.spawn((Pos(1.0),));
+        world.clear_entities();
+        assert!(!world.is_alive(old));
+        assert_eq!(world.entity_count(), 0);
+        let new = world.spawn((Pos(2.0),));
+        assert_eq!(new.index(), old.index());
+        assert!(!world.is_alive(old), "stale handle must not alias the new entity");
+        assert!(world.get::<Pos>(old).is_none());
+        assert_eq!(world.get_copied::<Pos>(new), Some(Pos(2.0)));
     }
 
     #[test]

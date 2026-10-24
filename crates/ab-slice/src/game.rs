@@ -327,3 +327,50 @@ impl Script for Game {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_rounds_up_to_whole_seconds() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(0.2), "0:01");
+        assert_eq!(clock(59.5), "1:00");
+        assert_eq!(clock(61.0), "1:01");
+        assert_eq!(clock(NIGHT), "3:00");
+        assert_eq!(clock(600.0), "10:00");
+    }
+
+    #[test]
+    fn clock_never_goes_negative() {
+        assert_eq!(clock(-0.4), "0:00");
+        assert_eq!(clock(-75.0), "0:00");
+    }
+
+    #[test]
+    fn a_new_game_is_loading() {
+        let game = Game::default();
+        assert_eq!(game.phase(), Phase::Loading);
+        assert_eq!(game.placed(), 0);
+        assert_eq!(game.level(), None);
+    }
+
+    #[test]
+    fn hot_reload_keeps_the_round() {
+        let mut game = Game {
+            phase: Phase::Playing,
+            placed: 2,
+            total: 4,
+            ..Game::default()
+        };
+        game.set_dawn(97.5);
+        let state = game.save_state().expect("game state");
+        let mut reloaded = Game::default();
+        reloaded.load_state(&state);
+        assert_eq!(reloaded.phase(), Phase::Playing);
+        assert_eq!(reloaded.dawn(), 97.5);
+        assert_eq!(reloaded.placed(), 2);
+        assert_eq!(reloaded.total, 4);
+    }
+}

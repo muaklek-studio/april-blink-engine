@@ -25,6 +25,9 @@ pub struct UiState {
     pub(crate) targets: Vec<HitTarget>,
     hovered: Option<NodeHandle>,
     focus: Option<NodeHandle>,
+    /// Focus was grabbed after the last layout, so `targets` cannot tell yet whether the
+    /// control is shown.
+    pub(crate) focus_since_layout: bool,
     events: Vec<UiEvent>,
 }
 
@@ -61,6 +64,7 @@ impl UiState {
     pub fn grab_focus(&mut self, node: NodeHandle) {
         if self.focus != Some(node) {
             self.focus = Some(node);
+            self.focus_since_layout = true;
             self.events.push(UiEvent::FocusChanged(Some(node)));
         }
     }
@@ -117,7 +121,13 @@ pub fn ui_input_system(world: &mut World) {
             .filter(|&n| alive(n))
     });
     let hovered = state.hovered;
-    if state.focus.is_some_and(|f| !alive(f)) {
+    // A focused control that was freed, hidden or removed from the tree loses focus, or
+    // Enter/Space (often a game key) would still activate an invisible button.
+    let laid_out = |f: NodeHandle| state.targets.iter().any(|t| t.entity == f.entity());
+    if state
+        .focus
+        .is_some_and(|f| !alive(f) || (!state.focus_since_layout && !laid_out(f)))
+    {
         state.release_focus();
     }
 

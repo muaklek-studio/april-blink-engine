@@ -96,6 +96,16 @@ fn main() -> anyhow::Result<()> {
         Command::Extract { pack, output } => {
             let pack = open(&pack)?;
             for entry in pack.entries() {
+                // Never write outside `output` (`..`, absolute paths, Windows drives).
+                let confined = Path::new(&entry.path)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)));
+                if !confined {
+                    bail!(
+                        "refusing to extract `{}`: outside the output folder",
+                        entry.path
+                    );
+                }
                 let target = output.join(&entry.path);
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;

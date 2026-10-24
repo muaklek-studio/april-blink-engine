@@ -44,7 +44,7 @@ impl PhysicsWorld {
         let filter = QueryFilter::new()
             .exclude_rigid_body(body)
             .exclude_sensors()
-            // Like Godot, a character is stopped by what its mask selects.
+            // A character is stopped by what its own mask selects (see `LayerFilter`).
             .groups(InteractionGroups::new(
                 Group::ALL,
                 Group::from_bits_retain(crate::world::collider_layers(collider).1),

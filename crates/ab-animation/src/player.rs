@@ -14,14 +14,31 @@ impl ClipHandle {
 }
 
 /// ECS resource owning every loaded [`AnimationClip`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AnimationLibrary {
+    id: u64,
     clips: Vec<AnimationClip>,
+}
+
+impl Default for AnimationLibrary {
+    fn default() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            clips: Vec::new(),
+        }
+    }
 }
 
 impl AnimationLibrary {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Unique per instance: clip handles are only meaningful in the library that issued
+    /// them, so caches of handles (e.g. the asset server's) remember which one that was.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn add(&mut self, clip: AnimationClip) -> ClipHandle {

@@ -19,6 +19,9 @@ impl Noise {
 
     fn gradient(&self, ix: i32, iy: i32, x: f32, y: f32) -> f32 {
         let h = self.perm[(self.perm[(ix & 255) as usize] as usize + (iy & 255) as usize) & 511];
+        // 0.7071 rather than FRAC_1_SQRT_2: changing it would change every saved seed's
+        // terrain.
+        #[allow(clippy::approx_constant)]
         let (gx, gy) = match h & 7 {
             0 => (1.0, 0.0),
             1 => (-1.0, 0.0),

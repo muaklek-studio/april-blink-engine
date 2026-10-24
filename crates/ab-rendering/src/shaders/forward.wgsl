@@ -118,6 +118,17 @@ fn vs_main(in: VsIn) -> VsOut {
     return finish_vertex(world, normal, tangent, in.uv, object.material.x);
 }
 
+// Normals transform by the inverse-transpose of the linear part: here its cofactor matrix
+// (the inverse-transpose times the determinant), signed so mirrored joints keep normals
+// pointing out. Right for non-uniform joint scale; the length is normalised later.
+fn skin_normal_matrix(m: mat4x4<f32>) -> mat3x3<f32> {
+    let a = m[0].xyz;
+    let b = m[1].xyz;
+    let c = m[2].xyz;
+    let cofactor = mat3x3<f32>(cross(b, c), cross(c, a), cross(a, b));
+    return cofactor * select(1.0, -1.0, dot(a, cross(b, c)) < 0.0);
+}
+
 @vertex
 fn vs_skinned(in: VsIn, skin: SkinIn) -> VsOut {
     let object = objects[in.instance];
@@ -130,8 +141,7 @@ fn vs_skinned(in: VsIn, skin: SkinIn) -> VsOut {
         joint_matrices[base + skin.joints.z] * skin.weights.z +
         joint_matrices[base + skin.joints.w] * skin.weights.w;
     let world = skin_matrix * vec4<f32>(in.position, 1.0);
-    // Exact for rotation + uniform scale, the common case for skeletons.
-    let normal = (skin_matrix * vec4<f32>(in.normal, 0.0)).xyz;
+    let normal = skin_normal_matrix(skin_matrix) * in.normal;
     let tangent = vec4<f32>((skin_matrix * vec4<f32>(in.tangent.xyz, 0.0)).xyz, in.tangent.w);
     return finish_vertex(world, normal, tangent, in.uv, object.material.x);
 }

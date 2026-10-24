@@ -38,7 +38,8 @@ impl ColorRamp {
         let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
             return Color::WHITE;
         };
-        if t <= first.0 {
+        // NaN `t` (or a NaN stop from a hand-edited file) must not index before the start.
+        if t <= first.0 || t.is_nan() || stops.len() == 1 {
             return first.1;
         }
         if t >= last.0 {
@@ -47,7 +48,8 @@ impl ColorRamp {
         let i = stops
             .iter()
             .position(|(at, _)| *at > t)
-            .unwrap_or(stops.len() - 1);
+            .unwrap_or(stops.len() - 1)
+            .max(1);
         let (a, b) = (stops[i - 1], stops[i]);
         let k = ((t - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
         let lerp = |x: f32, y: f32| x + (y - x) * k;
@@ -616,6 +618,18 @@ impl ParticleSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ramp_survives_nan_and_single_stops() {
+        let red = Color::rgba(1.0, 0.0, 0.0, 1.0);
+        let one = ColorRamp(vec![(0.5, red)]);
+        assert_eq!(one.sample(f32::NAN), red);
+        assert_eq!(one.sample(0.7), red);
+        let two = ColorRamp::two(red, Color::WHITE);
+        assert_eq!(two.sample(f32::NAN), red);
+        let broken = ColorRamp(vec![(f32::NAN, red), (1.0, Color::WHITE)]);
+        let _ = broken.sample(0.5);
+    }
 
     #[test]
     fn ramp_interpolates_and_clamps() {

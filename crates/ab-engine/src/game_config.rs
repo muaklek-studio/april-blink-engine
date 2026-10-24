@@ -132,6 +132,9 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GameConfig {
     entries: BTreeMap<String, ConfigEntry>,
+    /// Each key's group (`Player` for `Player.MoveSpeed`): names may contain dots, so a
+    /// key alone does not say where its group ends.
+    groups: BTreeMap<String, String>,
     revision: u64,
 }
 
@@ -159,7 +162,11 @@ impl GameConfig {
                 let key = format!("{group}.{name}");
                 match entry(raw) {
                     Ok(entry) => match check(&key, &entry, &entry.value) {
+                        Ok(()) if config.entries.contains_key(&key) => {
+                            problems.push(format!("`{key}` is defined twice"));
+                        }
                         Ok(()) => {
+                            config.groups.insert(key.clone(), group.clone());
                             config.entries.insert(key, entry);
                         }
                         Err(err) => problems.push(err.to_string()),
@@ -179,7 +186,10 @@ impl GameConfig {
     pub fn to_toml(&self) -> String {
         let mut groups: BTreeMap<&str, toml::Table> = BTreeMap::new();
         for (key, entry) in &self.entries {
-            let (group, name) = key.split_once('.').unwrap_or(("Game", key));
+            let (group, name) = match self.groups.get(key) {
+                Some(group) => (group.as_str(), &key[(group.len() + 1).min(key.len())..]),
+                None => key.split_once('.').unwrap_or(("Game", key)),
+            };
             let plain = !entry.constant
                 && entry.min.is_none()
                 && entry.max.is_none()
@@ -217,7 +227,7 @@ impl GameConfig {
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.push_str(&format!("[{group}]\n"));
+            out.push_str(&format!("[{}]\n", toml_key(group)));
             for (name, value) in values {
                 let value = match value {
                     toml::Value::Table(table) => {
@@ -227,7 +237,7 @@ impl GameConfig {
                     }
                     other => other.to_string(),
                 };
-                out.push_str(&format!("{name} = {value}\n"));
+                out.push_str(&format!("{} = {value}\n", toml_key(&name)));
             }
         }
         out
@@ -357,6 +367,19 @@ impl GameConfig {
                 .map(|(_, k)| format!(" (did you mean `{k}`?)"))
                 .unwrap_or_default(),
         }
+    }
+}
+
+/// `key` as written in TOML: bare when it can be, else quoted (`"Move Speed"`, `"ความเร็ว"`).
+fn toml_key(key: &str) -> String {
+    let bare = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        key.to_owned()
+    } else {
+        toml::Value::String(key.to_owned()).to_string()
     }
 }
 
@@ -603,6 +626,32 @@ Range = { value = 1, min = 5, max = 2 }
             assert!(err.contains(needle), "{needle} in:\n{err}");
         }
         assert!(GameConfig::from_toml("not = [toml").is_err());
+    }
+
+    /// Names that are not bare TOML keys (spaces, Thai, dots) are quoted when saved.
+    #[test]
+    fn saving_quotes_names_that_need_it() {
+        let text = "[\"ผู้เล่น\"]\n\"Move Speed\" = 5.5\n\"a.b\" = { value = 1, min = 0 }\n";
+        let config = GameConfig::from_toml(text).unwrap();
+        let again = GameConfig::from_toml(&config.to_toml()).unwrap();
+        assert_eq!(again.f32("ผู้เล่น.Move Speed").unwrap(), 5.5);
+        assert_eq!(again.int("ผู้เล่น.a.b").unwrap(), 1);
+        assert_eq!(again, config);
+    }
+
+    /// A group whose name has a dot keeps its keys when saved and read again.
+    #[test]
+    fn dotted_group_names_round_trip() {
+        let text = "[\"Enemy.Boss\"]\nHealth = 500\n[Enemy]\nSpeed = 2.0\n";
+        let config = GameConfig::from_toml(text).unwrap();
+        let saved = config.to_toml();
+        let again = GameConfig::from_toml(&saved).unwrap();
+        assert_eq!(again.int("Enemy.Boss.Health").unwrap(), 500, "{saved}");
+        assert_eq!(again, config);
+        // Two spellings of one key are refused, not silently merged.
+        let clash = "[\"a.b\"]\nc = 1\n[a]\n\"b.c\" = 2\n";
+        let err = GameConfig::from_toml(clash).unwrap_err().to_string();
+        assert!(err.contains("`a.b.c` is defined twice"), "{err}");
     }
 
     #[test]

@@ -81,6 +81,24 @@ impl ExportOptions {
         }
     }
 
+    /// These options with the output folder made absolute: the export runs in a process
+    /// whose working folder is the editor's (often `/` when started from a file manager),
+    /// so an empty or relative folder means the game's `dist` or a folder inside the game.
+    pub fn for_target(&self, target: &ExportTarget) -> Self {
+        let out = self.out.trim();
+        let out = if out.is_empty() {
+            target.out.clone()
+        } else if Path::new(out).is_relative() {
+            target.out.parent().unwrap_or(&target.out).join(out)
+        } else {
+            PathBuf::from(out)
+        };
+        Self {
+            out: out.to_string_lossy().into_owned(),
+            ..self.clone()
+        }
+    }
+
     /// Arguments of `ab-editor` for this export of `game`.
     pub fn args(&self, game: &str) -> Vec<String> {
         let platforms: Vec<&str> = [(self.linux, "linux"), (self.windows, "windows")]
@@ -214,7 +232,7 @@ impl ExportJob {
     pub fn start(target: &ExportTarget, options: &ExportOptions) -> anyhow::Result<Self> {
         let editor = std::env::current_exe()?;
         let mut command = ab_project::process::command(editor);
-        command.args(options.args(&target.spec));
+        command.args(options.for_target(target).args(&target.spec));
         let mut job = Self::spawn(command)?;
         job.platforms = usize::from(options.linux) + usize::from(options.windows);
         Ok(job)
@@ -778,6 +796,31 @@ mod tests {
         assert_eq!(target.spec, project.root.to_string_lossy());
         assert_eq!(target.out, project.root.join("dist"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_output_folder_is_inside_the_game_not_the_editors_working_folder() {
+        let root = std::env::temp_dir().join("ab-export-out").join("game");
+        let target = ExportTarget {
+            spec: root.to_string_lossy().into_owned(),
+            name: "game".into(),
+            title: "Game".into(),
+            out: root.join("dist"),
+        };
+        let mut options = ExportOptions::new(&target.out);
+        options.out = "builds/v1".into();
+        assert_eq!(
+            Path::new(&options.for_target(&target).out),
+            root.join("builds/v1")
+        );
+        options.out = "  ".into();
+        assert_eq!(
+            Path::new(&options.for_target(&target).out),
+            root.join("dist")
+        );
+        let elsewhere = std::env::temp_dir().join("elsewhere");
+        options.out = elsewhere.to_string_lossy().into_owned();
+        assert_eq!(Path::new(&options.for_target(&target).out), elsewhere);
     }
 
     #[test]

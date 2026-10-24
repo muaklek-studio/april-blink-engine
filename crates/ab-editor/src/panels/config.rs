@@ -141,7 +141,7 @@ impl ConfigPanel {
             return;
         };
         config.commit();
-        match std::fs::write(path, config.to_toml()) {
+        match editor.write_project_file(path, config.to_toml()) {
             Ok(()) => {
                 editor.tree_mut().world_mut().insert_resource(config);
                 editor.info(format!("Saved {}", path.display()));

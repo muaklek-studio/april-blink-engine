@@ -987,7 +987,10 @@ impl Saves<'_, '_> {
 
     /// Loads JSON saved with [`Saves::save`]; `Ok(None)` if the slot is empty.
     pub fn load<T: DeserializeOwned>(&mut self, slot: &str) -> Result<Option<T>, Error> {
-        match self.read(slot)? {
+        let json: Option<String> = self
+            .tree
+            .fetch(method!("save.read_json"), &[slot.to_value()])?;
+        match json {
             None => Ok(None),
             Some(text) => serde_json::from_str(&text)
                 .map(Some)

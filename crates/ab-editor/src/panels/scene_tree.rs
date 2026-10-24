@@ -62,6 +62,8 @@ enum Action {
     PasteInto(NodeHandle),
     /// Save as a prefab and replace with an instance of it.
     MakePrefab(NodeHandle),
+    /// Turn a generator's output into ordinary nodes.
+    BakeGenerator(NodeHandle),
 }
 
 impl SceneTreePanel {
@@ -205,6 +207,10 @@ impl SceneTreePanel {
                     };
                     drop_nodes(editor, &nodes, target, at);
                 }
+                // Inside an instance (a prefab's part) it would not be saved.
+                Action::Instance(_, parent) if !editor.is_editable(parent) => {
+                    editor.fail(crate::i18n::t("status.instance_contents"));
+                }
                 Action::Instance(path, parent) => {
                     editor.select(Some(parent));
                     crate::app::instance_asset(editor, &path, None);
@@ -218,6 +224,10 @@ impl SceneTreePanel {
                         Err(err) => editor.fail(err),
                     }
                 }
+                Action::BakeGenerator(node) => match editor.bake_generator(node) {
+                    Ok(group) => editor.select(Some(group)),
+                    Err(err) => editor.fail(err),
+                },
                 Action::ToggleVisible(node) => {
                     if let Some(old) = editor.describe_node(node) {
                         let mut new = old.clone();
@@ -575,13 +585,26 @@ impl SceneTreePanel {
                     actions.push(Action::MakePrefab(node));
                     ui.close();
                 }
+                if editor.is_editable(node)
+                    && editor
+                        .tree()
+                        .component::<ab_engine::scene_file::generator::GeneratorNode>(node)
+                        .is_some()
+                    && ui
+                        .button(format!("{}  Bake Generator", icon::CUBE))
+                        .on_hover_text("Replace the generator with the nodes it made, to edit them by hand")
+                        .clicked()
+                {
+                    actions.push(Action::BakeGenerator(node));
+                    ui.close();
+                }
                 ui.separator();
                 commands::menu_item(ui, Command::Cut, not_root);
                 commands::menu_item(ui, Command::Copy, not_root);
                 commands::menu_item(ui, Command::Paste, not_root && editor.can_paste(None));
                 if ui
                     .add_enabled(
-                        editor.can_paste(None) && !editor.is_instance(node),
+                        editor.can_paste(None) && editor.can_add_children(node),
                         egui::Button::new(format!(
                             "{}  {}",
                             icon::CLIPBOARD_TEXT,

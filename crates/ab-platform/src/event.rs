@@ -118,3 +118,124 @@ impl PlatformEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
+    use winit::event::{DeviceId, TouchPhase};
+
+    fn window(event: WindowEvent) -> Option<PlatformEvent> {
+        PlatformEvent::from_window_event(&event)
+    }
+
+    fn wheel(delta: MouseScrollDelta) -> Option<PlatformEvent> {
+        window(WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta,
+            phase: TouchPhase::Moved,
+        })
+    }
+
+    #[test]
+    fn window_state_events() {
+        assert_eq!(
+            window(WindowEvent::Resized(PhysicalSize::new(800, 600))),
+            Some(PlatformEvent::Resized {
+                width: 800,
+                height: 600
+            })
+        );
+        assert_eq!(
+            window(WindowEvent::Focused(false)),
+            Some(PlatformEvent::Focused(false))
+        );
+        assert_eq!(
+            window(WindowEvent::CloseRequested),
+            Some(PlatformEvent::CloseRequested)
+        );
+    }
+
+    #[test]
+    fn mouse_buttons_and_cursor() {
+        assert_eq!(
+            window(WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+            }),
+            Some(PlatformEvent::MouseButton {
+                button: MouseButton::Right,
+                pressed: true
+            })
+        );
+        assert_eq!(
+            window(WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state: ElementState::Released,
+                button: MouseButton::Left,
+            }),
+            Some(PlatformEvent::MouseButton {
+                button: MouseButton::Left,
+                pressed: false
+            })
+        );
+        assert_eq!(
+            window(WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: PhysicalPosition::new(12.5, 40.0),
+            }),
+            Some(PlatformEvent::CursorMoved { x: 12.5, y: 40.0 })
+        );
+        assert_eq!(
+            window(WindowEvent::CursorLeft {
+                device_id: DeviceId::dummy()
+            }),
+            Some(PlatformEvent::CursorLeft)
+        );
+    }
+
+    #[test]
+    fn wheel_lines_pass_through() {
+        assert_eq!(
+            wheel(MouseScrollDelta::LineDelta(0.0, -2.0)),
+            Some(PlatformEvent::MouseWheel { dx: 0.0, dy: -2.0 })
+        );
+    }
+
+    #[test]
+    fn wheel_pixels_become_lines() {
+        assert_eq!(
+            wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                20.0, 120.0
+            ))),
+            Some(PlatformEvent::MouseWheel { dx: 0.5, dy: 3.0 })
+        );
+    }
+
+    #[test]
+    fn unused_window_events_are_dropped() {
+        assert_eq!(window(WindowEvent::Occluded(true)), None);
+        assert_eq!(window(WindowEvent::RedrawRequested), None);
+        assert_eq!(
+            window(WindowEvent::CursorEntered {
+                device_id: DeviceId::dummy()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn raw_mouse_motion() {
+        assert_eq!(
+            PlatformEvent::from_device_event(&DeviceEvent::MouseMotion { delta: (3.0, -1.5) }),
+            Some(PlatformEvent::MouseMotion { dx: 3.0, dy: -1.5 })
+        );
+        assert_eq!(
+            PlatformEvent::from_device_event(&DeviceEvent::MouseWheel {
+                delta: MouseScrollDelta::LineDelta(0.0, 1.0)
+            }),
+            None
+        );
+    }
+}

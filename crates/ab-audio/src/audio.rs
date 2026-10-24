@@ -49,6 +49,8 @@ impl Default for SoundOptions {
 const SILENT_SAMPLE_RATE: u32 = 8000;
 /// Frames the mixer renders per process call (kira's default internal buffer size).
 const MIX_CHUNK: usize = 128;
+/// Lowest playback rate: zero would freeze a sound forever, negative would play it backwards.
+const MIN_PITCH_SCALE: f32 = 0.01;
 
 enum Output {
     #[cfg(feature = "device")]
@@ -271,7 +273,7 @@ impl Audio {
                             }
                             if voice.pitch_scale != player.pitch_scale {
                                 sound.set_playback_rate(
-                                    f64::from(player.pitch_scale),
+                                    f64::from(player.pitch_scale.max(MIN_PITCH_SCALE)),
                                     Tween::default(),
                                 );
                                 voice.pitch_scale = player.pitch_scale;
@@ -437,8 +439,10 @@ fn sync_track(
         voice.position = position;
         return;
     }
-    // Dropping a track handle removes the track and its sounds.
-    let was_playing = voice.sound.take().is_some();
+    // Dropping a track handle removes the track and its sounds, but a sound on the main
+    // track (a player becoming positional) keeps playing unless stopped.
+    let was_playing = voice.sound.is_some();
+    voice.stop();
     voice.track = None;
     voice.position = position;
     if let Some(attenuation) = player.positional {
@@ -493,7 +497,7 @@ fn configure(
     stream
         .data
         .volume(volume_db)
-        .playback_rate(f64::from(pitch_scale.max(0.01)))
+        .playback_rate(f64::from(pitch_scale.max(MIN_PITCH_SCALE)))
         .loop_region(looping.then(|| Region::from(..)))
 }
 
@@ -509,5 +513,51 @@ fn mint_quat(q: Quat) -> mint::Quaternion<f32> {
     mint::Quaternion {
         v: mint_vec(Vec3::new(q.x, q.y, q.z)),
         s: q.w,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AudioNodes;
+    use ab_scene::SceneTree;
+
+    fn main_track_sounds(tree: &SceneTree) -> usize {
+        let mut audio = tree.world().resource_mut::<Audio>().unwrap();
+        with_manager!(&mut audio.output, m => m.main_track().num_sounds())
+    }
+
+    fn frame(tree: &mut SceneTree) {
+        tree.process(1.0 / 60.0);
+        let world = tree.world();
+        world
+            .resource_mut::<Audio>()
+            .unwrap()
+            .update(world, 1.0 / 60.0);
+    }
+
+    #[test]
+    fn becoming_positional_stops_the_2d_sound() {
+        let mut tree = SceneTree::new();
+        tree.world_mut().insert_resource(Audio::silent());
+        let music = AudioStream::from_samples(8000, &[0.0; 4000]);
+        let node =
+            tree.create_audio_stream_player("Music", AudioPlayer::new(music).with_looping(true));
+        tree.add_child(tree.root(), node).unwrap();
+        tree.component_mut::<AudioPlayer>(node).unwrap().play();
+        for _ in 0..3 {
+            frame(&mut tree);
+        }
+        assert_eq!(main_track_sounds(&tree), 1);
+        tree.component_mut::<AudioPlayer>(node).unwrap().positional = Some(Attenuation::default());
+        for _ in 0..10 {
+            frame(&mut tree);
+        }
+        assert!(tree.component::<AudioPlayer>(node).unwrap().is_playing());
+        assert_eq!(
+            main_track_sounds(&tree),
+            0,
+            "the looping 2D sound must not keep playing next to the 3D one"
+        );
     }
 }

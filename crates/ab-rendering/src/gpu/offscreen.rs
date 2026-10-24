@@ -13,7 +13,10 @@ impl OffscreenTarget {
     /// sRGB RGBA8, matching what most window surfaces use.
     pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+    /// A zero side (a collapsed viewport) is clamped to 1 pixel: wgpu rejects empty
+    /// textures.
     pub fn new(gpu: &GpuContext, width: u32, height: u32) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen target"),
             size: wgpu::Extent3d {

@@ -41,6 +41,14 @@ impl<T: Copy + Eq + Hash> ButtonState<T> {
         self.just_released.contains(&button)
     }
 
+    /// Released and pressed again this frame while it was held: a new press although it
+    /// never looked up between two frames.
+    pub fn is_repressed(&self, button: T) -> bool {
+        self.pressed.contains(&button)
+            && self.just_pressed.contains(&button)
+            && self.just_released.contains(&button)
+    }
+
     pub fn pressed(&self) -> impl Iterator<Item = T> + '_ {
         self.pressed.iter().copied()
     }
@@ -149,6 +157,10 @@ impl InputState {
                 if !focused {
                     self.keys.release_all();
                     self.mouse_buttons.release_all();
+                    // The backend may miss releases while another window has focus.
+                    for pad in self.gamepads.values_mut() {
+                        pad.buttons.release_all();
+                    }
                 }
                 false
             }
@@ -342,7 +354,16 @@ mod tests {
             button: MouseButton::Left,
             pressed: true,
         });
+        let pad = GamepadId(0);
+        input.handle_event(&PlatformEvent::GamepadButton {
+            id: pad,
+            button: GamepadButton::South,
+            pressed: true,
+        });
         input.handle_event(&PlatformEvent::Focused(false));
+        let buttons = &input.gamepad(pad).unwrap().buttons;
+        assert!(!buttons.is_pressed(GamepadButton::South));
+        assert!(buttons.is_just_released(GamepadButton::South));
         assert!(!input.is_key_pressed(KeyCode::KeyA));
         assert!(input.is_key_just_released(KeyCode::KeyA));
         assert!(!input.is_mouse_pressed(MouseButton::Left));

@@ -100,7 +100,7 @@ pub struct SceneRenderer {
     shadow_map_size: u32,
 
     /// Indexed by [`forward_variant`].
-    forward_pipelines: [wgpu::RenderPipeline; 4],
+    forward_pipelines: [wgpu::RenderPipeline; 8],
     /// The background through the fog (drawn when fog is on).
     sky_pipeline: wgpu::RenderPipeline,
     /// Whether this frame draws the fogged sky.
@@ -160,7 +160,7 @@ pub struct SceneRenderer {
 
 /// Index of the forward pipeline for a draw class.
 fn forward_variant(class: DrawClass) -> usize {
-    (class.skinned as usize) * 2 + class.double_sided as usize
+    (class.skinned as usize) * 4 + (class.mirrored as usize) * 2 + class.double_sided as usize
 }
 
 impl SceneRenderer {
@@ -278,18 +278,20 @@ impl SceneRenderer {
                 include_str!("../shaders/forward.wgsl")
             ),
         );
-        let forward_pipelines = [(false, false), (false, true), (true, false), (true, true)].map(
-            |(skinned, double_sided)| {
-                create_forward_pipeline(
-                    device,
-                    &forward_module,
-                    &[Some(&forward_layout), Some(&material_layout)],
-                    msaa_samples,
-                    skinned,
-                    double_sided,
-                )
-            },
-        );
+        // Indexed by `forward_variant`: skinned, mirrored, double-sided bits.
+        let forward_pipelines = std::array::from_fn(|variant| {
+            create_forward_pipeline(
+                device,
+                &forward_module,
+                &[Some(&forward_layout), Some(&material_layout)],
+                msaa_samples,
+                DrawClass {
+                    skinned: variant & 4 != 0,
+                    mirrored: variant & 2 != 0,
+                    double_sided: variant & 1 != 0,
+                },
+            )
+        });
         let sky_pipeline =
             create_sky_pipeline(device, &forward_module, &forward_layout, msaa_samples);
         let shafts_pipeline =
@@ -508,9 +510,12 @@ impl SceneRenderer {
         self.plan.build(&self.list.draws, |d| {
             let mesh = meshes.get(d.mesh.index())?;
             let double_sided = *double_sided.get(d.material.index())?;
+            let skinned = d.joints.is_some() && mesh.skin.is_some();
             Some(DrawClass {
-                skinned: d.joints.is_some() && mesh.skin.is_some(),
+                skinned,
                 double_sided,
+                // Skinned vertices ignore the node transform (joint matrices place them).
+                mirrored: !skinned && d.model.matrix3.determinant() < 0.0,
             })
         });
         self.pack_objects();
@@ -1639,9 +1644,13 @@ fn create_forward_pipeline(
     module: &wgpu::ShaderModule,
     layouts: &[Option<&wgpu::BindGroupLayout>],
     samples: u32,
-    skinned: bool,
-    double_sided: bool,
+    class: DrawClass,
 ) -> wgpu::RenderPipeline {
+    let DrawClass {
+        skinned,
+        double_sided,
+        mirrored,
+    } = class;
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("forward pipeline layout"),
         bind_group_layouts: layouts,
@@ -1658,7 +1667,13 @@ fn create_forward_pipeline(
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
+            // A mirrored transform reverses the winding; keep culling and `front_facing`
+            // (double-sided lighting) right.
+            front_face: if mirrored {
+                wgpu::FrontFace::Cw
+            } else {
+                wgpu::FrontFace::Ccw
+            },
             cull_mode: (!double_sided).then_some(wgpu::Face::Back),
             ..Default::default()
         },

@@ -71,7 +71,7 @@ impl Default for StyleBox {
 /// Shaped text cached between frames; reshaped only when its inputs change.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TextCache {
-    key: Option<(String, TextStyle, Option<u32>, HAlign)>,
+    key: Option<(String, TextStyle, Option<u32>, HAlign, u64)>,
     pub(crate) block: TextBlock,
 }
 
@@ -86,13 +86,13 @@ impl TextCache {
     ) -> &TextBlock {
         // Widths are compared at 1/64 unit so layout jitter does not reshape every frame.
         let wrap_key = wrap_width.map(|w| (w * 64.0).round() as u32);
-        let stale = self
-            .key
-            .as_ref()
-            .is_none_or(|(t, s, w, a)| t != text || s != style || *w != wrap_key || *a != align);
+        let generation = fonts.generation();
+        let stale = self.key.as_ref().is_none_or(|(t, s, w, a, g)| {
+            t != text || s != style || *w != wrap_key || *a != align || *g != generation
+        });
         if stale {
             self.block = crate::text::layout_text(fonts, text, style, wrap_width, align);
-            self.key = Some((text.to_owned(), style.clone(), wrap_key, align));
+            self.key = Some((text.to_owned(), style.clone(), wrap_key, align, generation));
         }
         &self.block
     }
@@ -358,6 +358,31 @@ impl BoxContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{FontId, Fonts};
+
+    #[test]
+    fn text_cache_reshapes_when_fonts_change() {
+        let mut fonts = Fonts::new();
+        let mut cache = TextCache::default();
+        let style = TextStyle::new(20.0).with_font(FontId(1));
+        let font_of = |cache: &mut TextCache, fonts: &Fonts| {
+            cache.get(fonts, "Hi", &style, None, HAlign::Left).lines[0].glyphs[0].font
+        };
+        // Font 1 is not loaded yet: the default font stands in.
+        assert_eq!(font_of(&mut cache, &fonts), FontId::DEFAULT);
+        let bold = fonts
+            .add(include_bytes!("../fonts/Prompt-SemiBold.ttf").to_vec())
+            .unwrap();
+        assert_eq!(bold, FontId(1));
+        assert_eq!(
+            font_of(&mut cache, &fonts),
+            bold,
+            "reshaped with the new font"
+        );
+        let generation = fonts.generation();
+        fonts.set_fallbacks(vec![bold]);
+        assert_ne!(fonts.generation(), generation);
+    }
 
     #[test]
     fn progress_ratio_clamps() {

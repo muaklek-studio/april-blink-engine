@@ -65,6 +65,20 @@ impl Player {
         self.pitch = (to.y / to.length().max(1e-4)).clamp(-1.0, 1.0).asin();
     }
 
+    /// Drains or refills stamina for one step; returns whether the player sprints.
+    fn update_stamina(&mut self, wants_sprint: bool, delta: f32) -> bool {
+        let sprinting = wants_sprint && !self.exhausted && self.stamina > 0.0;
+        if sprinting {
+            self.stamina = (self.stamina - delta * 0.3).max(0.0);
+            self.exhausted = self.stamina <= 0.0;
+        } else {
+            self.stamina = (self.stamina + delta * 0.2).min(1.0);
+            // Wait for a third of the bar before sprinting again.
+            self.exhausted &= self.stamina < 0.33;
+        }
+        sprinting
+    }
+
     fn view(&self, tree: &Tree<'_>) -> Option<(Vec3, Vec3)> {
         let camera = tree.global_transform(self.camera?)?;
         Some((camera.translation, camera.forward()))
@@ -214,15 +228,7 @@ impl Script for Player {
         let direction_input = input.vector("move_left", "move_right", "move_back", "move_forward");
         let sprint = input.is_pressed("sprint");
         let moving = direction_input.length_squared() > 0.01;
-        let sprinting = sprint && moving && !self.exhausted && self.stamina > 0.0;
-        if sprinting {
-            self.stamina = (self.stamina - delta * 0.3).max(0.0);
-            self.exhausted = self.stamina <= 0.0;
-        } else {
-            self.stamina = (self.stamina + delta * 0.2).min(1.0);
-            // Wait for a third of the bar before sprinting again.
-            self.exhausted &= self.stamina < 0.33;
-        }
+        let sprinting = self.update_stamina(sprint && moving, delta);
         let speed = if sprinting {
             self.sprint_speed
         } else {
@@ -235,5 +241,119 @@ impl Script for Player {
         let fall = character.velocity().unwrap_or_default().y + gravity * delta;
         let _ = character.set_velocity(direction * speed + Vec3::Y * fall);
         let _ = character.move_and_slide(delta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where the player looks with the yaw and pitch it would apply.
+    fn looking(player: &Player) -> Vec3 {
+        Quat::from_rotation_y(player.yaw) * Quat::from_rotation_x(player.pitch) * Vec3::NEG_Z
+    }
+
+    #[test]
+    fn look_at_faces_the_target() {
+        let eye = Vec3::new(1.0, 1.6, -2.0);
+        for target in [
+            Vec3::new(1.0, 1.6, -10.0),
+            Vec3::new(5.0, 1.6, -2.0),
+            Vec3::new(-3.0, 0.2, 4.0),
+            Vec3::new(1.5, 4.0, -1.0),
+        ] {
+            let mut player = Player::default();
+            player.look_at(eye, target);
+            let expected = (target - eye).normalize();
+            assert!(
+                looking(&player).abs_diff_eq(expected, 1e-5),
+                "{target}: {} != {expected}",
+                looking(&player)
+            );
+        }
+    }
+
+    #[test]
+    fn look_at_itself_stays_finite() {
+        let mut player = Player::default();
+        player.look_at(Vec3::ONE, Vec3::ONE);
+        assert!(player.yaw.is_finite() && player.pitch.is_finite());
+        assert_eq!(player.pitch, 0.0);
+        player.look_at(Vec3::ZERO, Vec3::Y);
+        assert!((player.pitch - FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn walking_refills_stamina_up_to_full() {
+        let mut player = Player {
+            stamina: 0.5,
+            ..Player::default()
+        };
+        assert!(!player.update_stamina(false, 1.0));
+        assert!((player.stamina - 0.7).abs() < 1e-6);
+        for _ in 0..10 {
+            player.update_stamina(false, 1.0);
+        }
+        assert_eq!(player.stamina, 1.0);
+    }
+
+    #[test]
+    fn sprinting_drains_stamina_until_exhausted() {
+        let mut player = Player::default();
+        let mut sprinted = 0.0;
+        while player.update_stamina(true, 0.1) {
+            sprinted += 0.1;
+            assert!(sprinted < 10.0, "never ran out of stamina");
+        }
+        // 1.0 / 0.3 per second.
+        assert!((sprinted - 3.4_f32).abs() < 0.11, "{sprinted}");
+        // The step that refused to sprint already refilled a little.
+        assert!(player.stamina < 0.05, "{}", player.stamina);
+        assert!(player.exhausted);
+    }
+
+    #[test]
+    fn exhaustion_lasts_until_a_third_of_the_bar() {
+        let mut player = Player {
+            stamina: 0.0,
+            exhausted: true,
+            ..Player::default()
+        };
+        // Holding sprint while exhausted walks and refills.
+        assert!(!player.update_stamina(true, 1.0));
+        assert!((player.stamina - 0.2).abs() < 1e-6);
+        assert!(player.exhausted);
+        assert!(!player.update_stamina(true, 0.5));
+        assert!(player.exhausted, "stamina {}", player.stamina);
+        assert!(!player.update_stamina(true, 0.5));
+        assert!(!player.exhausted, "stamina {}", player.stamina);
+        assert!(player.update_stamina(true, 0.1));
+    }
+
+    #[test]
+    fn releasing_sprint_before_empty_does_not_exhaust() {
+        let mut player = Player::default();
+        assert!(player.update_stamina(true, 1.0));
+        assert!(!player.update_stamina(false, 0.1));
+        assert!(!player.exhausted);
+        assert!(player.update_stamina(true, 0.1));
+    }
+
+    #[test]
+    fn hot_reload_keeps_view_and_stamina() {
+        let mut player = Player {
+            stamina: 0.42,
+            exhausted: true,
+            ..Player::default()
+        };
+        player.look_at(Vec3::ZERO, Vec3::new(1.0, 0.5, -1.0));
+        let state = player.save_state().expect("player state");
+        let mut reloaded = Player::default();
+        reloaded.load_state(&state);
+        assert_eq!(reloaded.stamina, 0.42);
+        assert!(reloaded.exhausted);
+        assert_eq!((reloaded.yaw, reloaded.pitch), (player.yaw, player.pitch));
+        assert!(!reloaded.is_carrying());
+        assert_eq!(reloaded.prompt(), "");
     }
 }

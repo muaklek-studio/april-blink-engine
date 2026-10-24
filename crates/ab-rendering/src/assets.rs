@@ -40,16 +40,35 @@ pub(crate) struct MeshEntry {
 /// Meshes and textures are immutable once added (the renderer uploads each one once).
 /// Materials can be edited at any time through [`RenderAssets::material_mut`]; they are
 /// re-sent every frame. Unloading is not supported yet.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RenderAssets {
+    id: u64,
     meshes: Vec<MeshEntry>,
     textures: Vec<Texture>,
     materials: Vec<Material>,
 }
 
+impl Default for RenderAssets {
+    fn default() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            meshes: Vec::new(),
+            textures: Vec::new(),
+            materials: Vec::new(),
+        }
+    }
+}
+
 impl RenderAssets {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Unique per instance: handles are only meaningful in the `RenderAssets` that issued
+    /// them, so caches of handles (e.g. the asset server's) remember which one that was.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Validates and registers a mesh.

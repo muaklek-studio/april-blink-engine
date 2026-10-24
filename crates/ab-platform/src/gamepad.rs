@@ -150,7 +150,7 @@ mod backend {
     use crate::event::PlatformEvent;
     use gilrs::{Axis, Button, EventType};
 
-    fn button(button: Button) -> Option<GamepadButton> {
+    pub(super) fn button(button: Button) -> Option<GamepadButton> {
         Some(match button {
             Button::South => GamepadButton::South,
             Button::East => GamepadButton::East,
@@ -173,7 +173,7 @@ mod backend {
         })
     }
 
-    fn axis(axis: Axis) -> Option<GamepadAxis> {
+    pub(super) fn axis(axis: Axis) -> Option<GamepadAxis> {
         Some(match axis {
             Axis::LeftStickX => GamepadAxis::LeftStickX,
             Axis::LeftStickY => GamepadAxis::LeftStickY,
@@ -234,5 +234,96 @@ mod backend {
             },
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn id_display() {
+        assert_eq!(GamepadId(3).to_string(), "gamepad3");
+    }
+
+    #[test]
+    fn all_buttons_are_listed_once() {
+        let unique: HashSet<_> = GamepadButton::ALL.into_iter().collect();
+        assert_eq!(unique.len(), GamepadButton::ALL.len());
+        assert!(GamepadButton::ALL.is_sorted());
+    }
+
+    #[test]
+    fn axis_index_matches_its_position_in_all() {
+        for (i, axis) in GamepadAxis::ALL.into_iter().enumerate() {
+            assert_eq!(axis.index(), i);
+        }
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn gilrs_buttons_map_by_position() {
+        use gilrs::Button;
+        let pairs = [
+            (Button::South, GamepadButton::South),
+            (Button::East, GamepadButton::East),
+            (Button::North, GamepadButton::North),
+            (Button::West, GamepadButton::West),
+            (Button::LeftTrigger, GamepadButton::LeftBumper),
+            (Button::RightTrigger, GamepadButton::RightBumper),
+            (Button::LeftTrigger2, GamepadButton::LeftTrigger),
+            (Button::RightTrigger2, GamepadButton::RightTrigger),
+            (Button::Select, GamepadButton::Select),
+            (Button::Start, GamepadButton::Start),
+            (Button::Mode, GamepadButton::Mode),
+            (Button::LeftThumb, GamepadButton::LeftStick),
+            (Button::RightThumb, GamepadButton::RightStick),
+            (Button::DPadUp, GamepadButton::DPadUp),
+            (Button::DPadDown, GamepadButton::DPadDown),
+            (Button::DPadLeft, GamepadButton::DPadLeft),
+            (Button::DPadRight, GamepadButton::DPadRight),
+        ];
+        for (gilrs, ours) in pairs {
+            assert_eq!(backend::button(gilrs), Some(ours), "{gilrs:?}");
+        }
+        // Every engine button is reachable from some gilrs button.
+        let mapped: HashSet<_> = pairs.iter().map(|&(_, b)| b).collect();
+        assert_eq!(mapped.len(), GamepadButton::ALL.len());
+        for unmapped in [Button::C, Button::Z, Button::Unknown] {
+            assert_eq!(backend::button(unmapped), None);
+        }
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn only_sticks_map_from_gilrs_axes() {
+        use gilrs::Axis;
+        assert_eq!(
+            backend::axis(Axis::LeftStickX),
+            Some(GamepadAxis::LeftStickX)
+        );
+        assert_eq!(
+            backend::axis(Axis::LeftStickY),
+            Some(GamepadAxis::LeftStickY)
+        );
+        assert_eq!(
+            backend::axis(Axis::RightStickX),
+            Some(GamepadAxis::RightStickX)
+        );
+        assert_eq!(
+            backend::axis(Axis::RightStickY),
+            Some(GamepadAxis::RightStickY)
+        );
+        // Triggers arrive as button values instead; D-pads as buttons.
+        for other in [
+            Axis::LeftZ,
+            Axis::RightZ,
+            Axis::DPadX,
+            Axis::DPadY,
+            Axis::Unknown,
+        ] {
+            assert_eq!(backend::axis(other), None);
+        }
     }
 }

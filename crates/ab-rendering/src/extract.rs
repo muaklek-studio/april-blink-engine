@@ -112,19 +112,23 @@ const CULL_PER_JOB: usize = 512;
 const SKINS_PER_JOB: usize = 2;
 
 /// Writes `joint global × inverse bind` for every skin of `skinned`, in order, into
-/// `palettes` (already sized: each skin's joints back to back), in parallel over skins.
+/// `palettes` (already sized: each instance's palette back to back, `(entity, length)`), in
+/// parallel over skins. Palette entries past the skin's joints (vertices naming joints the
+/// skin does not have) are left as they are (identity).
 fn fill_palettes(
     skins: &SparseSet<Skin>,
     transforms: &SparseSet<Transform>,
-    skinned: &[Entity],
+    skinned: &[(Entity, usize)],
     palettes: &mut [Mat4],
 ) {
     let mut work = Vec::with_capacity(skinned.len());
     let mut rest = palettes;
-    for skin in skinned.iter().filter_map(|&e| skins.get(e)) {
-        let (palette, tail) = std::mem::take(&mut rest).split_at_mut(skin.joints.len());
-        work.push((skin, palette));
+    for &(entity, len) in skinned {
+        let (palette, tail) = std::mem::take(&mut rest).split_at_mut(len);
         rest = tail;
+        if let Some(skin) = skins.get(entity) {
+            work.push((skin, palette));
+        }
     }
     jobs::par_for_each_mut(&mut work, SKINS_PER_JOB, |(skin, palette)| {
         for (i, (out, joint)) in palette.iter_mut().zip(&skin.joints).enumerate() {
@@ -170,7 +174,8 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
     let mut fallback_camera = None;
     let mut chosen_camera = None;
     // Skinned instances, in the order of their palettes in `out.joint_matrices`.
-    let mut skinned: Vec<Entity> = Vec::new();
+    let mut skinned: Vec<(Entity, usize)> = Vec::new();
+    let assets = world.resource::<RenderAssets>();
     let mut stack: Vec<Entity> = roots.into_iter().rev().collect();
     while let Some(entity) = stack.pop() {
         let Some(info) = infos.get(entity) else {
@@ -197,10 +202,16 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
         if let Some(instance) = meshes.as_ref().and_then(|m| m.get(entity)) {
             // Palettes are filled in parallel once the walk is done.
             let joints = skins.as_ref().and_then(|s| s.get(entity)).map(|skin| {
+                // At least as many matrices as the mesh's vertices name joints, so a skin with
+                // fewer joints than its mesh expects never lets the shader read the next
+                // instance's palette or past the buffer.
+                let mesh_joints = assets
+                    .as_ref()
+                    .map_or(0, |a| a.mesh_joint_bounds(instance.mesh).len());
+                let len = skin.joints.len().max(mesh_joints);
                 let start = out.joint_matrices.len();
-                out.joint_matrices
-                    .resize(start + skin.joints.len(), Mat4::IDENTITY);
-                skinned.push(entity);
+                out.joint_matrices.resize(start + len, Mat4::IDENTITY);
+                skinned.push((entity, len));
                 start as u32..out.joint_matrices.len() as u32
             });
             out.draws.push(DrawItem {
@@ -266,7 +277,7 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
         ),
     };
 
-    if let Some(assets) = world.resource::<RenderAssets>() {
+    if let Some(assets) = assets {
         let frustum = Frustum::from_view_projection(&view.view_projection);
         let assets = &*assets;
         let palettes = &out.joint_matrices;
@@ -483,6 +494,51 @@ mod tests {
         assert!(draw.in_view, "skinned meshes are not culled");
         let expected = Mat4::from_translation(Vec3::new(0.0, 0.0, 49.0));
         assert!(list.joint_matrices[0].abs_diff_eq(expected, 1e-5));
+    }
+
+    #[test]
+    fn palettes_cover_every_joint_the_mesh_names() {
+        let (mut tree, _, material) = scene();
+        // Vertices name joint 2, but the skin only has one joint.
+        let mesh = Mesh::cube(1.0).with_skin(vec![
+            crate::mesh::SkinWeights {
+                joints: [0, 2, 0, 0],
+                weights: [0.5, 0.5, 0.0, 0.0],
+            };
+            24
+        ]);
+        let mesh = tree
+            .world()
+            .resource_mut::<RenderAssets>()
+            .unwrap()
+            .add_mesh(mesh)
+            .unwrap();
+        let root = tree.root();
+        let joint = tree.create_node3d("Joint");
+        tree.add_child(root, joint).unwrap();
+        let mut bodies = Vec::new();
+        for name in ["A", "B"] {
+            let body = tree.create_mesh_instance3d(name, MeshInstance3D::new(mesh, material));
+            tree.insert_component(
+                body,
+                Skin {
+                    joints: vec![joint],
+                    inverse_bind_matrices: vec![Mat4::IDENTITY],
+                },
+            )
+            .unwrap();
+            tree.add_child(root, body).unwrap();
+            bodies.push(body);
+        }
+        let list = run(&mut tree);
+        assert_eq!(list.draws[0].joints, Some(0..3));
+        assert_eq!(
+            list.draws[1].joints,
+            Some(3..6),
+            "no overlap with the first palette"
+        );
+        assert_eq!(list.joint_matrices.len(), 6);
+        assert_eq!(list.joint_matrices[2], Mat4::IDENTITY, "padding");
     }
 
     #[test]

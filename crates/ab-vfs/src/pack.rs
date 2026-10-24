@@ -338,9 +338,12 @@ impl Pack {
         let toc_offset = u64_at(pack, 16).ok_or_else(|| corrupt("header"))? as usize;
         let toc_size = u64_at(pack, 24).ok_or_else(|| corrupt("header"))? as usize;
         let checksum = u64_at(pack, 32).ok_or_else(|| corrupt("header"))?;
-        let toc = pack
-            .get(toc_offset..toc_offset.saturating_add(toc_size))
-            .ok_or_else(|| corrupt("table of contents out of bounds"))?;
+        // The table of contents sits between the header and the trailer.
+        let toc_end = toc_offset.saturating_add(toc_size);
+        if toc_offset < HEADER_SIZE || toc_end > pack.len() - TRAILER_SIZE {
+            return Err(corrupt("table of contents out of bounds"));
+        }
+        let toc = &pack[toc_offset..toc_end];
         if fnv1a64(toc) != checksum {
             return Err(corrupt("table of contents checksum mismatch"));
         }
@@ -372,8 +375,17 @@ impl Pack {
                 Some(entry)
             })()
             .ok_or_else(|| corrupt("table of contents entry"))?;
+            // Lookups normalise the path, so any other spelling could never be read, and
+            // `..` or a leading `/` would escape the target directory when extracting.
+            if normalize(&entry.path).as_deref() != Some(entry.path.as_str()) {
+                return Err(VfsError::Corrupt(format!(
+                    "invalid file path `{}`",
+                    entry.path
+                )));
+            }
             let end = entry.offset.checked_add(entry.stored_size);
-            if end.is_none_or(|end| end > toc_offset as u64) {
+            // File data lies between the header and the table of contents.
+            if entry.offset < HEADER_SIZE as u64 || end.is_none_or(|end| end > toc_offset as u64) {
                 return Err(corrupt("file data out of bounds"));
             }
             let size_ok = match entry.compression {
@@ -585,6 +597,76 @@ mod tests {
         let mut huge = bytes.clone();
         huge[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(Pack::from_bytes(huge), Err(VfsError::Corrupt(_))));
+    }
+
+    /// A one-file pack written by hand, with any path.
+    fn raw_pack(path: &str, data: &[u8]) -> Vec<u8> {
+        raw_pack_at(path, data, HEADER_SIZE as u64)
+    }
+
+    /// [`raw_pack`] with the file's data claimed to be at `offset`.
+    fn raw_pack_at(path: &str, data: &[u8], offset: u64) -> Vec<u8> {
+        let mut toc = Vec::new();
+        toc.extend_from_slice(&(path.len() as u16).to_le_bytes());
+        toc.extend_from_slice(path.as_bytes());
+        toc.extend_from_slice(&offset.to_le_bytes());
+        toc.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        toc.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        toc.push(Compression::None as u8);
+        toc.extend_from_slice(&fnv1a64(data).to_le_bytes());
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&VERSION.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&((HEADER_SIZE + data.len()) as u64).to_le_bytes());
+        out.extend_from_slice(&(toc.len() as u64).to_le_bytes());
+        out.extend_from_slice(&fnv1a64(&toc).to_le_bytes());
+        out.resize(HEADER_SIZE, 0);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&toc);
+        let size = (out.len() + TRAILER_SIZE) as u64;
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(TAIL_MAGIC);
+        out
+    }
+
+    #[test]
+    fn rejects_paths_escaping_the_root() {
+        assert_eq!(
+            Pack::from_bytes(raw_pack("ok/file.txt", b"x"))
+                .unwrap()
+                .read("ok/file.txt")
+                .unwrap(),
+            b"x"
+        );
+        for path in [
+            "../../.bashrc",
+            "/etc/passwd",
+            "a/../../b",
+            "a\\b",
+            "a//b",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    Pack::from_bytes(raw_pack(path, b"x")),
+                    Err(VfsError::Corrupt(_))
+                ),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_file_data_overlapping_the_header() {
+        // 8 bytes "inside" the header: its magic and version, which happen to checksum.
+        let header = [MAGIC.as_slice(), &VERSION.to_le_bytes()].concat();
+        assert!(Pack::from_bytes(raw_pack_at("a", &header, HEADER_SIZE as u64)).is_ok());
+        assert!(matches!(
+            Pack::from_bytes(raw_pack_at("a", &header, 0)),
+            Err(VfsError::Corrupt(_))
+        ));
     }
 
     #[test]

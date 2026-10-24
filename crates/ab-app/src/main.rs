@@ -43,7 +43,12 @@ struct Options {
 }
 
 fn parse_args() -> anyhow::Result<Option<Options>> {
-    let mut args = std::env::args().skip(1).peekable();
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// Parses the arguments after the program name; `None` when only the usage was asked for.
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> anyhow::Result<Option<Options>> {
+    let mut args = args.into_iter().peekable();
     let mut mode = Mode::Windowed;
     let mut frames = None;
     let mut hot = None;
@@ -172,5 +177,101 @@ fn run() -> anyhow::Result<()> {
             info!(path = %path.display(), width, height, "screenshot saved");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> anyhow::Result<Option<Options>> {
+        parse_args_from(args.iter().map(|&a| a.to_owned()))
+    }
+
+    fn options(args: &[&str]) -> Options {
+        parse(args).unwrap().expect("options")
+    }
+
+    #[test]
+    fn no_arguments_open_a_window() {
+        let options = options(&[]);
+        assert!(matches!(options.mode, Mode::Windowed));
+        assert!(options.hot.is_none());
+        assert!(!options.overlay);
+    }
+
+    #[test]
+    fn headless_takes_a_frame_count() {
+        let options = options(&["--headless", "600", "--overlay"]);
+        assert!(matches!(options.mode, Mode::Headless { frames: 600 }));
+        assert!(options.overlay);
+    }
+
+    #[test]
+    fn screenshots_default_to_60_frames() {
+        let Mode::Screenshot { path, frames } = options(&["--screenshot", "shot.png"]).mode else {
+            panic!("not a screenshot");
+        };
+        assert_eq!(path, PathBuf::from("shot.png"));
+        assert_eq!(frames, 60);
+    }
+
+    #[test]
+    fn frames_apply_to_screenshots_in_any_order() {
+        for args in [
+            ["--screenshot", "a.png", "--frames", "5"],
+            ["--frames", "5", "--screenshot", "a.png"],
+        ] {
+            assert!(matches!(
+                options(&args).mode,
+                Mode::Screenshot { frames: 5, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn the_last_mode_wins() {
+        let options = options(&["--screenshot", "a.png", "--headless", "3"]);
+        assert!(matches!(options.mode, Mode::Headless { frames: 3 }));
+    }
+
+    #[test]
+    fn hot_takes_an_optional_library() {
+        let explicit = options(&["--hot", "libscripts.so", "--overlay"]);
+        assert_eq!(explicit.hot, Some(PathBuf::from("libscripts.so")));
+        assert!(explicit.overlay);
+
+        // Followed by another option: the demo scripts next to the executable.
+        let default = options(&["--hot", "--overlay"]);
+        let library = default.hot.expect("default library");
+        assert!(library
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("ab_demo_scripts"));
+        assert!(default.overlay);
+        assert!(options(&["--hot"]).hot.is_some());
+    }
+
+    #[test]
+    fn help_asks_for_no_run() {
+        assert!(parse(&["--help"]).unwrap().is_none());
+        assert!(parse(&["--overlay", "-h"]).unwrap().is_none());
+    }
+
+    #[test]
+    fn bad_arguments_are_errors() {
+        for args in [
+            &["--bogus"][..],
+            &["--headless"],
+            &["--headless", "many"],
+            &["--headless", "-1"],
+            &["--screenshot"],
+            &["--frames", "1.5"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        let err = parse(&["--bogus"]).err().unwrap().to_string();
+        assert!(err.contains("--bogus") && err.contains("usage"), "{err}");
     }
 }

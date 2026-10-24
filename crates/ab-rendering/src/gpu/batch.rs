@@ -13,6 +13,9 @@ use std::ops::Range;
 pub(crate) struct DrawClass {
     pub skinned: bool,
     pub double_sided: bool,
+    /// The model transform has a negative determinant (mirrored), which flips the winding of
+    /// its triangles: front faces are clockwise on screen.
+    pub mirrored: bool,
 }
 
 /// A run of consecutive objects drawn with one instanced call.
@@ -80,6 +83,7 @@ impl BatchPlan {
                 let shadow_class = DrawClass {
                     skinned: class.skinned,
                     double_sided: false,
+                    mirrored: false,
                 };
                 push_run(&mut self.shadow, shadow_class, draw, instance, false);
             }
@@ -125,6 +129,7 @@ mod tests {
     const STATIC: DrawClass = DrawClass {
         skinned: false,
         double_sided: false,
+        mirrored: false,
     };
 
     fn item(mesh: u32, material: u32, in_view: bool, cast_shadows: bool) -> DrawItem {
@@ -195,6 +200,7 @@ mod tests {
         let skinned = DrawClass {
             skinned: true,
             double_sided: false,
+            mirrored: false,
         };
         plan.build(&draws, |d| {
             if d.mesh.0 == 9 {

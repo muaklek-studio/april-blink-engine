@@ -248,8 +248,17 @@ impl Catalog {
 
     /// The languages a lookup tries: the current one, its fallbacks, then the base.
     fn chain(&self) -> Vec<usize> {
+        let mut chain = self.fallbacks(self.current);
+        if !self.languages.is_empty() && !chain.contains(&0) {
+            chain.push(0);
+        }
+        chain
+    }
+
+    /// `index` and its fallback chain (without the implicit base).
+    fn fallbacks(&self, index: usize) -> Vec<usize> {
         let mut chain = Vec::new();
-        let mut next = Some(self.current).filter(|&i| i < self.languages.len());
+        let mut next = Some(index).filter(|&i| i < self.languages.len());
         while let Some(index) = next {
             if chain.contains(&index) {
                 break; // a fallback cycle
@@ -259,9 +268,6 @@ impl Catalog {
                 .fallback
                 .as_deref()
                 .and_then(|code| self.index(code));
-        }
-        if !self.languages.is_empty() && !chain.contains(&0) {
-            chain.push(0);
         }
         chain
     }
@@ -300,12 +306,19 @@ impl Catalog {
     /// Keys the base language has and `code` (with its fallbacks) lacks, sorted: what is
     /// left to translate.
     pub fn untranslated(&self, code: &str) -> Vec<String> {
-        let (Some(base), Some(language)) = (self.languages.first(), self.get_language(code)) else {
+        let (Some(base), Some(index)) = (self.languages.first(), self.index(code)) else {
             return Vec::new();
         };
+        // The base itself is where untranslated texts come from, so it does not count.
+        let chain: Vec<&Language> = self
+            .fallbacks(index)
+            .into_iter()
+            .filter(|&i| i != 0 || index == 0)
+            .map(|i| &self.languages[i])
+            .collect();
         base.keys()
             .into_iter()
-            .filter(|key| language.get(key).is_none())
+            .filter(|key| chain.iter().all(|language| language.get(key).is_none()))
             .map(str::to_owned)
             .collect()
     }
@@ -452,6 +465,11 @@ saved = "บันทึก {file} แล้ว"
         assert_eq!(catalog.text("menu.save"), "เก็บ");
         assert_eq!(catalog.text("menu.file"), "ไฟล์", "from its fallback");
         assert_eq!(catalog.text("count.nodes"), "{n} nodes", "from the base");
+        assert_eq!(
+            catalog.untranslated("th-x"),
+            ["count.nodes"],
+            "texts its fallback has are translated"
+        );
         // A cycle does not hang.
         catalog
             .add_toml("[language]\ncode = \"a\"\nname = \"A\"\nfallback = \"b\"\n")

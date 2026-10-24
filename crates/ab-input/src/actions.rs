@@ -126,6 +126,8 @@ struct ActionValue {
     strength: f32,
     pressed: bool,
     was_pressed: bool,
+    /// Released and pressed again between two updates.
+    repressed: bool,
 }
 
 /// An action changing state this frame.
@@ -187,11 +189,26 @@ impl Actions {
                 .map(|b| b.strength(input, action.deadzone))
                 .fold(0.0, f32::max)
                 .max(self.held.get(name).copied().unwrap_or(0.0));
+            // A new press of a button held across the update, as long as nothing else keeps
+            // the action down (another binding, or a hold from code).
+            let held = self.held.get(name).is_some_and(|&s| s > 0.0);
+            let repressed = !held
+                && action.bindings.iter().any(|b| b.repressed(input))
+                && action
+                    .bindings
+                    .iter()
+                    .all(|b| b.repressed(input) || b.strength(input, action.deadzone) <= 0.0);
             let value = self.values.entry(name.clone()).or_default();
             value.was_pressed = value.pressed;
             value.strength = strength;
             value.pressed = strength > 0.0;
-            if value.pressed != value.was_pressed {
+            value.repressed = repressed && value.was_pressed && value.pressed;
+            if value.repressed {
+                self.events.push(ActionEvent {
+                    action: name.clone(),
+                    pressed: true,
+                });
+            } else if value.pressed != value.was_pressed {
                 self.events.push(ActionEvent {
                     action: name.clone(),
                     pressed: value.pressed,
@@ -213,9 +230,11 @@ impl Actions {
         self.value(action).pressed
     }
 
+    /// Pressed this frame. Also `true` when every input holding the action was released
+    /// and pressed again between two updates (no `just_released` is reported for that).
     pub fn is_just_pressed(&self, action: &str) -> bool {
         let v = self.value(action);
-        v.pressed && !v.was_pressed
+        v.pressed && (!v.was_pressed || v.repressed)
     }
 
     pub fn is_just_released(&self, action: &str) -> bool {
@@ -439,6 +458,78 @@ mod tests {
 
         let err = InputMap::from_toml("[actions.x]\nbindings = [\"key:Nope\"]").unwrap_err();
         assert!(err.to_string().contains("key:Nope"), "{err}");
+    }
+
+    #[test]
+    fn tap_within_one_frame_is_not_lost() {
+        let mut input = InputState::new();
+        let mut actions = Actions::new(map());
+        // Pressed and released between two updates (touchpad click, low frame rate).
+        key(&mut input, KeyCode::Space, true);
+        key(&mut input, KeyCode::Space, false);
+        input.handle_event(&PlatformEvent::GamepadButton {
+            id: GamepadId(0),
+            button: GamepadButton::South,
+            pressed: true,
+        });
+        input.handle_event(&PlatformEvent::GamepadButton {
+            id: GamepadId(0),
+            button: GamepadButton::South,
+            pressed: false,
+        });
+        actions.update(&input);
+        assert!(
+            actions.is_just_pressed("jump"),
+            "the tap presses the action"
+        );
+        input.end_frame();
+        actions.update(&input);
+        assert!(
+            actions.is_just_released("jump"),
+            "and releases it next frame"
+        );
+        input.end_frame();
+        actions.update(&input);
+        assert!(!actions.is_pressed("jump") && !actions.is_just_released("jump"));
+    }
+
+    #[test]
+    fn release_and_press_within_one_frame_presses_again() {
+        let mut input = InputState::new();
+        let mut actions = Actions::new(map());
+        key(&mut input, KeyCode::Space, true);
+        actions.update(&input);
+        input.end_frame();
+        actions.update(&input);
+        assert!(actions.is_pressed("jump") && !actions.is_just_pressed("jump"));
+        // Released and pressed again between two updates (fast mashing, a frame hitch).
+        key(&mut input, KeyCode::Space, false);
+        key(&mut input, KeyCode::Space, true);
+        actions.update(&input);
+        assert!(actions.is_just_pressed("jump"), "a new press");
+        assert_eq!(
+            actions.events(),
+            [ActionEvent {
+                action: "jump".into(),
+                pressed: true
+            }]
+        );
+        input.end_frame();
+        actions.update(&input);
+        assert!(actions.is_pressed("jump") && !actions.is_just_pressed("jump"));
+
+        // Another binding holding the action down: no new press.
+        input.handle_event(&PlatformEvent::GamepadButton {
+            id: GamepadId(0),
+            button: GamepadButton::South,
+            pressed: true,
+        });
+        actions.update(&input);
+        input.end_frame();
+        key(&mut input, KeyCode::Space, false);
+        key(&mut input, KeyCode::Space, true);
+        actions.update(&input);
+        assert!(actions.is_pressed("jump") && !actions.is_just_pressed("jump"));
     }
 
     #[test]

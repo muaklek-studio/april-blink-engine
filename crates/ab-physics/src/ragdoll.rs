@@ -71,7 +71,7 @@ impl SkeletonRagdoll {
             swing_degrees: 50.0,
             twist_degrees: 30.0,
             collision_layer: 1,
-            collision_mask: 1,
+            collision_mask: u32::MAX,
             active: false,
         }
     }
@@ -95,8 +95,8 @@ pub(crate) fn descendants(world: &World, root: Entity) -> Vec<Entity> {
 }
 
 /// Before the step: applies each ragdoll's mode to its parts and moves inactive parts to
-/// their bones.
-pub(crate) fn before_step(world: &World) {
+/// their bones. Returns whether any part was moved (their children's globals are then stale).
+pub(crate) fn before_step(world: &World) -> bool {
     let ragdolls: Vec<(Entity, bool)> =
         match (world.storage::<Ragdoll>(), world.storage::<NodeInfo>()) {
             (Some(ragdolls), Some(infos)) => ragdolls
@@ -104,8 +104,9 @@ pub(crate) fn before_step(world: &World) {
                 .filter(|(e, _)| infos.get(*e).is_some_and(|i| i.in_tree))
                 .map(|(e, r)| (e, r.active))
                 .collect(),
-            _ => return,
+            _ => return false,
         };
+    let mut followed = false;
     for (root, active) in ragdolls {
         let wanted = if active {
             BodyKind::Rigid
@@ -121,10 +122,11 @@ pub(crate) fn before_step(world: &World) {
             }
             drop(body);
             if !active {
-                follow_bone(world, part);
+                followed |= follow_bone(world, part);
             }
         }
     }
+    followed
 }
 
 /// After the step: active parts move their bones, parents first.
@@ -151,19 +153,38 @@ pub(crate) fn after_step(world: &World) {
                 continue;
             };
             set_global(world, bone.bone.entity(), part_global * bone.offset);
+            // Bones below without a body of their own (a spine bone between belly and
+            // chest, a clavicle) must move now: deeper parts set their bones relative to
+            // them.
+            refresh_descendants(world, bone.bone.entity());
         }
     }
 }
 
-/// Puts an inactive part where its bone is.
-fn follow_bone(world: &World, part: Entity) {
+/// Puts an inactive part where its bone is. Returns whether it has a bone to follow.
+fn follow_bone(world: &World, part: Entity) -> bool {
     let Some(bone) = world.get::<RagdollBone>(part).map(|b| *b) else {
-        return;
+        return false;
     };
     let Some(bone_global) = world.get::<Transform>(bone.bone.entity()).map(|t| t.global) else {
-        return;
+        return false;
     };
     set_global(world, part, bone_global * bone.offset.inverse());
+    true
+}
+
+/// Recomputes the globals of every node below `root` from its current global, as transform
+/// propagation would (a parent without a `Transform` breaks inheritance).
+fn refresh_descendants(world: &World, root: Entity) {
+    for entity in descendants(world, root) {
+        let parent_global = world
+            .get::<Parent>(entity)
+            .and_then(|p| world.get::<Transform>(p.0.entity()).map(|t| t.global))
+            .unwrap_or(Affine3A::IDENTITY);
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.global = parent_global * transform.local.to_affine();
+        }
+    }
 }
 
 fn depth(world: &World, mut entity: Entity) -> usize {

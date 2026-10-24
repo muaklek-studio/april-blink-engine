@@ -26,6 +26,8 @@ pub struct EffectsPanel {
     stop: Option<usize>,
     /// "Save as" file name.
     save_name: String,
+    /// A save that would replace this existing file, waiting for Replace or Cancel.
+    replace: Option<String>,
 }
 
 impl EffectsPanel {
@@ -330,26 +332,40 @@ impl EffectsPanel {
                     })
                     .collect();
                 let relative = format!("effects/{name}.{}", ab_engine::scene_file::SCENE_EXTENSION);
-                if ui
+                let confirming = self.replace.as_deref() == Some(relative.as_str());
+                let mut write = None;
+                if confirming {
+                    ui.label(
+                        RichText::new(format!("{}  {relative} already exists.", icon::WARNING))
+                            .color(theme::WARN),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Replace").clicked() {
+                            write = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.replace = None;
+                        }
+                    });
+                } else if ui
                     .add_enabled(
                         !name.is_empty(),
                         egui::Button::new(format!("{}  Save", icon::FLOPPY_DISK)),
                     )
                     .clicked()
                 {
-                    let scene = ab_engine::scene_file::save_scene(editor.tree(), root);
-                    let path = editor.project().join(&relative);
-                    let result = path
-                        .parent()
-                        .map_or(Ok(()), std::fs::create_dir_all)
-                        .and_then(|()| std::fs::write(&path, scene.to_toml()));
-                    match result {
-                        Ok(()) => {
+                    write = Some(false);
+                }
+                if let Some(overwrite) = write {
+                    self.replace = None;
+                    match save_effect(editor, root, &relative, overwrite) {
+                        Ok(true) => {
                             editor.assets.request_rescan();
                             editor.info(format!(
                                 "Saved {relative}: drag it into a scene, or spawn it from a script"
                             ));
                         }
+                        Ok(false) => self.replace = Some(relative.clone()),
                         Err(err) => editor.fail(format!("cannot save {relative}: {err}")),
                     }
                 }
@@ -364,6 +380,23 @@ impl EffectsPanel {
             },
         );
     }
+}
+
+/// Writes the effect at `root` to `relative` (in the project). `Ok(false)`: the file exists
+/// and `overwrite` is not set, nothing written.
+fn save_effect(
+    editor: &Editor,
+    root: NodeHandle,
+    relative: &str,
+    overwrite: bool,
+) -> std::io::Result<bool> {
+    let path = editor.project().join(relative);
+    if path.exists() && !overwrite {
+        return Ok(false);
+    }
+    let scene = ab_engine::scene_file::save_scene(editor.tree(), root);
+    editor.write_project_file(&path, scene.to_toml())?;
+    Ok(true)
 }
 
 /// The effect being edited: (its root, its Particles3D layers).
@@ -766,6 +799,31 @@ fn describe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_an_effect_does_not_replace_a_file_unasked() {
+        let dir = std::env::temp_dir().join(format!("ab-effect-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("effects")).unwrap();
+        std::fs::write(dir.join("effects/fire.abscene"), "mine").unwrap();
+        let mut editor = Editor::new(dir.clone(), None, ab_engine::audio::AudioOutput::Silent);
+        editor.select(None);
+        editor.add_node(
+            NodeDesc {
+                name: "Fire".into(),
+                kind: Some("Node3D".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        let root = editor.selection.unwrap();
+        assert!(!save_effect(&editor, root, "effects/fire.abscene", false).unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join("effects/fire.abscene")).unwrap(), "mine");
+        assert!(save_effect(&editor, root, "effects/fire.abscene", true).unwrap());
+        assert_ne!(std::fs::read_to_string(dir.join("effects/fire.abscene")).unwrap(), "mine");
+        assert!(save_effect(&editor, root, "effects/new.abscene", false).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn descriptions_round_trip_through_the_settings() {

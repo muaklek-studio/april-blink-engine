@@ -281,6 +281,9 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
         .env("GIT_EDITOR", "true")
         // Status and diffs must not take the index lock the user's own git might need.
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // Paths are file names, not patterns: discarding `level[1].abscene` must not touch
+        // `level1.abscene`.
+        .env("GIT_LITERAL_PATHSPECS", "1")
         // Stable, parseable messages.
         .env("LC_ALL", "C");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
@@ -1034,6 +1037,46 @@ mod tests {
         // No remote: pushing explains itself instead of hanging.
         let err = run(Some(&root), &GitOp::Push).unwrap_err();
         assert!(err.contains("No remote"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paths_with_pattern_characters_are_file_names() {
+        if !git_available() {
+            return;
+        }
+        let dir = temp_repo("literal");
+        run(None, &GitOp::Init(dir.clone())).unwrap();
+        let root = discover(&dir).unwrap().expect("a repository");
+        configure(&root);
+        std::fs::write(root.join("level[1].txt"), "a\n").unwrap();
+        std::fs::write(root.join("level1.txt"), "b\n").unwrap();
+        run(
+            Some(&root),
+            &GitOp::Commit {
+                message: "Levels".into(),
+                amend: false,
+                stage: vec![".gitignore".into(), "level[1].txt".into(), "level1.txt".into()],
+            },
+        )
+        .unwrap();
+        std::fs::write(root.join("level[1].txt"), "changed\n").unwrap();
+        std::fs::write(root.join("level1.txt"), "my work\n").unwrap();
+        std::fs::write(root.join("new[1].txt"), "x\n").unwrap();
+        std::fs::write(root.join("new1.txt"), "keep\n").unwrap();
+        run(
+            Some(&root),
+            &GitOp::Discard {
+                tracked: vec!["level[1].txt".into()],
+                untracked: vec!["new[1].txt".into()],
+            },
+        )
+        .unwrap();
+        // As a pattern, `level[1].txt` means `level1.txt`: the wrong file was restored.
+        assert_eq!(std::fs::read_to_string(root.join("level[1].txt")).unwrap(), "a\n");
+        assert_eq!(std::fs::read_to_string(root.join("level1.txt")).unwrap(), "my work\n");
+        assert!(!root.join("new[1].txt").exists());
+        assert!(root.join("new1.txt").exists(), "untracked work kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

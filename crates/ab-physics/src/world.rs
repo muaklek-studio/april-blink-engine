@@ -8,8 +8,8 @@ use crate::joint::{Joint3D, JointKind, JointState};
 use crate::query::{QueryOptions, RayHit};
 use crate::ragdoll;
 use ab_core::{Affine3A, Color, Quat, Time, Transform3D, Vec3};
-use ab_ecs::{Entity, Without, World};
-use ab_scene::{NodeHandle, NodeInfo, Parent, Signal, SignalQueue, Transform};
+use ab_ecs::{Entity, SparseSet, Without, World};
+use ab_scene::{Children, NodeHandle, NodeInfo, Parent, Signal, SignalQueue, Transform};
 use rapier3d::prelude::{
     ActiveCollisionTypes, ActiveEvents, ActiveHooks, CCDSolver, Collider, ColliderBuilder,
     ColliderHandle, ColliderSet, CollisionEvent, DebugRenderBackend, DebugRenderMode,
@@ -30,6 +30,8 @@ struct ColliderInfo {
     shape: Entity,
     body: Entity,
     sensor: bool,
+    layer: u32,
+    mask: u32,
 }
 
 /// ECS resource owning the Rapier simulation and its link to the scene.
@@ -265,7 +267,12 @@ impl PhysicsWorld {
         if let Some(root) = self.scene_root(world) {
             ab_scene::propagate_transforms(world, NodeHandle::from_entity(root));
         }
-        ragdoll::before_step(world);
+        let followed = ragdoll::before_step(world);
+        if let Some(root) = self.root.filter(|_| followed) {
+            // Inactive ragdoll parts were just moved to their bones: bring their shapes
+            // along, or the colliders would be built a step behind the parts.
+            ab_scene::propagate_transforms(world, NodeHandle::from_entity(root));
+        }
         self.sync_bodies(world);
         self.sync_colliders(world);
         self.sync_joints(world);
@@ -751,6 +758,8 @@ impl PhysicsWorld {
                                 shape: entity,
                                 body: body_entity,
                                 sensor: settings.sensor,
+                                layer: settings.collision_layer,
+                                mask: settings.collision_mask,
                             },
                         );
                         self.mass_dirty.insert(body.handle, body.settings.mass);
@@ -852,7 +861,27 @@ impl PhysicsWorld {
             return;
         };
         let parents = world.storage::<Parent>();
-        for (entity, body) in bodies.iter_mut() {
+        let children = world.storage::<Children>();
+        let depth = |mut entity: Entity| {
+            let mut depth = 0usize;
+            while let Some(parent) = parents.as_ref().and_then(|p| p.get(entity)) {
+                entity = parent.0.entity();
+                depth += 1;
+            }
+            depth
+        };
+        // Parents first: a rigid body below another one (directly or through plain nodes)
+        // takes its local transform from the parent's new pose, not last step's.
+        let mut order: Vec<(usize, Entity)> = bodies
+            .iter()
+            .filter(|(_, b)| b.state.is_some())
+            .map(|(e, _)| (depth(e), e))
+            .collect();
+        order.sort_unstable_by_key(|&(depth, _)| depth);
+        for (_, entity) in order {
+            let Some(body) = bodies.get_mut(entity) else {
+                continue;
+            };
             let Some(mut state) = body.state else {
                 continue;
             };
@@ -891,6 +920,7 @@ impl PhysicsWorld {
             // a teleport next step.
             state.pose = decompose(&transform.global).1;
             body.state = Some(state);
+            refresh_descendants(&mut transforms, children.as_deref(), entity);
         }
     }
 
@@ -905,26 +935,43 @@ impl PhysicsWorld {
         let node = NodeHandle::from_entity;
         if a.sensor || b.sensor {
             for (area, other) in [(a, b), (b, a)] {
-                if area.sensor && bump(&mut self.overlaps, (area.body, other.body), started) {
+                // An area reports what its own mask selects; the body's mask plays no part.
+                if area.sensor
+                    && area.mask & other.layer != 0
+                    && bump(&mut self.overlaps, (area.body, other.body), started)
+                {
                     let (area, body) = (node(area.body), node(other.body));
-                    self.events.push(if started {
-                        PhysicsEvent::BodyEntered { area, body }
-                    } else {
-                        PhysicsEvent::BodyExited { area, body }
-                    });
+                    self.push_transition(
+                        started,
+                        PhysicsEvent::BodyEntered { area, body },
+                        PhysicsEvent::BodyExited { area, body },
+                    );
                 }
             }
         } else {
             let key = (a.body.min(b.body), a.body.max(b.body));
             if bump(&mut self.contacts, key, started) {
                 let (a, b) = (node(key.0), node(key.1));
-                self.events.push(if started {
-                    PhysicsEvent::ContactStarted { a, b }
-                } else {
-                    PhysicsEvent::ContactEnded { a, b }
-                });
+                self.push_transition(
+                    started,
+                    PhysicsEvent::ContactStarted { a, b },
+                    PhysicsEvent::ContactEnded { a, b },
+                );
             }
         }
+    }
+
+    /// Records a pair starting or ending. A start that undoes an end from the same step
+    /// (a collider rebuilt for a new shape, scale or setting, while the bodies stay put)
+    /// cancels it instead: the pair never really separated.
+    fn push_transition(&mut self, started: bool, start: PhysicsEvent, end: PhysicsEvent) {
+        if started {
+            if let Some(i) = self.events.iter().position(|e| *e == end) {
+                self.events.remove(i);
+                return;
+            }
+        }
+        self.events.push(if started { start } else { end });
     }
 }
 
@@ -1027,29 +1074,39 @@ pub(crate) fn collider_layers(collider: &Collider) -> (u32, u32) {
     ((data >> 96) as u32, (data >> 64) as u32)
 }
 
-/// Godot's rule: two objects interact when either one's mask contains the other's layer.
+/// The layer rule. The layer is what an object is; the mask is what it responds to.
+/// * Solid contact pushes both objects, so it needs both to respond: each mask contains the
+///   other's layer. Either side can opt out on its own (debris that ignores the player
+///   clears the player's bit in its own mask).
+/// * An area only watches: it sees what its own mask selects, whatever the body's mask.
+///   Two areas each see the other by their own mask.
+/// * Queries and character movement are the same one-way rule: the asker's mask decides.
 struct LayerFilter;
 
 impl LayerFilter {
-    fn allowed(context: &PairFilterContext<'_>) -> bool {
-        let (Some(a), Some(b)) = (
-            context.colliders.get(context.collider1),
-            context.colliders.get(context.collider2),
-        ) else {
-            return false;
-        };
-        let ((layer_a, mask_a), (layer_b, mask_b)) = (collider_layers(a), collider_layers(b));
-        mask_a & layer_b != 0 || mask_b & layer_a != 0
+    fn pair<'a>(context: &PairFilterContext<'a>) -> Option<(&'a Collider, &'a Collider)> {
+        Some((
+            context.colliders.get(context.collider1)?,
+            context.colliders.get(context.collider2)?,
+        ))
     }
 }
 
 impl PhysicsHooks for LayerFilter {
     fn filter_contact_pair(&self, context: &PairFilterContext<'_>) -> Option<SolverFlags> {
-        Self::allowed(context).then_some(SolverFlags::COMPUTE_RIGID_IMPULSES)
+        let (a, b) = Self::pair(context)?;
+        let ((layer_a, mask_a), (layer_b, mask_b)) = (collider_layers(a), collider_layers(b));
+        (mask_a & layer_b != 0 && mask_b & layer_a != 0)
+            .then_some(SolverFlags::COMPUTE_RIGID_IMPULSES)
     }
 
     fn filter_intersection_pair(&self, context: &PairFilterContext<'_>) -> bool {
-        Self::allowed(context)
+        let Some((a, b)) = Self::pair(context) else {
+            return false;
+        };
+        let ((layer_a, mask_a), (layer_b, mask_b)) = (collider_layers(a), collider_layers(b));
+        // Which side sees the other is sorted out per area when the events are made.
+        (a.is_sensor() && mask_a & layer_b != 0) || (b.is_sensor() && mask_b & layer_a != 0)
     }
 }
 
@@ -1073,6 +1130,30 @@ fn decompose(global: &Affine3A) -> (Vec3, Pose) {
             rotation,
         },
     )
+}
+
+/// Recomputes the globals below `root` from its global, as transform propagation would
+/// (a child without a `Transform` breaks inheritance).
+fn refresh_descendants(
+    transforms: &mut SparseSet<Transform>,
+    children: Option<&SparseSet<Children>>,
+    root: Entity,
+) {
+    let Some(children) = children else {
+        return;
+    };
+    let mut stack = vec![root];
+    while let Some(entity) = stack.pop() {
+        let Some(global) = transforms.get(entity).map(|t| t.global) else {
+            continue;
+        };
+        for kid in children.get(entity).map_or(&[][..], |c| &c.0[..]) {
+            if let Some(transform) = transforms.get_mut(kid.entity()) {
+                transform.global = global * transform.local.to_affine();
+                stack.push(kid.entity());
+            }
+        }
+    }
 }
 
 fn body_type(kind: BodyKind) -> RigidBodyType {

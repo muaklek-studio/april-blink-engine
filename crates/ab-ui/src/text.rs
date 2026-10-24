@@ -121,6 +121,8 @@ pub fn layout_text(
     let metrics = fonts.line_metrics(style.font, style.size);
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
+        // Text written on Windows ends its lines with `\r\n`.
+        let paragraph = paragraph.strip_suffix('\r').unwrap_or(paragraph);
         let run = fonts.shape(style.font, paragraph, style.size);
         match wrap_width {
             Some(width) if run.width > width => {
@@ -158,6 +160,8 @@ pub fn layout_text(
 fn wrap(text: &str, glyphs: &[ShapedGlyph], max_width: f32, out: &mut Vec<TextLine>) {
     // Clusters: (start glyph index, end glyph index, advance, is whitespace).
     let mut clusters: Vec<(usize, usize, f32, bool)> = Vec::new();
+    // First character of each cluster.
+    let mut firsts: Vec<char> = Vec::new();
     for (i, glyph) in glyphs.iter().enumerate() {
         match clusters.last_mut() {
             Some(last) if glyphs[last.0].cluster == glyph.cluster => {
@@ -165,14 +169,18 @@ fn wrap(text: &str, glyphs: &[ShapedGlyph], max_width: f32, out: &mut Vec<TextLi
                 last.2 += glyph.advance;
             }
             _ => {
-                let space = text[glyph.cluster..]
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_whitespace);
-                clusters.push((i, i + 1, glyph.advance, space));
+                let first = text[glyph.cluster..].chars().next().unwrap_or(' ');
+                clusters.push((i, i + 1, glyph.advance, first.is_whitespace()));
+                firsts.push(first);
             }
         }
     }
+    // Thai leading vowels (เ แ โ ใ ไ) belong to the consonant after them and following
+    // vowels (ะ า ำ ๅ) to the one before, although each is a grapheme of its own.
+    let can_break_before = |j: usize| {
+        !matches!(firsts[j], '\u{0E30}' | '\u{0E32}' | '\u{0E33}' | '\u{0E45}')
+            && !matches!(firsts[j - 1], '\u{0E40}'..='\u{0E44}')
+    };
 
     let mut line_start = 0; // cluster index
     let mut width = 0.0;
@@ -184,10 +192,17 @@ fn wrap(text: &str, glyphs: &[ShapedGlyph], max_width: f32, out: &mut Vec<TextLi
             last_space = Some(i);
         }
         if !space && width + advance > max_width && i > line_start {
-            // Break after the last space, else before this cluster.
+            // Break after the last space, else before this cluster (or an earlier one that
+            // allows a break).
             let (end, next) = match last_space {
                 Some(s) if s >= line_start => (s, s + 1),
-                _ => (i, i),
+                _ => {
+                    let end = (line_start + 1..=i)
+                        .rev()
+                        .find(|&j| can_break_before(j))
+                        .unwrap_or(i);
+                    (end, end)
+                }
             };
             out.push(make_line(glyphs, &clusters[line_start..end]));
             line_start = next;
@@ -276,6 +291,11 @@ mod tests {
         assert!(block.lines[2].glyphs.is_empty());
         let expected = metrics.ascent + metrics.descent + 3.0 * metrics.line_height;
         assert!((block.size.y - expected).abs() < 1e-3);
+        // Windows line endings lay out the same.
+        let crlf = layout_text(&fonts, "one\r\ntwo", &style, None, HAlign::Left);
+        let lf = layout_text(&fonts, "one\ntwo", &style, None, HAlign::Left);
+        assert_eq!(crlf.size, lf.size);
+        assert_eq!(crlf.lines[0].glyphs.len(), lf.lines[0].glyphs.len());
     }
 
     #[test]
@@ -318,6 +338,64 @@ mod tests {
             );
         }
         assert_eq!(lines(&block, text).concat(), text);
+    }
+
+    #[test]
+    fn thai_leading_and_following_vowels_stay_with_their_consonant() {
+        let fonts = Fonts::new();
+        let style = TextStyle::new(20.0);
+        // Leading vowels (เ แ โ ใ ไ) are written before their consonant and following ones
+        // (ะ า ำ) after it, each as a grapheme of its own.
+        let text = "เกมแมวโลกใจไฟเพลงเสียงแสงเงาไกลมากำลังจะมาถึงแล้วนะ";
+        let full = layout_text(&fonts, text, &style, None, HAlign::Left);
+        for parts in 2..12 {
+            let width = full.size.x / parts as f32;
+            let block = layout_text(&fonts, text, &style, Some(width), HAlign::Left);
+            let lines = lines(&block, text);
+            assert_eq!(lines.concat(), text);
+            for line in &lines {
+                let first = line.chars().next().unwrap();
+                let last = line.chars().last().unwrap();
+                assert!(
+                    !matches!(first, '\u{0E30}' | '\u{0E32}' | '\u{0E33}' | '\u{0E45}'),
+                    "line starts with a following vowel: {lines:?}"
+                );
+                assert!(
+                    !matches!(last, '\u{0E40}'..='\u{0E44}'),
+                    "line ends with a leading vowel: {lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn emoji_sequences_are_not_split() {
+        let fonts = Fonts::new();
+        let style = TextStyle::new(20.0);
+        // Family (ZWJ sequence), thumbs up with skin tone, keycap, flag pair: rustybuzz
+        // shapes each as one cluster, so wrapping never splits them.
+        let units = [
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F44D}\u{1F3FD}",
+            "1\u{FE0F}\u{20E3}",
+            "\u{1F1F9}\u{1F1ED}",
+        ];
+        let text = units.concat().repeat(4);
+        let full = layout_text(&fonts, &text, &style, None, HAlign::Left);
+        for parts in 2..20 {
+            let width = full.size.x / parts as f32;
+            let block = layout_text(&fonts, &text, &style, Some(width), HAlign::Left);
+            let lines = lines(&block, &text);
+            assert_eq!(lines.concat(), text);
+            for line in &lines {
+                let mut rest = line.as_str();
+                while !rest.is_empty() {
+                    let unit = units.iter().find(|u| rest.starts_with(*u));
+                    let unit = unit.unwrap_or_else(|| panic!("split sequence: {lines:?}"));
+                    rest = &rest[unit.len()..];
+                }
+            }
+        }
     }
 
     #[test]

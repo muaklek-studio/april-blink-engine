@@ -595,3 +595,48 @@ fn roots(document: &gltf::Document) -> Vec<usize> {
     }
     (0..is_child.len()).filter(|&i| !is_child[i]).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_from_matrix(matrix: Mat4) -> GltfNode {
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"nodes":[{{"matrix":{:?}}}]}}"#,
+            matrix.to_cols_array()
+        );
+        let gltf = gltf::Gltf::from_slice(json.as_bytes()).unwrap();
+        node(gltf.document.nodes().next().unwrap())
+    }
+
+    #[test]
+    fn node_matrices_round_trip_including_mirrored_ones() {
+        let cases = [
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(-1.0, 1.0, 1.0),
+                Quat::from_rotation_y(0.7),
+                Vec3::new(1.0, 2.0, 3.0),
+            ),
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(1.0, -2.0, 0.5),
+                Quat::from_euler(ab_core::EulerRot::XYZ, 0.3, -1.2, 2.5),
+                Vec3::ZERO,
+            ),
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(2.0, 3.0, -4.0),
+                Quat::from_rotation_x(3.0),
+                Vec3::new(-5.0, 0.0, 1.0),
+            ),
+            Mat4::from_rotation_z(std::f32::consts::PI),
+        ];
+        for matrix in cases {
+            let node = node_from_matrix(matrix);
+            let back = node.transform.to_matrix();
+            assert!(
+                back.abs_diff_eq(matrix, 1e-4),
+                "{matrix:?}\n decomposed to {:?}\n which is {back:?}",
+                node.transform
+            );
+        }
+    }
+}

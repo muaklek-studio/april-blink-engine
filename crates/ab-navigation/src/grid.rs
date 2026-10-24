@@ -79,17 +79,22 @@ impl NavGrid {
             let d = (extent.y / size).ceil().max(1.0) as u64;
             (w, d)
         };
-        let (w, d) = cells(cell_size);
-        if w.saturating_mul(d) > Self::MAX_CELLS {
-            let grown = cell_size * ((w * d) as f32 / Self::MAX_CELLS as f32).sqrt() * 1.01;
+        let requested = cell_size;
+        let (mut w, mut d) = cells(cell_size);
+        // Grow until it fits: one pass is not enough when one side is a single cell (a long
+        // strip), and `w * d` itself can overflow for vast bounds.
+        while w.saturating_mul(d) > Self::MAX_CELLS {
+            let excess = (w as f64 * d as f64 / Self::MAX_CELLS as f64) as f32;
+            cell_size *= excess.sqrt().max(1.01) * 1.01;
+            (w, d) = cells(cell_size);
+        }
+        if cell_size != requested {
             tracing::warn!(
-                requested = cell_size,
-                used = grown,
+                requested,
+                used = cell_size,
                 "navigation grid too fine for its area; using larger cells"
             );
-            cell_size = grown;
         }
-        let (w, d) = cells(cell_size);
         let (width, depth) = (w as i32, d as i32);
         Self {
             origin: min,
@@ -140,9 +145,13 @@ impl NavGrid {
             if !supported {
                 return None;
             }
+            // On a slope the floor rises around the column: lift the probes until the
+            // lowest one clears the floor plane (its distance to it is `height * normal.y`),
+            // or every walkable slope would cut into them.
+            let lift = (radius + 0.05) / hit.normal.y.max(0.1);
             let blocked = (0..samples).any(|i| {
-                let y = floor + radius + 0.05 + i as f32 * radius;
-                let y = y.min(floor + clearance);
+                let y = floor + lift + i as f32 * radius;
+                let y = y.min(floor + clearance.max(lift));
                 !physics
                     .intersect_sphere(Vec3::new(center.x, y, center.y), radius, &settings.query)
                     .is_empty()
@@ -215,6 +224,10 @@ impl NavGrid {
     /// The cell containing a world position (ignoring Y).
     pub fn cell_at(&self, position: Vec3) -> Option<Cell> {
         let local = (Vec2::new(position.x, position.z) - self.origin) / self.cell_size;
+        // `NaN as i32` is 0: without this a NaN position would land in cell (0, 0).
+        if !local.is_finite() {
+            return None;
+        }
         let cell = (local.x.floor() as i32, local.y.floor() as i32);
         self.in_bounds(cell).then_some(cell)
     }
@@ -563,6 +576,21 @@ mod tests {
         assert!((grid.width() as u64 * grid.depth() as u64) <= NavGrid::MAX_CELLS);
         let bad = NavGrid::new(Vec2::NAN, Vec2::splat(f32::INFINITY), f32::NAN);
         assert!(bad.width() >= 1 && bad.depth() >= 1);
+        // A long thin strip: growing the cells by the square root of the excess is not
+        // enough when one side is a single cell.
+        let strip = NavGrid::new(Vec2::ZERO, Vec2::new(1.0e6, 0.0), 0.01);
+        assert!((strip.width() as u64 * strip.depth() as u64) <= NavGrid::MAX_CELLS);
+        // Enormous (but finite) bounds must not overflow the cell count.
+        let vast = NavGrid::new(Vec2::splat(-1.0e30), Vec2::splat(1.0e30), 0.01);
+        assert!(vast.width() >= 1 && vast.depth() >= 1);
+        assert!((vast.width() as u64 * vast.depth() as u64) <= NavGrid::MAX_CELLS);
+    }
+
+    #[test]
+    fn nan_positions_are_in_no_cell() {
+        let grid = walled();
+        assert_eq!(grid.cell_at(Vec3::NAN), None);
+        assert_eq!(grid.cell_at(Vec3::new(f32::NAN, 0.0, 0.5)), None);
     }
 
     #[test]

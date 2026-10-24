@@ -63,10 +63,7 @@ pub trait PlatformApp {
 /// Returns the error from [`PlatformApp::init`] if initialisation failed.
 pub fn run<A: PlatformApp>(config: WindowConfig, app: A) -> anyhow::Result<()> {
     let event_loop = EventLoop::new().context("failed to create the OS event loop")?;
-    let frame_interval = config
-        .target_fps
-        .filter(|&fps| fps > 0)
-        .map(|fps| Duration::from_secs_f64(1.0 / fps as f64));
+    let frame_interval = frame_interval(config.target_fps);
     let mut runner = Runner {
         config,
         app,
@@ -89,6 +86,33 @@ pub fn run<A: PlatformApp>(config: WindowConfig, app: A) -> anyhow::Result<()> {
 
 /// Frame pace while the window is minimised or hidden (30 Hz).
 const HIDDEN_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+
+/// Time between frames for a frame rate cap; `None` (uncapped) for no cap or a cap of 0.
+fn frame_interval(target_fps: Option<u32>) -> Option<Duration> {
+    target_fps
+        .filter(|&fps| fps > 0)
+        .map(|fps| Duration::from_secs_f64(1.0 / fps as f64))
+}
+
+/// The pace to use this frame: a hidden window runs at most at [`HIDDEN_FRAME_INTERVAL`].
+fn pacing(hidden: bool, frame_interval: Option<Duration>) -> Option<Duration> {
+    if hidden {
+        Some(HIDDEN_FRAME_INTERVAL.max(frame_interval.unwrap_or_default()))
+    } else {
+        frame_interval
+    }
+}
+
+/// When the frame after one due at `next_frame` is due. Stays on the fixed cadence, but does
+/// not try to catch up after a stall.
+fn next_frame_after(next_frame: Instant, interval: Duration, now: Instant) -> Instant {
+    let next = next_frame + interval;
+    if next < now {
+        now + interval
+    } else {
+        next
+    }
+}
 
 struct Runner<A: PlatformApp> {
     config: WindowConfig,
@@ -194,12 +218,7 @@ impl<A: PlatformApp> ApplicationHandler for Runner<A> {
             || window.is_minimized() == Some(true)
             || window.inner_size().width == 0
             || window.inner_size().height == 0;
-        let interval = if hidden {
-            Some(HIDDEN_FRAME_INTERVAL.max(self.frame_interval.unwrap_or_default()))
-        } else {
-            self.frame_interval
-        };
-        match interval {
+        match pacing(hidden, self.frame_interval) {
             None => {
                 window.request_redraw();
                 event_loop.set_control_flow(ControlFlow::Poll);
@@ -208,11 +227,7 @@ impl<A: PlatformApp> ApplicationHandler for Runner<A> {
                 let now = Instant::now();
                 if now >= self.next_frame {
                     window.request_redraw();
-                    // Stay on the fixed cadence, but do not try to catch up after a stall.
-                    self.next_frame += interval;
-                    if self.next_frame < now {
-                        self.next_frame = now + interval;
-                    }
+                    self.next_frame = next_frame_after(self.next_frame, interval, now);
                 }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
             }
@@ -224,5 +239,61 @@ impl<A: PlatformApp> ApplicationHandler for Runner<A> {
             self.shut_down = true;
             self.app.shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_config_defaults() {
+        let config = WindowConfig::default();
+        assert_eq!(config.title, "April Blink Engine");
+        assert_eq!((config.width, config.height), (1280, 720));
+        assert!(config.resizable);
+        assert!(!config.fullscreen);
+        assert_eq!(config.target_fps, None);
+    }
+
+    #[test]
+    fn frame_cap_becomes_an_interval() {
+        assert_eq!(frame_interval(None), None);
+        assert_eq!(frame_interval(Some(0)), None);
+        assert_eq!(frame_interval(Some(1)), Some(Duration::from_secs(1)));
+        let interval = frame_interval(Some(60)).unwrap();
+        assert!((interval.as_secs_f64() - 1.0 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hidden_windows_run_at_most_at_30_hz() {
+        let fast = frame_interval(Some(144));
+        assert_eq!(pacing(false, None), None);
+        assert_eq!(pacing(false, fast), fast);
+        assert_eq!(pacing(true, None), Some(HIDDEN_FRAME_INTERVAL));
+        assert_eq!(pacing(true, fast), Some(HIDDEN_FRAME_INTERVAL));
+        // A cap slower than 30 Hz is kept.
+        let slow = frame_interval(Some(10));
+        assert_eq!(pacing(true, slow), slow);
+    }
+
+    #[test]
+    fn frames_stay_on_cadence() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        // Woken a little late: the next frame is still on the original grid.
+        let late = start + Duration::from_millis(3);
+        assert_eq!(next_frame_after(start, interval, late), start + interval);
+    }
+
+    #[test]
+    fn frames_do_not_catch_up_after_a_stall() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        let stalled = start + Duration::from_millis(250);
+        assert_eq!(
+            next_frame_after(start, interval, stalled),
+            stalled + interval
+        );
     }
 }

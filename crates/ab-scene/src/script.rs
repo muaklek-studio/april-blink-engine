@@ -1,6 +1,7 @@
 use crate::handle::NodeHandle;
 use crate::scene_tree::SceneTree;
 use crate::signal::Signal;
+use ab_script_api as ffi;
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use tracing::error;
@@ -89,6 +90,19 @@ pub trait NodeScript: AsAny {
     #[doc(hidden)]
     fn foreign_instance(&mut self) -> Option<(*const (), *mut ())> {
         None
+    }
+
+    /// The current value of an exported property (see
+    /// [`ScriptRegistry::register_metadata`](crate::ScriptRegistry::register_metadata)).
+    fn get_exported_property(&self, _name: &str) -> Option<ffi::Value> {
+        None
+    }
+
+    /// Sets an exported property from the scene file or the inspector, before `ready` when
+    /// the scene loads. Returns whether the script took it. A string value is only valid
+    /// during the call: copy it.
+    fn set_exported_property(&mut self, _name: &str, _value: ffi::Value) -> bool {
+        false
     }
 }
 
@@ -201,6 +215,28 @@ impl<T: NodeScript> NodeScript for Guarded<T> {
     fn has_failed(&self) -> bool {
         self.failed
     }
+
+    fn get_exported_property(&self, name: &str) -> Option<ffi::Value> {
+        catch_unwind(AssertUnwindSafe(|| self.script.get_exported_property(name)))
+            .ok()
+            .flatten()
+    }
+
+    fn set_exported_property(&mut self, name: &str, value: ffi::Value) -> bool {
+        if self.failed {
+            return false;
+        }
+        let script = &mut self.script;
+        catch_unwind(AssertUnwindSafe(|| script.set_exported_property(name, value)))
+            .unwrap_or_else(|_| {
+                error!(
+                    script = std::any::type_name::<T>(),
+                    property = name,
+                    "set_exported_property panicked; the property keeps its value"
+                );
+                false
+            })
+    }
 }
 
 /// Text of a panic payload (`panic!("...")` produces `&str` or `String`).
@@ -260,6 +296,9 @@ pub(crate) struct ScriptEntry {
     pub(crate) script: Option<Box<dyn NodeScript>>,
     /// Registry name, for scripts that can be hot reloaded.
     pub(crate) name: Option<String>,
+    /// Exported properties set on this instance (from the scene file or the inspector),
+    /// kept to save them and to set them again on a hot-reloaded instance.
+    pub(crate) properties: toml::Table,
 }
 
 /// Component holding a node's scripts, run in this order (like a Unity object's
@@ -267,18 +306,22 @@ pub(crate) struct ScriptEntry {
 #[derive(Default)]
 pub(crate) struct ScriptSlot {
     pub(crate) entries: Vec<ScriptEntry>,
-    next_id: u64,
 }
+
+/// Source of script ids. Process-wide, so a slot recreated while one of its scripts runs
+/// (`set_script` from a callback) never reuses an id that a running pass still holds.
+static NEXT_SCRIPT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl ScriptSlot {
     pub(crate) fn push(&mut self, script: Box<dyn NodeScript>, name: Option<String>) -> u64 {
-        self.next_id += 1;
+        let id = NEXT_SCRIPT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.entries.push(ScriptEntry {
-            id: self.next_id,
+            id,
             script: Some(script),
             name,
+            properties: toml::Table::new(),
         });
-        self.next_id
+        id
     }
 
     /// Detaches the script `id` to run it; `None` if it is gone or already running.

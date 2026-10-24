@@ -145,7 +145,11 @@ enum Pending {
 
 enum Dialog {
     Open { filter: String },
-    SaveAs { path: String },
+    /// `then`: what Save in the Unsaved Changes dialog was for, done once saved.
+    SaveAs {
+        path: String,
+        then: Option<Pending>,
+    },
     Unsaved(Pending),
     Shortcuts,
     About,
@@ -325,6 +329,9 @@ impl EditorApp {
         let mut viewport = ViewportArea::new(render_state);
         // Screenshots and tests start from the defaults, not this machine's preferences.
         let settings_store = options.screenshot.is_none().then(EditorSettings::store);
+        editor.backups = settings_store
+            .as_ref()
+            .map(|store| crate::state::backup_dir(store.dir(), &project_dir));
         let mut settings = settings_store
             .as_ref()
             .map(EditorSettings::load)
@@ -456,9 +463,20 @@ impl EditorApp {
         self.editor.modified = false;
     }
 
+    /// Stops the game (back to the edited scene), so what follows sees the scene and its
+    /// unsaved changes, not the game's state.
+    fn stop_playing(&mut self) {
+        if self.editor.is_playing() {
+            self.editor.stop();
+            self.viewport.game_focus = false;
+        }
+    }
+
     /// Runs `pending` now, or asks first when there are unsaved changes.
     fn guard(&mut self, pending: Pending) {
-        if self.editor.modified && !self.editor.is_playing() {
+        // While playing, `modified` is about the edited scene: stop first, then ask.
+        self.stop_playing();
+        if self.editor.modified {
             self.dialog = Some(Dialog::Unsaved(pending));
         } else {
             self.run(pending);
@@ -484,13 +502,24 @@ impl EditorApp {
         if self.editor.is_playing() {
             return;
         }
+        // An animation preview poses nodes: save where they really are.
+        self.animation.end_preview(&mut self.editor);
         if self.editor.scene_path.is_some() {
             self.editor.save();
         } else {
             self.dialog = Some(Dialog::SaveAs {
                 path: NEW_SCENE_PATH.into(),
+                then: None,
             });
         }
+    }
+
+    /// Saves as `path`; returns `then` to run when the save worked (a failed save keeps
+    /// the changes, and the action waits).
+    fn finish_save_as(&mut self, path: &str, then: Option<Pending>) -> Option<Pending> {
+        self.animation.end_preview(&mut self.editor);
+        self.editor.save_as(path);
+        then.filter(|_| !self.editor.modified)
     }
 
     fn toggle_play(&mut self) {
@@ -498,6 +527,8 @@ impl EditorApp {
             self.editor.stop();
             self.viewport.game_focus = false;
         } else {
+            // Play snapshots the scene: not with an animation preview's pose in it.
+            self.animation.end_preview(&mut self.editor);
             self.editor.play();
             self.viewport.game_focus = true;
         }
@@ -557,6 +588,7 @@ impl EditorApp {
                         .scene_path
                         .clone()
                         .unwrap_or_else(|| NEW_SCENE_PATH.into()),
+                    then: None,
                 });
             }
             Command::ExportGame => self.export.show_window(),
@@ -1080,7 +1112,7 @@ impl EditorApp {
                         }
                     });
                 }
-                Dialog::SaveAs { path } => {
+                Dialog::SaveAs { path, then: after } => {
                     ui.heading(format!("{}  {}", icon::FLOPPY_DISK_BACK, t("dialog.save_as_title")));
                     ui.label(
                         RichText::new(tf("dialog.path_inside", &[("folder", &self.editor.project().display())]))
@@ -1088,8 +1120,7 @@ impl EditorApp {
                     );
                     let edit = ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
                     edit.request_focus();
-                    let valid = !path.trim().is_empty() && !path.contains("..");
-                    let exists = self.editor.project().join(path.trim()).exists();
+                    let (valid, exists) = save_as_check(self.editor.project(), path);
                     if exists {
                         ui.label(RichText::new(format!("{}  {}", icon::WARNING, t("dialog.replace_warning"))).color(theme::WARN));
                     }
@@ -1097,7 +1128,7 @@ impl EditorApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let save = ui.add_enabled(valid, egui::Button::new(RichText::new(t("dialog.save")).strong()).fill(theme::ACCENT_DIM));
                         if save.clicked() || (valid && edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
-                            self.editor.save_as(path);
+                            then = self.finish_save_as(path, after.take());
                             keep = false;
                         }
                         if ui.button(t("dialog.cancel")).clicked() {
@@ -1116,13 +1147,18 @@ impl EditorApp {
                     match crate::dialogs::unsaved_changes(ui, scene, &action) {
                         Some(UnsavedChoice::Save) => {
                             if self.editor.scene_path.is_some() {
+                                self.animation.end_preview(&mut self.editor);
                                 self.editor.save();
                                 // A failed save keeps the changes (and says why).
                                 if !self.editor.modified {
                                     then = Some(pending.clone());
                                 }
                             } else {
-                                self.dialog = Some(Dialog::SaveAs { path: NEW_SCENE_PATH.into() });
+                                // Saved under a name first, then what was asked.
+                                self.dialog = Some(Dialog::SaveAs {
+                                    path: NEW_SCENE_PATH.into(),
+                                    then: Some(pending.clone()),
+                                });
                             }
                             keep = false;
                         }
@@ -1206,6 +1242,19 @@ impl EditorApp {
             self.run(pending);
         }
     }
+}
+
+/// Whether Save As can save to `path` (inside the project), and whether that replaces a
+/// file: the file [`Editor::save_as`] writes, with its `.abscene` extension.
+fn save_as_check(project: &std::path::Path, path: &str) -> (bool, bool) {
+    let path = path.trim().replace('\\', "/");
+    let target = ab_engine::scene_file::with_scene_extension(&path);
+    let valid = !path.is_empty()
+        && !path.split('/').any(|part| part == "..")
+        && !path.starts_with('/')
+        && !std::path::Path::new(&path).is_absolute()
+        && !path.contains(':');
+    (valid, valid && project.join(target).exists())
 }
 
 fn menu_item(ui: &mut egui::Ui, glyph: &str, text: &str, shortcut: &str, enabled: bool) -> bool {
@@ -1368,6 +1417,8 @@ impl EditorApp {
             && self.editor.modified
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // Saving from the dialog must write the edited scene, not the game's state.
+            self.stop_playing();
             self.dialog = Some(Dialog::Unsaved(Pending::Quit));
         }
         if self.allow_close {
@@ -1514,5 +1565,90 @@ impl EditorApp {
         if !self.editor.is_playing() {
             self.viewport.set_cursor_grab(ctx, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> EditorApp {
+        let project =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        let options = Options {
+            // Not this machine's preferences (as for screenshots).
+            screenshot: Some(PathBuf::from("unused.png")),
+            ..Default::default()
+        };
+        EditorApp::new(None, project, &options, LogBuffer::default(), None)
+    }
+
+    #[test]
+    fn opening_a_scene_while_playing_still_asks_about_unsaved_changes() {
+        let mut app = app();
+        app.editor.add_node(
+            NodeDesc {
+                name: "Unsaved".into(),
+                kind: Some("Node3D".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(app.editor.modified);
+        app.editor.play();
+        app.guard(Pending::Open("slice/level.abscene".into()));
+        assert!(
+            matches!(app.dialog, Some(Dialog::Unsaved(Pending::Open(_)))),
+            "asked first"
+        );
+        assert!(!app.editor.is_playing(), "back to the edited scene");
+        assert!(app.editor.node_at("Unsaved").is_some(), "the edit is still there");
+        assert_eq!(app.editor.scene_path, None);
+    }
+
+    #[test]
+    fn save_in_the_unsaved_dialog_of_an_untitled_scene_then_does_what_was_asked() {
+        let project = std::env::temp_dir().join(format!("ab-app-save-as-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).unwrap();
+        let options = Options {
+            screenshot: Some(PathBuf::from("unused.png")),
+            ..Default::default()
+        };
+        let mut app = EditorApp::new(None, project.clone(), &options, LogBuffer::default(), None);
+        app.editor.add_node(
+            NodeDesc {
+                name: "Unsaved".into(),
+                kind: Some("Node3D".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        // A save that fails (a folder is in the way) keeps the changes: nothing runs.
+        std::fs::create_dir_all(project.join("scenes/taken.abscene")).unwrap();
+        assert!(app.finish_save_as("scenes/taken", Some(Pending::Quit)).is_none());
+        assert!(app.editor.modified);
+        // Saved: then quit.
+        let then = app.finish_save_as("scenes/level", Some(Pending::Quit));
+        assert!(project.join("scenes/level.abscene").is_file());
+        assert!(matches!(then, Some(Pending::Quit)));
+        app.run(then.unwrap());
+        assert!(app.allow_close);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn save_as_checks_the_file_it_writes() {
+        let project =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        // `slice/level` is saved as `slice/level.abscene`, which exists.
+        assert_eq!(save_as_check(&project, "slice/level"), (true, true));
+        assert_eq!(save_as_check(&project, "slice\\level.abscene"), (true, true));
+        assert_eq!(save_as_check(&project, "scenes/brand_new"), (true, false));
+        // Outside the project: refused.
+        assert!(!save_as_check(&project, "../outside").0);
+        assert!(!save_as_check(&project, "/tmp/outside").0);
+        assert!(!save_as_check(&project, "C:/outside").0);
+        assert!(!save_as_check(&project, "  ").0);
     }
 }

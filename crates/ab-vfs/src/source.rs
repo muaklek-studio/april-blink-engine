@@ -32,6 +32,13 @@ impl DirSource {
 
     fn resolve(&self, path: &str) -> VfsResult<PathBuf> {
         let normalized = normalize(path).ok_or_else(|| VfsError::InvalidPath(path.to_owned()))?;
+        // `C:/x` (a drive prefix on Windows) is normalized but would replace the root.
+        let confined = Path::new(&normalized)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !confined {
+            return Err(VfsError::InvalidPath(path.to_owned()));
+        }
         Ok(self.root.join(normalized))
     }
 }
