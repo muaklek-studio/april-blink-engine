@@ -539,3 +539,243 @@ fn visibility_is_inherited() {
     assert!(tree.is_visible(child));
     assert!(!tree.is_visible_in_tree(child));
 }
+
+type TreeHook = Box<dyn FnOnce(&mut SceneTree)>;
+
+/// Runs `on_enter` from the node's `enter_tree`, and records enter/ready like [`Recorder`].
+struct EnterHook {
+    rec: Recorder,
+    on_enter: Option<TreeHook>,
+}
+
+impl NodeScript for EnterHook {
+    fn enter_tree(&mut self, tree: &mut SceneTree, _: NodeHandle) {
+        self.rec.push("enter");
+        if let Some(f) = self.on_enter.take() {
+            f(tree);
+        }
+    }
+    fn ready(&mut self, _: &mut SceneTree, _: NodeHandle) {
+        self.rec.push("ready");
+    }
+}
+
+#[test]
+fn nodes_added_below_a_not_yet_entered_child_during_enter_tree_enter_too() {
+    let log = Log::default();
+    let mut tree = SceneTree::new();
+    let parent = tree.create_node("Parent");
+    let a = tree.create_node("A");
+    tree.add_child(parent, a).unwrap();
+    let late = tree.create_node("Late");
+    tree.set_script(
+        late,
+        Recorder {
+            name: "Late",
+            log: log.clone(),
+        },
+    )
+    .unwrap();
+    tree.set_script(
+        parent,
+        EnterHook {
+            rec: Recorder {
+                name: "Parent",
+                log: log.clone(),
+            },
+            // `A` has not entered yet when this runs.
+            on_enter: Some(Box::new(move |tree| tree.add_child(a, late).unwrap())),
+        },
+    )
+    .unwrap();
+
+    tree.add_child(tree.root(), parent).unwrap();
+    assert!(tree.is_inside_tree(a));
+    assert!(tree.is_inside_tree(late), "added under an entering node");
+    assert!(tree.is_node_ready(late));
+    assert_eq!(
+        take(&log),
+        ["Parent:enter", "Late:enter", "Late:ready", "Parent:ready"]
+    );
+}
+
+#[test]
+fn enter_tree_runs_once_when_a_callback_re_adds_a_child() {
+    let log = Log::default();
+    let mut tree = SceneTree::new();
+    let parent = tree.create_node("Parent");
+    let a = tree.create_node("A");
+    tree.set_script(
+        a,
+        Recorder {
+            name: "A",
+            log: log.clone(),
+        },
+    )
+    .unwrap();
+    tree.add_child(parent, a).unwrap();
+    tree.set_script(
+        parent,
+        EnterHook {
+            rec: Recorder {
+                name: "Parent",
+                log: log.clone(),
+            },
+            on_enter: Some(Box::new(move |tree| {
+                tree.remove_child(parent, a).unwrap();
+                tree.add_child(parent, a).unwrap();
+            })),
+        },
+    )
+    .unwrap();
+
+    tree.add_child(tree.root(), parent).unwrap();
+    assert_eq!(
+        take(&log),
+        ["Parent:enter", "A:enter", "A:ready", "Parent:ready"]
+    );
+}
+
+#[test]
+fn a_u64_max_name_suffix_does_not_overflow() {
+    let mut tree = SceneTree::new();
+    let name = format!("A{}", u64::MAX);
+    let a = tree.create_node(&name);
+    let b = tree.create_node(&name);
+    tree.add_child(tree.root(), a).unwrap();
+    tree.add_child(tree.root(), b).unwrap();
+    assert_eq!(tree.name(b).unwrap().to_owned(), "A18446744073709551616");
+}
+
+/// Runs `on_exit` from the node's `exit_tree`, and records enter/exit like [`Recorder`].
+struct ExitHook {
+    rec: Recorder,
+    on_exit: Option<TreeHook>,
+}
+
+impl NodeScript for ExitHook {
+    fn enter_tree(&mut self, _: &mut SceneTree, _: NodeHandle) {
+        self.rec.push("enter");
+    }
+    fn exit_tree(&mut self, tree: &mut SceneTree, _: NodeHandle) {
+        self.rec.push("exit");
+        if let Some(f) = self.on_exit.take() {
+            f(tree);
+        }
+    }
+}
+
+#[test]
+fn nodes_added_under_an_exiting_parent_exit_with_it() {
+    let log = Log::default();
+    let mut tree = SceneTree::new();
+    let parent = tree.create_node("Parent");
+    let child = tree.create_node("Child");
+    let late = tree.create_node("Late");
+    tree.set_script(
+        late,
+        Recorder {
+            name: "Late",
+            log: log.clone(),
+        },
+    )
+    .unwrap();
+    tree.set_script(
+        child,
+        ExitHook {
+            rec: Recorder {
+                name: "Child",
+                log: log.clone(),
+            },
+            // `Parent` is still in the tree when its child exits.
+            on_exit: Some(Box::new(move |tree| tree.add_child(parent, late).unwrap())),
+        },
+    )
+    .unwrap();
+    tree.add_child(parent, child).unwrap();
+    tree.add_child(tree.root(), parent).unwrap();
+    take(&log);
+
+    tree.remove_child(tree.root(), parent).unwrap();
+    assert_eq!(tree.parent(late), Some(parent));
+    assert!(!tree.is_inside_tree(parent));
+    assert!(!tree.is_inside_tree(late), "detached with its parent");
+    assert_eq!(
+        take(&log),
+        ["Child:exit", "Late:enter", "Late:ready", "Late:exit"]
+    );
+}
+
+#[test]
+fn a_freed_node_moved_by_exit_tree_leaves_no_dead_child_behind() {
+    let mut tree = SceneTree::new();
+    let parent = tree.create_node("Parent");
+    let holder = tree.create_node("Holder");
+    let node = tree.create_node("Node");
+    tree.add_child(tree.root(), parent).unwrap();
+    tree.add_child(tree.root(), holder).unwrap();
+    tree.add_child(parent, node).unwrap();
+    tree.set_script(
+        node,
+        ExitHook {
+            rec: Recorder {
+                name: "Node",
+                log: Log::default(),
+            },
+            on_exit: Some(Box::new(move |tree| {
+                tree.reparent(node, holder, false).unwrap();
+            })),
+        },
+    )
+    .unwrap();
+
+    tree.queue_free(node).unwrap();
+    tree.process(0.016);
+    assert!(!tree.is_valid(node), "queued nodes are freed even if moved");
+    assert!(tree.children(parent).is_empty());
+    assert!(
+        tree.children(holder).is_empty(),
+        "no dead handle left behind"
+    );
+}
+
+#[test]
+fn scripts_added_by_a_replaced_script_wait_for_the_next_pass() {
+    struct Replacer {
+        log: Log,
+    }
+    impl NodeScript for Replacer {
+        fn process(&mut self, tree: &mut SceneTree, node: NodeHandle, _: f32) {
+            let log = self.log.clone();
+            tree.set_script(
+                node,
+                Recorder {
+                    name: "X",
+                    log: log.clone(),
+                },
+            )
+            .unwrap();
+            tree.add_script(node, Recorder { name: "Y", log }).unwrap();
+        }
+    }
+    let log = Log::default();
+    let mut tree = SceneTree::new();
+    let node = tree.create_node("Node");
+    tree.set_script(node, Replacer { log: log.clone() })
+        .unwrap();
+    tree.add_script(
+        node,
+        Recorder {
+            name: "Old",
+            log: log.clone(),
+        },
+    )
+    .unwrap();
+    tree.add_child(tree.root(), node).unwrap();
+    take(&log);
+
+    tree.process(0.016);
+    assert!(take(&log).is_empty(), "the new scripts start next frame");
+    tree.process(0.016);
+    assert_eq!(take(&log), ["X:process", "Y:process"]);
+}

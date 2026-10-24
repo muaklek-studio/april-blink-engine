@@ -725,10 +725,9 @@ fn areas_and_bodies_emit_signals() {
 }
 
 #[test]
-fn layers_follow_godot_rules() {
+fn solid_bodies_collide_only_when_both_masks_agree() {
     let mut tree = new_tree();
-    spawn_floor(&mut tree); // layer 1, mask 1
-                            // Either mask selecting the other's layer is enough.
+    spawn_floor(&mut tree); // layer 1, mask: everything
     let seen_by_its_mask = spawn_body(
         &mut tree,
         "A",
@@ -742,6 +741,14 @@ fn layers_follow_godot_rules() {
         PhysicsBody3D::rigid().with_collision(4, 0),
         Shape::sphere(0.5),
         Vec3::new(2.0, 3.0, 0.0),
+    );
+    // The floor's mask selects it, but it opts out of the floor's layer by itself.
+    let opted_out = spawn_body(
+        &mut tree,
+        "C",
+        PhysicsBody3D::rigid().with_collision(1, !1),
+        Shape::sphere(0.5),
+        Vec3::new(5.0, 3.0, 0.0),
     );
     // A character on layer 4 with mask 1 stands on the floor.
     let walker = tree.create_character_body3d("Walker", CharacterBody3D::default());
@@ -765,6 +772,10 @@ fn layers_follow_godot_rules() {
         tree.position(seen_by_nobody).unwrap().y < -2.0,
         "fell through"
     );
+    assert!(
+        tree.position(opted_out).unwrap().y < -2.0,
+        "one side opting out is enough"
+    );
     assert!((tree.position(walker).unwrap().y - 0.9).abs() < 0.05);
     // Raycasts test their own mask against layers.
     let physics = physics(&tree);
@@ -780,4 +791,123 @@ fn layers_follow_godot_rules() {
     };
     assert_eq!(down(4), Some(seen_by_its_mask));
     assert_ne!(down(1), Some(seen_by_its_mask));
+}
+
+#[test]
+fn resizing_an_area_does_not_re_report_bodies_inside_it() {
+    // A growing blast radius / pulsing pickup: the collider is rebuilt every step, but the
+    // body never leaves, so it must neither exit nor re-enter.
+    let mut tree = new_tree();
+    let area = spawn_body(
+        &mut tree,
+        "Blast",
+        PhysicsBody3D::area(),
+        Shape::sphere(1.0),
+        Vec3::new(0.0, 5.0, 0.0),
+    );
+    let crate_body = spawn_body(
+        &mut tree,
+        "Crate",
+        PhysicsBody3D::kinematic(),
+        Shape::cuboid(Vec3::splat(0.5)),
+        Vec3::new(0.0, 5.0, 0.0),
+    );
+    steps(&mut tree, 2);
+    assert!(physics(&tree).is_overlapping(area, crate_body));
+    let shape = tree.get_node(area, "CollisionShape3D").unwrap();
+    for i in 0..20 {
+        tree.component_mut::<ab_physics::CollisionShape3D>(shape)
+            .unwrap()
+            .set_shape(Shape::sphere(1.0 + i as f32 * 0.1));
+        tree.set_scale(area, Vec3::splat(1.0 + i as f32 * 0.01))
+            .unwrap();
+        step(&mut tree);
+        assert_eq!(physics(&tree).events(), [], "step {i}");
+        assert!(physics(&tree).is_overlapping(area, crate_body));
+    }
+    // Leaving still reports once.
+    tree.set_position(crate_body, Vec3::new(50.0, 5.0, 0.0))
+        .unwrap();
+    steps(&mut tree, 2);
+    assert!(!physics(&tree).is_overlapping(area, crate_body));
+}
+
+#[test]
+fn a_rigid_body_under_a_rigid_body_keeps_its_own_motion() {
+    let mut tree = new_tree();
+    // The child is created first, so it comes before its parent in storage order.
+    let child = tree.create_physics_body3d("Child", PhysicsBody3D::rigid());
+    tree.add_collision_shape(child, Shape::sphere(0.25))
+        .unwrap();
+    let parent = tree.create_physics_body3d("Parent", PhysicsBody3D::rigid());
+    tree.add_collision_shape(parent, Shape::sphere(0.25))
+        .unwrap();
+    tree.set_position(parent, Vec3::new(0.0, 50.0, 0.0))
+        .unwrap();
+    tree.add_child(tree.root(), parent).unwrap();
+    // A plain Node3D in between must not break it either.
+    let holder = tree.create_node3d("Holder");
+    tree.add_child(parent, holder).unwrap();
+    tree.set_position(child, Vec3::new(3.0, 0.0, 0.0)).unwrap();
+    tree.add_child(holder, child).unwrap();
+    steps(&mut tree, 60);
+    // Both fall freely side by side: same height, 3 m apart.
+    let (p, c) = (
+        tree.global_position(parent).unwrap(),
+        tree.global_position(child).unwrap(),
+    );
+    assert!(p.y < 46.0, "parent fell: {p}");
+    assert!((c.y - p.y).abs() < 1e-3, "child {c} vs parent {p}");
+    assert!((c.x - 3.0).abs() < 1e-3, "{c}");
+}
+
+#[test]
+fn areas_see_what_their_own_mask_selects() {
+    const PLAYER: u32 = 4;
+    let mut tree = new_tree();
+    // A checkpoint watching only the player.
+    let checkpoint = spawn_body(
+        &mut tree,
+        "Checkpoint",
+        PhysicsBody3D::area().with_collision(8, PLAYER),
+        Shape::cuboid(Vec3::splat(2.0)),
+        Vec3::new(0.0, 5.0, 0.0),
+    );
+    // An enemy responding to everything must not set it off...
+    let enemy = spawn_body(
+        &mut tree,
+        "Enemy",
+        PhysicsBody3D::kinematic().with_collision(2, u32::MAX),
+        Shape::sphere(0.5),
+        Vec3::new(0.5, 5.0, 0.0),
+    );
+    // ...while the player does, though its own mask ignores the checkpoint's layer.
+    let player = spawn_body(
+        &mut tree,
+        "Player",
+        PhysicsBody3D::kinematic().with_collision(PLAYER, 1),
+        Shape::sphere(0.5),
+        Vec3::new(-0.5, 5.0, 0.0),
+    );
+    // Two areas: one watches the other, not the other way round.
+    let watcher = spawn_body(
+        &mut tree,
+        "Watcher",
+        PhysicsBody3D::area().with_collision(16, 32),
+        Shape::sphere(1.0),
+        Vec3::new(10.0, 5.0, 0.0),
+    );
+    let watched = spawn_body(
+        &mut tree,
+        "Watched",
+        PhysicsBody3D::area().with_collision(32, 0),
+        Shape::sphere(1.0),
+        Vec3::new(10.5, 5.0, 0.0),
+    );
+    steps(&mut tree, 2);
+    let physics = physics(&tree);
+    assert!(physics.is_overlapping(checkpoint, player));
+    assert!(!physics.is_overlapping(checkpoint, enemy));
+    assert!(physics.is_overlapping(watcher, watched));
+    assert!(!physics.is_overlapping(watched, watcher));
 }

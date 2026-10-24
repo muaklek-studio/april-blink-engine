@@ -275,6 +275,55 @@ fn timers_fire_and_repeat() {
     assert_eq!(*ticks.borrow(), 2, "paused");
 }
 
+/// Stops its autostart timer child in `ready`.
+#[derive(Default)]
+struct StopsTimer;
+
+impl NodeScript for StopsTimer {
+    fn ready(&mut self, tree: &mut SceneTree, node: NodeHandle) {
+        let timer = tree.get_node(node, "Timer").unwrap();
+        tree.component_mut::<Timer>(timer).unwrap().stop();
+    }
+}
+
+#[test]
+fn a_timer_stopped_in_ready_stays_stopped() {
+    let mut tree = SceneTree::new();
+    let owner = tree.create_node3d("Owner");
+    tree.set_script(owner, StopsTimer).unwrap();
+    let timer = tree.create_timer_node("Timer", Timer::new(0.1).autostart());
+    tree.add_child(owner, timer).unwrap();
+    let fired = Rc::new(RefCell::new(0));
+    let f = fired.clone();
+    tree.connect_fn(timer, Timer::TIMEOUT, move |_, _| *f.borrow_mut() += 1);
+    tree.add_child(tree.root(), owner).unwrap();
+    for _ in 0..5 {
+        tree.process(0.1);
+    }
+    assert_eq!(*fired.borrow(), 0, "autostart must not undo the script's stop()");
+    assert!(tree.component::<Timer>(timer).unwrap().is_stopped());
+}
+
+#[test]
+fn timers_ignore_nan_waits_and_deltas() {
+    let mut tree = SceneTree::new();
+    let timer = tree.create_timer_node("Odd", Timer::new(f32::NAN).autostart());
+    tree.add_child(tree.root(), timer).unwrap();
+    let fired = Rc::new(RefCell::new(0));
+    let f = fired.clone();
+    tree.connect_fn(timer, Timer::TIMEOUT, move |_, _| *f.borrow_mut() += 1);
+    for _ in 0..5 {
+        tree.process(0.1);
+    }
+    assert!(*fired.borrow() <= 1, "a NaN wait must not fire every frame");
+
+    let ok = tree.create_timer_node("Ok", Timer::new(0.5).autostart());
+    tree.add_child(tree.root(), ok).unwrap();
+    tree.process(0.1);
+    tree.process(f32::NAN);
+    assert!(tree.component::<Timer>(ok).unwrap().time_left().is_finite());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Hot reload swapping
 // ---------------------------------------------------------------------------------------------

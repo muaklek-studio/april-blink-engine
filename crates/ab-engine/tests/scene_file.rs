@@ -870,7 +870,7 @@ generator = { kind = "town", seed = 1, blocks_x = 2, blocks_z = 1, houses = 1 }
     let tree = engine.tree_mut();
     let root = load_scene(tree, "world.abscene").unwrap();
     let built = |tree: &SceneTree, name: &str| {
-        let node = tree.get_node(root, &format!("{name}/Built")).unwrap();
+        let node = tree.get_node(root, format!("{name}/Built")).unwrap();
         tree.children(node)
     };
     assert_eq!(built(tree, "Hills").len(), 1, "one terrain");
@@ -906,4 +906,79 @@ generator = { kind = "town", seed = 1, blocks_x = 2, blocks_z = 1, houses = 1 }
     std::fs::write(assets.0.join("bad.abscene"), bad).unwrap();
     let err = load_scene(tree, "bad.abscene").unwrap_err().to_string();
     assert!(err.contains("galaxy") && err.contains("terrain"), "{err}");
+}
+
+/// A script exporting properties, as script libraries describe theirs.
+#[derive(Default)]
+struct Mover {
+    speed: f64,
+    tint: Option<ab_script_api::Color>,
+}
+
+impl NodeScript for Mover {
+    fn set_exported_property(&mut self, name: &str, value: ab_script_api::Value) -> bool {
+        match name {
+            "speed" => value.as_float().map(|v| self.speed = v).is_some(),
+            "tint" => value.as_color().map(|c| self.tint = Some(c)).is_some(),
+            _ => false,
+        }
+    }
+}
+
+#[test]
+fn exported_script_properties_reach_the_script_and_save_back() {
+    use ab_engine::scene::ScriptPropertyDesc;
+    use ab_script_api as ffi;
+    let scene = "[[node]]\nname = \"A\"\nscript = \"Mover\"\n\
+                 script_properties = { Mover = { speed = 5, tint = \"#ff0000\" } }\n";
+    let (mut engine, _assets) = engine_with(&[("props.abscene", scene)]);
+    let prop = |name: &str, kind| ScriptPropertyDesc {
+        name: name.into(),
+        kind,
+        default: None,
+        flags: 0,
+        doc: String::new(),
+    };
+    engine
+        .tree()
+        .world()
+        .resource_mut::<ScriptRegistry>()
+        .unwrap()
+        .register::<Mover>("Mover")
+        .register_metadata(
+            "Mover",
+            vec![prop("speed", ffi::Tag::FLOAT), prop("tint", ffi::Tag::COLOR)],
+        );
+    let tree = engine.tree_mut();
+    let a = load_scene(tree, "props.abscene").unwrap();
+    {
+        let mover = tree.script::<Mover>(a).unwrap();
+        // An integer in the file is the float property's value; the hex color a color.
+        assert_eq!(mover.speed, 5.0);
+        assert_eq!(mover.tint.map(|c| (c.r, c.g, c.b)), Some((1.0, 0.0, 0.0)));
+    }
+
+    // Saved back as written, and the same after another round trip.
+    let first = save_scene(tree, a);
+    let text = first.to_toml();
+    assert!(text.contains("speed = 5"), "{text}");
+    let again = instantiate_scene(tree, &SceneFile::from_toml(&text).unwrap(), "again").unwrap();
+    assert_eq!(save_scene(tree, again).nodes, first.nodes, "{text}");
+
+    // A hot reload builds a new instance: it gets the scene's values again.
+    tree.reload_scripts();
+    assert_eq!(tree.script::<Mover>(a).unwrap().speed, 5.0);
+
+    // Changing them reaches the running instance.
+    let mut changed = toml::Table::new();
+    changed.insert("speed".into(), toml::Value::Float(2.5));
+    assert!(tree.set_script_properties(a, "Mover", changed));
+    assert_eq!(tree.script::<Mover>(a).unwrap().speed, 2.5);
+    assert!(!tree.set_script_properties(a, "Spin", toml::Table::new()));
+
+    // Values for a script the node does not have are an error, not silently dropped.
+    let bad = "[[node]]\nname = \"B\"\nscript = \"Spin\"\n\
+               script_properties = { Mover = { speed = 1.0 } }\n";
+    let err = instantiate_scene(tree, &SceneFile::from_toml(bad).unwrap(), "bad").unwrap_err();
+    assert!(err.to_string().contains("script_properties"), "{err}");
 }

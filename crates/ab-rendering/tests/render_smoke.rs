@@ -455,3 +455,112 @@ fn renders_without_camera_or_assets() {
         "only the background is drawn"
     );
 }
+
+#[test]
+fn mirrored_meshes_are_not_rendered_inside_out() {
+    let Some(gpu) = gpu() else { return };
+    let scene = scene();
+    let normal = render(&gpu, &scene.tree, 1);
+    // The cube is symmetric: mirrored on X it must look the same (negative-determinant
+    // transforms flip the triangle winding, which must not flip the culling).
+    let mut tree = scene.tree;
+    let cube = tree
+        .find_child(tree.root(), "Cube", false)
+        .expect("cube node");
+    tree.set_scale(cube, Vec3::new(-1.0, 1.0, 1.0)).unwrap();
+    tree.update_transforms();
+    let mirrored = render(&gpu, &tree, 1);
+    let luma = |p: [u8; 4]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+    let differing = normal
+        .iter()
+        .zip(&mirrored)
+        .filter(|(a, b)| (luma(**a) - luma(**b)).abs() > 20.0)
+        .count();
+    assert!(differing < 10, "{differing} pixels differ once mirrored");
+}
+
+#[test]
+fn zero_sized_offscreen_targets_are_clamped_and_render() {
+    let Some(gpu) = gpu() else { return };
+    let scene = scene();
+    let target = OffscreenTarget::new(&gpu, 0, 0);
+    assert_eq!(target.size(), (1, 1));
+    let mut renderer =
+        SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &RendererConfig::default());
+    renderer.render(&gpu, scene.tree.world(), target.view(), 0, 0);
+    assert_eq!(target.read_pixels(&gpu).unwrap().len(), 1);
+}
+
+/// A sphere under a slanted sun, stretched non-uniformly either by its node (static path,
+/// CPU inverse-transpose) or by its single joint (skinned path, shader): both must shade alike.
+#[test]
+fn skinned_normals_follow_non_uniform_joint_scale() {
+    let Some(gpu) = gpu() else { return };
+    let stretch = Transform3D::from_trs(
+        Vec3::new(0.0, 1.0, 0.0),
+        ab_core::Quat::from_rotation_z(0.6),
+        Vec3::new(2.5, 0.6, 1.0),
+    );
+    let build = |skinned: bool| {
+        let mut tree = SceneTree::new();
+        let mut assets = RenderAssets::new();
+        let mut sphere = Mesh::sphere(1.0, 32, 16);
+        if skinned {
+            let count = sphere.vertices.len();
+            sphere = sphere.with_skin(vec![ab_rendering::SkinWeights::single(0); count]);
+        }
+        let mesh = assets.add_mesh(sphere).unwrap();
+        let white = assets.add_material(Material::from_color(Color::rgb(0.8, 0.8, 0.8)));
+        tree.world_mut().insert_resource(assets);
+        tree.world_mut().insert_resource(Environment {
+            ambient_energy: 0.0,
+            ..Default::default()
+        });
+        let root = tree.root();
+        let camera = tree.create_camera3d("Camera", Camera3D::default());
+        tree.set_transform(
+            camera,
+            Transform3D::looking_at(Vec3::new(0.0, 1.0, 6.0), Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        )
+        .unwrap();
+        tree.add_child(root, camera).unwrap();
+        let sun = tree.create_directional_light3d("Sun", DirectionalLight3D::default());
+        tree.set_transform(
+            sun,
+            Transform3D::looking_at(Vec3::ZERO, Vec3::new(-1.0, -0.5, -1.0), Vec3::Y),
+        )
+        .unwrap();
+        tree.add_child(root, sun).unwrap();
+        let body = tree.create_mesh_instance3d("Body", MeshInstance3D::new(mesh, white));
+        tree.add_child(root, body).unwrap();
+        if skinned {
+            let joint = tree.create_node3d("Joint");
+            tree.set_transform(joint, stretch).unwrap();
+            tree.add_child(root, joint).unwrap();
+            tree.insert_component(
+                body,
+                ab_rendering::Skin {
+                    joints: vec![joint],
+                    inverse_bind_matrices: vec![ab_core::Mat4::IDENTITY],
+                },
+            )
+            .unwrap();
+        } else {
+            tree.set_transform(body, stretch).unwrap();
+        }
+        tree.update_transforms();
+        tree
+    };
+    let reference = render(&gpu, &build(false), 1);
+    let skinned = render(&gpu, &build(true), 1);
+    let luma = |p: [u8; 4]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+    let differing = reference
+        .iter()
+        .zip(&skinned)
+        .filter(|(a, b)| (luma(**a) - luma(**b)).abs() > 12.0)
+        .count();
+    assert!(
+        differing < 20,
+        "{differing} pixels shade differently when skinned"
+    );
+}

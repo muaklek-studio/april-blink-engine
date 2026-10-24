@@ -198,3 +198,40 @@ fn rejects_corrupt_gltf() {
         Err(AssetError::InvalidData { .. })
     ));
 }
+
+#[test]
+fn cached_scenes_are_not_reused_across_render_assets() {
+    let mut server = AssetServer::from_directory(assets_dir());
+    let mut library = AnimationLibrary::new();
+    let mut first = RenderAssets::new();
+    let a = server
+        .load_gltf(&mut first, &mut library, "models/totem.gltf")
+        .unwrap();
+    // A new level with fresh render assets (the old ones dropped): the old handles would
+    // point at nothing, or at unrelated meshes.
+    let mut second = RenderAssets::new();
+    let b = server
+        .load_gltf(&mut second, &mut library, "models/totem.gltf")
+        .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&a, &b),
+        "reloaded into the new assets"
+    );
+    let primitive = b.meshes[0].primitives[0];
+    assert!(second.mesh(primitive.mesh).is_some());
+    assert!(second.material(primitive.material).is_some());
+
+    // Same for a new animation library.
+    let mut other_library = AnimationLibrary::new();
+    let c = server
+        .load_gltf(&mut second, &mut other_library, "models/totem.gltf")
+        .unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&b, &c));
+    assert!(other_library.get(c.animations[0].1).is_some());
+
+    // And the texture cache.
+    let t = server
+        .load_texture(&mut first, "models/totem_albedo.png", ColorSpace::Srgb)
+        .unwrap();
+    assert!(first.texture(t).is_some());
+}

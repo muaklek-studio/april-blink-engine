@@ -288,8 +288,37 @@ impl Script for Settings {
     }
 }
 
+/// Saves values that are JSON strings, numbers and structs, and loads them back.
+#[derive(Debug, Default)]
+struct Saver {
+    report: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum Difficulty {
+    Hard,
+}
+
+impl Script for Saver {
+    fn ready(&mut self, tree: &mut Tree<'_>, _node: Node) {
+        let mut saves = tree.saves();
+        saves.save("difficulty", &Difficulty::Hard).unwrap();
+        saves.save("name", &"Ann".to_owned()).unwrap();
+        saves.save("coins", &42_u32).unwrap();
+        saves.write("note", "plain text").unwrap();
+        let r = &mut self.report;
+        r.push(format!("{:?}", saves.load::<Difficulty>("difficulty")));
+        r.push(format!("{:?}", saves.load::<String>("name")));
+        r.push(format!("{:?}", saves.load::<u32>("coins")));
+        r.push(format!("{:?}", saves.read("note")));
+        r.push(format!("{:?}", saves.load::<String>("note")));
+        r.push(format!("{:?}", saves.load::<u32>("never")));
+    }
+}
+
 fn register(registry: &mut Registry) {
     registry
+        .register::<Saver>("Saver")
         .register::<Settings>("Settings")
         .register::<Animator>("Animator")
         .register::<Mover>("Mover")
@@ -311,7 +340,7 @@ fn engine() -> Engine {
     let library = ScriptLibrary::from_entry(ab_script_library, "abi test").unwrap();
     assert_eq!(
         library.names().collect::<Vec<_>>(),
-        ["Settings", "Animator", "Mover", "Listener", "Counter", "Panicker", "Prober"]
+        ["Saver", "Settings", "Animator", "Mover", "Listener", "Counter", "Panicker", "Prober"]
     );
     let world = engine.tree_mut().world_mut();
     library.register(world.resource_or_insert_with(ab_engine::scene::ScriptRegistry::new));
@@ -539,5 +568,31 @@ fn scripts_read_the_config_and_switch_languages() {
     assert_eq!(
         tree.component::<ab_engine::ui::Label>(label).unwrap().text,
         "เล่น"
+    );
+}
+
+#[test]
+fn saved_values_load_back_whatever_their_json() {
+    let mut engine = engine();
+    let dir = std::env::temp_dir().join(format!("ab-abi-saves-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    engine
+        .tree_mut()
+        .world_mut()
+        .insert_resource(ab_engine::save::SaveStore::in_dir(&dir));
+    let node = add(&mut engine, "Saver", "Saver", false);
+    engine.update(1.0 / 60.0);
+    let report = script::<Saver>(&mut engine, node).report.clone();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        report,
+        [
+            "Ok(Some(Hard))",
+            "Ok(Some(\"Ann\"))",
+            "Ok(Some(42))",
+            "Ok(Some(\"plain text\"))",
+            "Ok(Some(\"plain text\"))",
+            "Ok(None)",
+        ]
     );
 }

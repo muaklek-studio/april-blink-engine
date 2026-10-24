@@ -572,3 +572,71 @@ fn a_rig_missing_a_limb_is_refused_with_its_name() {
     .unwrap_err();
     assert!(err.to_string().contains("right_lower_leg"), "{err}");
 }
+
+#[test]
+fn inactive_hit_boxes_follow_the_bones_in_the_same_step() {
+    let mut tree = new_tree();
+    let (model, bones) = skeleton(&mut tree);
+    let ragdoll = tree
+        .create_skeleton_ragdoll(model, "Ragdoll", &SkeletonRagdoll::new(bones.clone()))
+        .unwrap();
+    steps(&mut tree, 2);
+    let hits_at = |tree: &SceneTree, x: f32| {
+        tree.world()
+            .resource::<PhysicsWorld>()
+            .unwrap()
+            .cast_ray(
+                Vec3::new(x, 0.9, 5.0),
+                Vec3::NEG_Z,
+                10.0,
+                &Default::default(),
+            )
+            .is_some()
+    };
+    assert!(hits_at(&tree, 0.0));
+    // The animation moves the root bone (the ragdoll node is its sibling, so only the
+    // ragdoll follows it): the hit boxes are there after the very next step, not a step late.
+    tree.set_position(bones[0], Vec3::new(2.0, 0.0, 0.0))
+        .unwrap();
+    steps(&mut tree, 1);
+    assert!(hits_at(&tree, 2.0), "hit boxes lag behind the bones");
+    assert!(!hits_at(&tree, 0.0), "hit boxes left behind");
+    assert!(!tree.is_ragdoll_active(ragdoll));
+}
+
+#[test]
+fn limp_bones_under_bones_without_a_body_stay_on_their_parts() {
+    let mut tree = new_tree();
+    let model = tree.create_node3d("Model");
+    tree.add_child(tree.root(), model).unwrap();
+    // Bone1 has no body of its own (not in the ragdoll's list): Bone2 moves through it.
+    let mut all = Vec::new();
+    let mut parent = model;
+    for (i, y) in [0.0, 0.3, 0.3, 0.3].into_iter().enumerate() {
+        let bone = tree.create_node3d(&format!("Bone{i}"));
+        tree.set_position(bone, Vec3::new(0.0, y, 0.0)).unwrap();
+        tree.add_child(parent, bone).unwrap();
+        all.push(bone);
+        parent = bone;
+    }
+    tree.set_position(model, Vec3::new(0.0, 5.0, 0.0)).unwrap();
+    tree.update_transforms();
+    let mut settings = SkeletonRagdoll::new(vec![all[0], all[2], all[3]]);
+    settings.active = true;
+    let ragdoll = tree
+        .create_skeleton_ragdoll(model, "Ragdoll", &settings)
+        .unwrap();
+    // Falling freely: every step moves the whole chain.
+    steps(&mut tree, 30);
+    for part in tree.ragdoll_parts(ragdoll) {
+        let bone = *tree.component::<RagdollBone>(part).unwrap();
+        let expected = tree.global_transform(part).unwrap() * bone.offset;
+        let actual = tree.global_transform(bone.bone).unwrap();
+        let gap = Vec3::from(expected.translation).distance(Vec3::from(actual.translation));
+        assert!(
+            gap < 1e-3,
+            "{} is {gap} m off its part",
+            tree.name(bone.bone).unwrap()
+        );
+    }
+}

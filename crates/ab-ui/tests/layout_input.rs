@@ -369,8 +369,32 @@ fn keyboard_and_gamepad_focus_navigation() {
     );
     assert_eq!(focus(&tree), None);
 
-    // A freed focused control loses focus.
+    // A hidden focused control loses focus: Space (the jump key) must not press it.
     frame(&mut tree, &[mouse(false), key(KeyCode::Tab, true)]);
+    assert!(focus(&tree).is_some());
+    tree.set_visible(menu.panel, false).unwrap();
+    frame(&mut tree, &[key(KeyCode::Tab, false)]);
+    frame(&mut tree, &[key(KeyCode::Space, true)]);
+    assert_eq!(focus(&tree), None);
+    assert!(!events(&tree)
+        .iter()
+        .any(|e| matches!(e, UiEvent::Pressed(_))));
+    tree.set_visible(menu.panel, true).unwrap();
+    frame(&mut tree, &[key(KeyCode::Space, false)]);
+    // Focus grabbed from code before the control was ever laid out is kept.
+    tree.world()
+        .resource_mut::<UiState>()
+        .unwrap()
+        .grab_focus(menu.buttons[0]);
+    frame(&mut tree, &[]);
+    assert_eq!(focus(&tree), Some(menu.buttons[0]));
+    tree.world()
+        .resource_mut::<UiState>()
+        .unwrap()
+        .release_focus();
+
+    // A freed focused control loses focus.
+    frame(&mut tree, &[key(KeyCode::Tab, true)]);
     let focused = focus(&tree).unwrap();
     tree.queue_free(focused).unwrap();
     tree.process(0.0);

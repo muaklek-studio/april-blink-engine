@@ -125,3 +125,36 @@ fn a_character_walks_the_path_around_the_wall() {
         &QueryOptions::new().excluding(agent)
     ));
 }
+
+#[test]
+fn walkable_slopes_near_the_limit_are_baked_walkable() {
+    use ab_core::Quat;
+    for degrees in [25.0f32, 40.0] {
+        let mut tree = SceneTree::new();
+        tree.world_mut().insert_resource(Time::new(DT));
+        tree.world_mut().insert_resource(PhysicsWorld::new());
+        // A wide ramp rising along +X whose top face passes through the origin.
+        let ramp = solid(&mut tree, Vec3::new(30.0, 1.0, 30.0), Vec3::ZERO);
+        let tilt = Quat::from_rotation_z(degrees.to_radians());
+        tree.set_rotation(ramp, tilt).unwrap();
+        tree.set_position(ramp, tilt * Vec3::new(0.0, -0.5, 0.0))
+            .unwrap();
+        physics_system(tree.world_mut());
+        let grid = NavGrid::bake(
+            &tree.world().resource::<PhysicsWorld>().unwrap(),
+            &NavBakeSettings {
+                min: Vec3::new(-2.0, -5.0, -2.0),
+                max: Vec3::new(2.0, 5.0, 2.0),
+                agent_radius: 0.3,
+                // cos 40° ≈ 0.766: walkable.
+                min_floor_normal_y: 0.7,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            grid.walkable_count(),
+            (grid.width() * grid.depth()) as usize,
+            "{degrees}° ramp"
+        );
+    }
+}
