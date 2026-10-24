@@ -1,0 +1,55 @@
+# Fuzz targets for the parsers that read files from outside the engine (cargo-fuzz).
+#
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run scene_toml        # or: pack, gltf, text_formats
+#
+# Its own workspace: libFuzzer needs nightly and sanitizer flags the engine does not.
+[package]
+name = "ab-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ab-engine = { path = "../crates/ab-engine" }
+ab-asset = { path = "../crates/ab-asset" }
+ab-animation = { path = "../crates/ab-animation" }
+ab-rendering = { path = "../crates/ab-rendering" }
+ab-vfs = { path = "../crates/ab-vfs" }
+ab-input = { path = "../crates/ab-input" }
+ab-locale = { path = "../crates/ab-locale" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "scene_toml"
+path = "fuzz_targets/scene_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack"
+path = "fuzz_targets/pack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gltf"
+path = "fuzz_targets/gltf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_formats"
+path = "fuzz_targets/text_formats.rs"
+test = false
+doc = false
+bench = false
