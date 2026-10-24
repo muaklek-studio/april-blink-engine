@@ -40,6 +40,8 @@ impl Time {
     /// Starts a new frame with the measured wall-clock delta and returns the game delta
     /// (clamped, then scaled by `time_scale`).
     pub fn begin_frame(&mut self, raw_delta: f32) -> f32 {
+        // `clamp` lets NaN through, and one NaN would poison `elapsed` for good.
+        let raw_delta = if raw_delta.is_nan() { 0.0 } else { raw_delta };
         self.unscaled_delta = raw_delta.clamp(0.0, Self::MAX_DELTA);
         self.delta = self.unscaled_delta * self.time_scale.max(0.0);
         self.elapsed += self.delta as f64;
@@ -131,6 +133,14 @@ mod tests {
         assert_eq!(time.begin_frame(5.0), Time::MAX_DELTA);
         assert_eq!(time.begin_frame(-1.0), 0.0);
         assert!((time.elapsed - Time::MAX_DELTA as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_nan_delta_does_not_poison_the_clock() {
+        let mut time = Time::default();
+        assert_eq!(time.begin_frame(f32::NAN), 0.0);
+        time.begin_frame(0.01);
+        assert!((time.elapsed - 0.01).abs() < 1e-6);
     }
 
     #[test]
