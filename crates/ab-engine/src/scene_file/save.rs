@@ -109,6 +109,15 @@ fn common(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
         desc.groups = groups.0.clone();
     }
     desc.set_script_list(tree.script_names(node));
+    desc.script_properties = desc
+        .script_list()
+        .into_iter()
+        .map(|script| {
+            let properties = tree.script_properties(node, &script);
+            (script, properties)
+        })
+        .filter(|(_, properties)| !properties.is_empty())
+        .collect();
 }
 
 /// Type and type-specific table.

@@ -18,6 +18,7 @@ mod error;
 mod handle;
 mod path;
 mod profile;
+mod property;
 mod registry;
 mod scene_tree;
 mod script;
@@ -30,6 +31,7 @@ pub use error::SceneError;
 pub use handle::NodeHandle;
 pub use path::NodePath;
 pub use profile::{ScriptProfile, ScriptTiming};
+pub use property::ScriptPropertyDesc;
 pub use registry::{ScriptFactory, ScriptRegistry};
 pub use scene_tree::SceneTree;
 #[doc(hidden)]
@@ -38,6 +40,11 @@ pub use script::{AsAny, NodeScript};
 pub use scripting::{Groups, Timer};
 pub use signal::{ConnectionId, Signal, SignalQueue, SignalTap, TappedSignal, SIGNAL_TAP_CAPACITY};
 pub use systems::propagate_transforms;
+
+/// Conversions of exported script property values (scene file TOML ↔ script values).
+pub mod script_property {
+    pub use crate::property::{color_hex, parse_color_hex, to_ffi, to_toml};
+}
 
 /// Class names of the built-in node types.
 pub mod class {

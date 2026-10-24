@@ -4,6 +4,7 @@
 use crate::class;
 use crate::components::NodeInfo;
 use crate::handle::NodeHandle;
+use crate::property::ScriptPropertyDesc;
 use crate::registry::ScriptRegistry;
 use crate::scene_tree::SceneTree;
 use crate::script::{NodeScript, ScriptSlot};
@@ -65,10 +66,13 @@ impl Timer {
     pub fn start(&mut self) {
         self.time_left = self.wait_time;
         self.running = true;
+        // Started or stopped by hand (say in `ready`): autostart has nothing left to do.
+        self.autostarted = true;
     }
 
     pub fn stop(&mut self) {
         self.running = false;
+        self.autostarted = true;
         self.time_left = 0.0;
     }
 
@@ -248,6 +252,9 @@ impl SceneTree {
     /// Advances every timer in the tree by `delta` and emits their timeouts. Called by
     /// [`SceneTree::process`].
     pub(crate) fn update_timers(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
         let mut fired = Vec::new();
         let mut to_free = Vec::new();
         {
@@ -275,7 +282,8 @@ impl SceneTree {
                 }
                 let node = NodeHandle::from_entity(entity);
                 fired.push(node);
-                if timer.one_shot || timer.wait_time <= 0.0 {
+                // A NaN wait would otherwise fire every frame.
+                if timer.one_shot || timer.wait_time.is_nan() || timer.wait_time <= 0.0 {
                     timer.stop();
                     if timer.free_on_timeout {
                         to_free.push(node);
@@ -296,6 +304,54 @@ impl SceneTree {
     }
 
     // =========================================================================================
+    // Exported properties
+    // =========================================================================================
+
+    /// The exported property values set on the node's script `script` (by registry name),
+    /// as scene files store them. Empty when none are set or there is no such script.
+    pub fn script_properties(&self, node: NodeHandle, script: &str) -> toml::Table {
+        self.world
+            .get::<ScriptSlot>(node.entity())
+            .and_then(|slot| {
+                slot.entries
+                    .iter()
+                    .find(|e| e.name.as_deref() == Some(script))
+                    .map(|e| e.properties.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Sets exported property values on the node's script `script` (by registry name),
+    /// replacing those set before, and hands them to the running instance as the kinds its
+    /// [`ScriptRegistry`] description declares. The values are kept (to be saved, and set
+    /// again after a hot reload) even when the script does not know them. `false` if the
+    /// node has no such script.
+    pub fn set_script_properties(
+        &mut self,
+        node: NodeHandle,
+        script: &str,
+        properties: toml::Table,
+    ) -> bool {
+        let registry = self.world.resource::<ScriptRegistry>().map(|r| r.clone());
+        let Some(mut slot) = self.world.get_mut::<ScriptSlot>(node.entity()) else {
+            return false;
+        };
+        let Some(entry) = slot
+            .entries
+            .iter_mut()
+            .find(|e| e.name.as_deref() == Some(script))
+        else {
+            return false;
+        };
+        if let Some(instance) = entry.script.as_mut() {
+            let metadata = registry.as_ref().and_then(|r| r.metadata(script));
+            apply_properties(instance.as_mut(), metadata, script, &properties);
+        }
+        entry.properties = properties;
+        true
+    }
+
+    // =========================================================================================
     // Hot reload
     // =========================================================================================
 
@@ -303,10 +359,11 @@ impl SceneTree {
     /// [`ScriptRegistry`] resource, carrying state over with
     /// [`NodeScript::save_state`] / [`NodeScript::load_state`], then calls
     /// [`NodeScript::reloaded`] on it. Returns how many scripts were replaced.
+    ///
+    /// A script running right now (the one that asked for the reload) cannot be swapped
+    /// under its own feet: it is replaced by [`SceneTree::reload_pending_scripts`] once it
+    /// returned (the engine calls that every frame).
     pub fn reload_scripts(&mut self) -> usize {
-        let Some(registry) = self.world.resource::<ScriptRegistry>().map(|r| r.clone()) else {
-            return 0;
-        };
         let named: Vec<(NodeHandle, u64, String)> = self
             .world
             .storage::<ScriptSlot>()
@@ -321,8 +378,31 @@ impl SceneTree {
                     .collect()
             })
             .unwrap_or_default();
+        self.replace_scripts(named)
+    }
 
+    /// Replaces the scripts [`SceneTree::reload_scripts`] skipped because they were running,
+    /// if they are not running anymore. Returns how many were replaced.
+    pub fn reload_pending_scripts(&mut self) -> usize {
+        let Some(pending) = self
+            .world
+            .resource_mut::<PendingReloads>()
+            .map(|mut p| std::mem::take(&mut p.0))
+        else {
+            return 0;
+        };
+        if pending.is_empty() {
+            return 0;
+        }
+        self.replace_scripts(pending)
+    }
+
+    fn replace_scripts(&mut self, named: Vec<(NodeHandle, u64, String)>) -> usize {
+        let Some(registry) = self.world.resource::<ScriptRegistry>().map(|r| r.clone()) else {
+            return 0;
+        };
         let mut replaced = Vec::new();
+        let mut running = Vec::new();
         for (node, id, name) in named {
             let Some(mut fresh) = registry.create(&name) else {
                 continue;
@@ -330,9 +410,25 @@ impl SceneTree {
             let Some(mut slot) = self.world.get_mut::<ScriptSlot>(node.entity()) else {
                 continue;
             };
-            let Some(old) = slot.take(id) else {
-                continue; // running right now; leave it
+            let Some(entry) = slot.entries.iter().find(|e| e.id == id) else {
+                continue; // removed meanwhile
             };
+            if entry.name.as_deref() != Some(name.as_str()) {
+                continue;
+            }
+            let Some(old) = slot.take(id) else {
+                // Running right now: swapped once it returned.
+                running.push((node, id, name));
+                continue;
+            };
+            // The scene's property values first, so state carried over wins.
+            let properties = slot
+                .entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.properties.clone())
+                .unwrap_or_default();
+            apply_properties(fresh.as_mut(), registry.metadata(&name), &name, &properties);
             match old.save_state() {
                 Some(state) => fresh.load_state(&state),
                 None => warn!(
@@ -345,6 +441,16 @@ impl SceneTree {
             drop(slot);
             replaced.push((node, id));
         }
+        if !running.is_empty() {
+            let pending = self
+                .world
+                .resource_or_insert_with(PendingReloads::default);
+            for item in running {
+                if !pending.0.contains(&item) {
+                    pending.0.push(item);
+                }
+            }
+        }
         for &(node, id) in &replaced {
             self.with_script_id(node, id, |script, tree| script.reloaded(tree, node));
         }
@@ -352,5 +458,98 @@ impl SceneTree {
             info!(scripts = replaced.len(), "hot reload: scripts replaced");
         }
         replaced.len()
+    }
+}
+
+/// Scripts a hot reload could not swap because they were running: (node, script id, name).
+#[derive(Debug, Default)]
+struct PendingReloads(Vec<(NodeHandle, u64, String)>);
+
+/// Hands `properties` to `script`, converted to the kinds `metadata` declares.
+fn apply_properties(
+    script: &mut dyn NodeScript,
+    metadata: Option<&[ScriptPropertyDesc]>,
+    script_name: &str,
+    properties: &toml::Table,
+) {
+    for (name, value) in properties {
+        let kind = match metadata {
+            Some(props) => match props.iter().find(|p| &p.name == name) {
+                Some(p) => Some(p.kind),
+                None => {
+                    warn!(
+                        script = script_name,
+                        property = name.as_str(),
+                        "the script exports no such property; the value is kept but unused"
+                    );
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let Some(converted) = crate::property::to_ffi(kind, value) else {
+            warn!(
+                script = script_name,
+                property = name.as_str(),
+                "property value `{value}` does not fit the property's type; ignored"
+            );
+            continue;
+        };
+        script.set_exported_property(name, converted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static VERSION: AtomicU32 = AtomicU32::new(1);
+
+    /// Counts its frames; asks for a hot reload from its own `process` once.
+    struct Reloader {
+        version: u32,
+        frames: u32,
+    }
+
+    impl NodeScript for Reloader {
+        fn process(&mut self, tree: &mut SceneTree, _node: NodeHandle, _delta: f32) {
+            self.frames += 1;
+            if self.frames == 1 && self.version == 1 {
+                VERSION.store(2, Ordering::Relaxed);
+                assert_eq!(tree.reload_scripts(), 0, "the running script is not swapped");
+            }
+        }
+
+        fn save_state(&self) -> Option<String> {
+            Some(self.frames.to_string())
+        }
+
+        fn load_state(&mut self, state: &str) {
+            self.frames = state.parse().unwrap();
+        }
+    }
+
+    /// A reload asked for by the running script itself replaces it once it returned.
+    #[test]
+    fn a_script_running_during_a_reload_is_replaced_afterwards() {
+        let mut tree = SceneTree::new();
+        let mut registry = ScriptRegistry::new();
+        registry.register_factory("Reloader", || {
+            Box::new(Reloader {
+                version: VERSION.load(Ordering::Relaxed),
+                frames: 0,
+            })
+        });
+        tree.world_mut().insert_resource(registry);
+        let node = tree.create_node("N");
+        tree.set_script_named(node, "Reloader").unwrap();
+        let root = tree.root();
+        tree.add_child(root, node).unwrap();
+        tree.process(0.1);
+        assert_eq!(tree.reload_pending_scripts(), 1);
+        assert_eq!(tree.reload_pending_scripts(), 0, "replaced once");
+        let ty = tree.script::<Reloader>(node).map(|r| (r.version, r.frames));
+        assert_eq!(ty, Some((2, 1)), "the new version, with the old state");
     }
 }

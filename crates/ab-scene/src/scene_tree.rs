@@ -533,9 +533,10 @@ impl SceneTree {
             return desired.to_owned();
         }
         let base = desired.trim_end_matches(|c: char| c.is_ascii_digit());
-        let mut n: u64 = desired[base.len()..]
+        // `u128` so a suffix of `u64::MAX` still has a successor.
+        let mut n: u128 = desired[base.len()..]
             .parse::<u64>()
-            .map_or(2, |n| n + 1)
+            .map_or(2, |n| u128::from(n) + 1)
             .max(2);
         loop {
             let candidate = format!("{base}{n}");
@@ -551,17 +552,25 @@ impl SceneTree {
     // =========================================================================================
 
     fn propagate_enter_tree(&mut self, node: NodeHandle) {
-        for n in self.subtree(node) {
+        // Children are read after their parent's callback, so nodes a callback adds below a
+        // node that has not entered yet enter in this pass too.
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
             // Skip nodes detached by an earlier callback in this pass.
             let attached = n == node || self.parent(n).is_some_and(|p| self.is_inside_tree(p));
             if !attached {
                 continue;
             }
             match self.info_mut(n) {
+                // Already entered by a nested `add_child` from a callback (with its subtree).
+                Ok(info) if info.in_tree => continue,
                 Ok(mut info) => info.in_tree = true,
                 Err(_) => continue,
             }
             self.with_scripts(n, |script, tree| script.enter_tree(tree, n));
+            if let Some(children) = self.world.get::<Children>(n.entity()) {
+                stack.extend(children.0.iter().rev());
+            }
         }
     }
 
@@ -587,6 +596,23 @@ impl SceneTree {
             if let Ok(mut info) = self.info_mut(n) {
                 info.in_tree = false;
             }
+        }
+        // A callback may have attached nodes below a node that had not exited yet; they
+        // entered the tree and must leave with it rather than stay "in tree" while detached.
+        if self.is_inside_tree(node) {
+            return;
+        }
+        let stragglers: Vec<NodeHandle> = self
+            .subtree(node)
+            .into_iter()
+            .filter(|&n| {
+                n != node
+                    && self.is_inside_tree(n)
+                    && self.parent(n).is_some_and(|p| !self.is_inside_tree(p))
+            })
+            .collect();
+        for n in stragglers {
+            self.propagate_exit_tree(n);
         }
     }
 
@@ -853,6 +879,15 @@ impl SceneTree {
         }
         if let Some(parent) = self.parent(node) {
             let _ = self.remove_child(parent, node);
+            // An `exit_tree` callback may have attached the node elsewhere. As in Godot, a
+            // queued node is freed regardless, so detach it from wherever it ended up instead
+            // of leaving a dead handle in that parent's children.
+            if let Some(parent) = self.parent(node) {
+                let _ = self.remove_child(parent, node);
+                if let Some(parent) = self.parent(node) {
+                    self.unlink(parent, node);
+                }
+            }
         }
         for n in self.subtree(node) {
             self.world.despawn(n.entity());

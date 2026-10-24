@@ -697,6 +697,13 @@ fn configure(tree: &mut SceneTree, node: NodeHandle, desc: &NodeDesc) -> Result<
             other => other.to_string(),
         })?;
     }
+    for (script, properties) in &desc.script_properties {
+        if !tree.set_script_properties(node, script, properties.clone()) {
+            return Err(format!(
+                "script_properties names `{script}`, which is not one of the node's scripts"
+            ));
+        }
+    }
     Ok(())
 }
 

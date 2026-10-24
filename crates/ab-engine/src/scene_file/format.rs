@@ -13,18 +13,71 @@ pub struct SceneFile {
     pub nodes: Vec<NodeDesc>,
 }
 
+/// Version of the scene file format this engine writes (`format_version` at the top of a
+/// file). Files without one are version 1. Raise it when a change would misread older files,
+/// and add the step that upgrades them to [`MIGRATIONS`].
+pub const SCENE_FORMAT_VERSION: u32 = 1;
+
+/// Upgrades of older files, applied before parsing: `MIGRATIONS[i]` turns a version `i + 1`
+/// file into version `i + 2` (renaming keys, converting values, …).
+const MIGRATIONS: &[fn(&mut toml::Table)] = &[];
+
+const _: () = assert!(MIGRATIONS.len() as u32 + 1 == SCENE_FORMAT_VERSION);
+
+/// What [`SceneFile::from_toml`] reads first, to know how to read the rest.
+#[derive(Deserialize)]
+struct Header {
+    format_version: Option<u32>,
+}
+
+/// A scene file with its version (a separate type, so [`SceneFile`] stays version-free).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedScene {
+    #[serde(default)]
+    #[allow(dead_code)]
+    format_version: Option<u32>,
+    #[serde(default)]
+    environment: Option<EnvironmentDesc>,
+    #[serde(default, rename = "node")]
+    nodes: Vec<NodeDesc>,
+}
+
 impl SceneFile {
+    /// Parses a scene file of any supported version, upgrading an older one. A file of a
+    /// newer engine is an error rather than half understood.
     pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(text)
+        let version = toml::from_str::<Header>(text)?.format_version.unwrap_or(1);
+        let scene: VersionedScene = if version == SCENE_FORMAT_VERSION {
+            toml::from_str(text)?
+        } else if (1..SCENE_FORMAT_VERSION).contains(&version) {
+            let mut table: toml::Table = toml::from_str(text)?;
+            for migrate in &MIGRATIONS[version as usize - 1..] {
+                migrate(&mut table);
+            }
+            table.try_into()?
+        } else {
+            return Err(serde::de::Error::custom(format!(
+                "scene format version {version} is not supported: this engine reads versions \
+                 1 to {SCENE_FORMAT_VERSION} (was the file saved by a newer April Blink?)"
+            )));
+        };
+        // Destructured in full, so a new field of `SceneFile` is not forgotten here.
+        let VersionedScene {
+            format_version: _,
+            environment,
+            nodes,
+        } = scene;
+        Ok(Self { environment, nodes })
     }
 
     /// Compact, hand-editable TOML: one line per key, `[x, y, z]` and `{ k = v }` inline,
     /// floats in their shortest form, `name`/`parent`/`type` first.
     pub fn to_toml(&self) -> String {
         let value = toml::Value::try_from(self).expect("scene descriptions always serialize");
-        let mut out = String::new();
+        let mut out = format!("format_version = {SCENE_FORMAT_VERSION}\n");
         if let Some(toml::Value::Table(environment)) = value.get("environment") {
-            out.push_str("[environment]\n");
+            out.push_str("\n[environment]\n");
             write_keys(&mut out, environment, &[]);
         }
         if let Some(toml::Value::Array(nodes)) = value.get("node") {
@@ -138,6 +191,10 @@ pub struct NodeDesc {
     /// scenes use `script` for one script and `scripts` for more.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<String>,
+    /// Exported property values, per script name:
+    /// `script_properties = { Mover = { speed = 4.0, tint = "#ff8040ff" } }`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub script_properties: std::collections::BTreeMap<String, toml::Table>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cast_shadows: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,8 +578,11 @@ pub struct BodyDesc {
     pub continuous_cd: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_sleep: Option<bool>,
+    /// What the body is (bit mask, default 1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<u32>,
+    /// What it responds to (bit mask, default all): solid bodies collide when each one's
+    /// mask has the other's layer; an area sees what its own mask selects.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<u32>,
 }
@@ -995,7 +1055,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("fog_density = 0.05\n"), "{text}");
-        assert!(text.starts_with("[environment]\n"));
+        assert!(text.starts_with("format_version = 1\n\n[environment]\n"));
         assert!(
             text.contains("[[node]]\nname = \"Ball\"\nparent = \".\"\ntype = \"RigidBody3D\"\n"),
             "{text}"
@@ -1009,5 +1069,28 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("positon"), "{message}");
         assert!(message.contains("line 3"), "{message}");
+    }
+
+    #[test]
+    fn format_versions() {
+        let node = "[[node]]\nname = \"A\"\n";
+        // Files from before versions were written are version 1.
+        let unversioned = SceneFile::from_toml(node).unwrap();
+        let versioned = SceneFile::from_toml(&format!("format_version = 1\n{node}")).unwrap();
+        assert_eq!(unversioned, versioned);
+        assert!(unversioned
+            .to_toml()
+            .starts_with("format_version = 1\n\n[[node]]\n"));
+
+        for bad in ["format_version = 0\n", "format_version = 99\n"] {
+            let message = SceneFile::from_toml(&format!("{bad}{node}"))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("not supported"), "{message}");
+        }
+        let message = SceneFile::from_toml(&format!("format_version = \"1\"\n{node}"))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("format_version"), "{message}");
     }
 }
