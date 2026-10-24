@@ -1,8 +1,9 @@
 //! Core building blocks shared by every April Blink Engine crate: math types, frame timing,
-//! identifiers, logging setup, the worker-thread job system and small dependency-free
-//! utilities.
+//! identifiers, crash-safe file writes, logging setup, the worker-thread job system and small
+//! dependency-free utilities.
 
 pub mod color;
+pub mod fs;
 pub mod jobs;
 pub mod logging;
 pub mod math;
