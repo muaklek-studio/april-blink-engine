@@ -69,8 +69,6 @@ foundation for making games, with a small codebase that one person can read and 
   `lld`.
 - macOS: the Xcode command line tools (`xcode-select --install`).
 
-CI (`.github/workflows/ci.yml`) runs `cargo xtask ci` on Linux, Windows and macOS.
-
 ## Workspace
 
 | Crate | Purpose |
