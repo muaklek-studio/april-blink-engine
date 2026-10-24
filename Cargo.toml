@@ -96,6 +96,9 @@ libloading = "0.9"
 # Work-stealing worker pool behind `ab_core::jobs`.
 rayon = "1.12"
 
+# Property tests (dev only).
+proptest = "1"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 missing_debug_implementations = "warn"

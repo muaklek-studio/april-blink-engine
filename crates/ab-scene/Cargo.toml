@@ -10,9 +10,11 @@ authors.workspace = true
 [dependencies]
 ab-core.workspace = true
 ab-ecs.workspace = true
+ab-script-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 [lints]

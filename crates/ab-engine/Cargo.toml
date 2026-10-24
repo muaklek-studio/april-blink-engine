@@ -45,5 +45,8 @@ audio = ["ab-audio/device"]
 # `--screenshot`) are ignored.
 shipping = []
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true
