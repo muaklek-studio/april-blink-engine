@@ -18,6 +18,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod asset_sync;
 mod asset_viewer;
 mod build;
 mod chrome;
@@ -25,9 +26,11 @@ mod commands;
 mod console;
 mod create;
 mod dialogs;
+mod diff_view;
 mod export;
 mod fonts;
 mod git;
+mod git_window;
 mod history;
 mod i18n;
 mod loading;
@@ -43,6 +46,8 @@ mod shell;
 mod state;
 mod theme;
 mod thumbnails;
+mod tool_window;
+mod ui_designer;
 mod ui_edit;
 mod viewport;
 mod viewports;
@@ -138,6 +143,44 @@ fn export(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `ab-editor --sync-assets [<project folder>]`: brings the project's packed assets (in
+/// git) and its files in step, as the editor does when it opens the project (after a
+/// clone, on a build machine…). Prints what it did.
+fn sync_assets(args: &[String]) -> anyhow::Result<()> {
+    let folder = match args {
+        [] => std::env::current_dir()?,
+        [folder] => std::path::absolute(folder)?,
+        _ => bail!("usage: ab-editor --sync-assets [<project folder>]"),
+    };
+    let project = ab_project::Project::open(&folder)?;
+    ab_project::asset_store::ensure_git_files(&project)?;
+    let report = ab_project::asset_store::sync(&project)?;
+    for (what, paths) in [
+        ("unpacked", &report.unpacked),
+        ("removed", &report.removed),
+        ("packed", &report.packed),
+        ("conflict", &report.conflicts),
+    ] {
+        for path in paths {
+            println!("{what:<9} {path}");
+        }
+    }
+    println!("{}", report.summary());
+    if project.lfs && !ab_project::asset_store::lfs_available() {
+        println!(
+            "Warning: the packed assets go to Git LFS, which is not installed: {}",
+            ab_project::asset_store::LFS_INSTALL
+        );
+    }
+    if !report.conflicts.is_empty() {
+        println!(
+            "Conflicts kept your files; the versions from git are in {}",
+            project.data_dir().join("conflicts").display()
+        );
+    }
+    Ok(())
+}
+
 /// `ab-editor --new-project "<title>" [--in <folder>]`: the project manager's New Project
 /// without a window (`<folder>/<name>`; default: the current folder).
 fn new_project(args: &[String]) -> anyhow::Result<()> {
@@ -185,7 +228,7 @@ fn parse() -> anyhow::Result<Options> {
                 println!(
                     "usage: ab-editor [--project <asset dir>] [--scene <scene.toml>] \
                      [--scripts <library>] [--select <node path,...>] [--play] [--physics-view] \
-                     [--show <panel,...>] [--system-titlebar] [--screenshot <file.png>] \
+                     [--show <panel|window:<tool>,...>] [--system-titlebar] [--screenshot <file.png>] \
                      [--language <en|th|…>] \
                      [--hold-loading]\n\n\
                      Without --project the project manager opens after the system check."
@@ -241,6 +284,7 @@ fn run() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("--export") => return export(&args[1..]),
         Some("--new-project") => return new_project(&args[1..]),
+        Some("--sync-assets") => return sync_assets(&args[1..]),
         _ => {}
     }
     let logs = console::install();

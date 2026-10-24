@@ -103,11 +103,15 @@ pub fn has_thumbnail(kind: AssetKind) -> bool {
 
 impl Thumbnails {
     pub fn new(project: &Path, gpu: Option<ab_engine::rendering::GpuContext>) -> Self {
-        let cache_dir = Some(
-            crate::settings::EditorSettings::store()
-                .dir()
-                .join("thumbnails"),
-        );
+        // In the project's own data folder; a bare asset folder's in the editor's.
+        let cache_dir = Some(crate::projects::data_dir(project).map_or_else(
+            || {
+                crate::settings::EditorSettings::store()
+                    .dir()
+                    .join("thumbnails")
+            },
+            |dir| dir.join("cache/thumbnails"),
+        ));
         Self::with_cache(project, gpu, cache_dir)
     }
 

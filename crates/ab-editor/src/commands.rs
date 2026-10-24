@@ -45,6 +45,10 @@ pub enum Command {
     ToggleHighlight,
     Shortcuts,
     Preferences,
+    OpenUiDesigner,
+    OpenAnimationEditor,
+    OpenAssetBrowser,
+    OpenGit,
 }
 
 /// When a binding's keys count.
@@ -88,6 +92,10 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::SaveAs, CTRL_SHIFT, Key::S, Scope::Editor),
     bind(Command::ExportGame, CTRL_SHIFT, Key::E, Scope::Editor),
     bind(Command::Redo, CTRL_SHIFT, Key::Z, Scope::Scene),
+    bind(Command::OpenUiDesigner, CTRL_SHIFT, Key::Num1, Scope::Editor),
+    bind(Command::OpenAnimationEditor, CTRL_SHIFT, Key::Num2, Scope::Editor),
+    bind(Command::OpenAssetBrowser, CTRL_SHIFT, Key::Num3, Scope::Editor),
+    bind(Command::OpenGit, CTRL_SHIFT, Key::Num4, Scope::Editor),
     bind(Command::Save, CTRL, Key::S, Scope::Editor),
     bind(Command::NewScene, CTRL, Key::N, Scope::Editor),
     bind(Command::OpenScene, CTRL, Key::O, Scope::Editor),
@@ -143,6 +151,10 @@ impl Command {
             Command::ToggleHighlight => "toggle_highlight",
             Command::Shortcuts => "shortcuts",
             Command::Preferences => "preferences",
+            Command::OpenUiDesigner => "open_ui_designer",
+            Command::OpenAnimationEditor => "open_animation_editor",
+            Command::OpenAssetBrowser => "open_asset_browser",
+            Command::OpenGit => "open_git",
         }
     }
 
@@ -185,6 +197,10 @@ impl Command {
             Command::ToggleHighlight => icon::SELECTION,
             Command::Shortcuts => icon::KEYBOARD,
             Command::Preferences => icon::GEAR_SIX,
+            Command::OpenUiDesigner => icon::BROWSERS,
+            Command::OpenAnimationEditor => icon::FILM_STRIP,
+            Command::OpenAssetBrowser => icon::FOLDERS,
+            Command::OpenGit => icon::GIT_BRANCH,
         }
     }
 

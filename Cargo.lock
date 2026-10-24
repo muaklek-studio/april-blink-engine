@@ -35,6 +35,7 @@ dependencies = [
  "ab-vfs",
  "gltf",
  "image",
+ "lz4_flex",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -311,6 +312,7 @@ name = "ab-vfs"
 version = "0.1.0"
 dependencies = [
  "ab-core",
+ "flate2",
  "lz4_flex",
  "memmap2",
  "thiserror 2.0.21",

@@ -275,7 +275,7 @@ impl PackWriter {
                 manifest.files.insert(file.0.clone(), index as u32);
             }
             let mut bytes = Vec::new();
-            let pack = write_files(files, &mut bytes)?;
+            let pack = write_files(files, self.method(), &mut bytes)?;
             stats.totals.files += pack.files;
             stats.totals.original_bytes += pack.original_bytes;
             stats.totals.pack_bytes += pack.pack_bytes;

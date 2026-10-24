@@ -18,6 +18,44 @@ pub fn projects_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join("April Blink Projects"))
 }
 
+/// The project data folder (`.ablink`) of the project whose assets are `assets`; `None` for
+/// an asset folder outside a project.
+pub fn data_dir(assets: &Path) -> Option<PathBuf> {
+    Project::open(assets).ok().map(|project| project.data_dir())
+}
+
+/// Removes the oldest files of `dir` (by last change) until it holds at most `max_bytes`.
+/// Returns the bytes freed.
+pub fn trim_cache(dir: &Path, max_bytes: u64) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok().filter(|m| m.is_file())?;
+            Some((
+                metadata.modified().unwrap_or(UNIX_EPOCH),
+                metadata.len(),
+                entry.path(),
+            ))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
+    files.sort();
+    let mut freed = 0;
+    for (_, size, path) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= size;
+            freed += size;
+        }
+    }
+    freed
+}
+
 // =============================================================================================
 // Recent projects
 // =============================================================================================
@@ -149,6 +187,36 @@ pub fn newest_change(dir: &Path) -> Option<SystemTime> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_new_project_settings_are_what_the_engine_reads() {
+        let text = std::str::from_utf8(ab_project::template_file("game.toml").unwrap()).unwrap();
+        let settings = ab_engine::game::GameSettings::from_toml(text)
+            .expect("every key of the template's game.toml is one the engine knows");
+        assert_eq!(settings.asset_lfs, Some(true));
+    }
+
+    #[test]
+    fn trimming_a_cache_drops_the_oldest_files_first() {
+        let dir = std::env::temp_dir().join(format!("ab-trim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, age) in [("old", 300), ("mid", 200), ("new", 100)] {
+            let file = dir.join(name);
+            std::fs::write(&file, [0u8; 100]).unwrap();
+            let time = SystemTime::now() - std::time::Duration::from_secs(age);
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        assert_eq!(trim_cache(&dir, 250), 100);
+        assert!(!dir.join("old").exists() && dir.join("mid").exists());
+        assert_eq!(trim_cache(&dir, 1000), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ab-editor-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -168,6 +236,7 @@ mod tests {
             input: None,
             config: None,
             package: None,
+            lfs: true,
         };
         let mut recent = RecentProjects::load(&store).unwrap();
         assert!(recent.projects.is_empty());

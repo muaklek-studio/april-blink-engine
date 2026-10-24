@@ -80,6 +80,10 @@ pub struct GameSettings {
     /// The game's languages (see [`crate::localization`]).
     #[serde(skip_serializing_if = "is_default")]
     pub localization: crate::localization::LocalizationSettings,
+    /// The project's packed binary assets are stored with Git LFS (default on). Read by
+    /// the editor and its tools (`ab_project::asset_store`); the game ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_lfs: Option<bool>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -118,6 +122,7 @@ impl Default for GameSettings {
             physics_hz: 60,
             worker_threads: None,
             localization: Default::default(),
+            asset_lfs: None,
         }
     }
 }

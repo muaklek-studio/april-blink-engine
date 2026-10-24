@@ -1,7 +1,11 @@
-//! Log capture: a `tracing` layer that keeps recent events for the Console panel.
+//! Log capture: a `tracing` layer that keeps recent events for the Console panel and, while
+//! a project is open, writes them to its log file (`.ablink/logs/editor.log`, the previous
+//! session's kept as `editor.previous.log`).
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::io::{LineWriter, Write as _};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
@@ -12,6 +16,43 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 /// Events kept for the console.
 const CAPACITY: usize = 5000;
+
+/// The open project's log file, written line by line (nothing lost in a crash).
+static LOG_FILE: Mutex<Option<LineWriter<std::fs::File>>> = Mutex::new(None);
+
+/// Writes the log to `dir/editor.log` from now on (the last one kept as
+/// `editor.previous.log`), or to no file (`None`).
+pub fn log_to(dir: Option<&Path>) {
+    let file = dir.and_then(|dir| {
+        let path = dir.join("editor.log");
+        let opened = std::fs::create_dir_all(dir)
+            .and_then(|()| {
+                if path.is_file() {
+                    std::fs::rename(&path, dir.join("editor.previous.log"))?;
+                }
+                std::fs::File::create(&path)
+            })
+            .map(LineWriter::new);
+        match opened {
+            Ok(mut file) => {
+                let started = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let _ = writeln!(
+                    file,
+                    "# April Blink Editor {} log, started at {started} (seconds since 1970)",
+                    env!("CARGO_PKG_VERSION")
+                );
+                Some(file)
+            }
+            Err(err) => {
+                tracing::warn!("no log file in {}: {err}", dir.display());
+                None
+            }
+        }
+    });
+    *LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()) = file;
+}
 
 #[derive(Debug, Clone)]
 pub struct LogLine {
@@ -81,12 +122,24 @@ impl<S: Subscriber> Layer<S> for ConsoleLayer {
         let mut fields = Fields::default();
         event.record(&mut fields);
         let metadata = event.metadata();
-        self.buffer.push(LogLine {
+        let line = LogLine {
             level: *metadata.level(),
             target: metadata.target().to_owned(),
             message: format!("{}{}", fields.message, fields.rest),
             time: self.start.elapsed().as_secs_f32(),
-        });
+        };
+        if let Some(file) = LOG_FILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            let _ = writeln!(
+                file,
+                "{:10.3} {:5} {}: {}",
+                line.time, line.level, line.target, line.message
+            );
+        }
+        self.buffer.push(line);
     }
 }
 

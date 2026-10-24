@@ -1,5 +1,7 @@
-//! The asset viewer (double-click in the asset browser): a window that shows one asset
-//! with the tools that suit it.
+//! The asset viewer (double-click in the asset browser): every asset in a native window of
+//! its own (several side by side), with the tools that suit it on a tool bar and its
+//! details on the right. Its actions reveal it in the asset browser, add a model or scene to
+//! the edited scene, open a scene, or read the file again.
 //!
 //! * Images and textures: zoom (wheel), pan (drag), fit or 1:1, a single channel at a time,
 //!   the pixel under the pointer, a checkerboard under transparency. Normal maps also show
@@ -57,9 +59,12 @@ struct RenderView {
     texture: Option<egui::TextureId>,
     info: Option<SubjectInfo>,
     material: Option<MaterialDesc>,
+    /// What the image shows: drawn again only when the subject, the view or the size
+    /// changes.
+    drawn: Option<(Subject, Orbit, (u32, u32))>,
 }
 
-// One viewer window at a time: the variants' sizes do not matter.
+// The variants' sizes do not matter: a few viewer windows at most.
 #[allow(clippy::large_enum_variant)]
 enum Body {
     Image(ImageView),
@@ -74,11 +79,42 @@ struct Open {
     file_size: Option<u64>,
 }
 
+/// One asset's window. Models, scenes and materials get a previewer of their own, so every
+/// window keeps its subject loaded.
+struct ViewerWindow {
+    /// Names the window (`asset-viewer-<slot>`): the lowest free one, so the preview
+    /// window keeps its place on the desktop from one asset to the next.
+    slot: usize,
+    open: Open,
+    previewer: Option<Previewer>,
+    /// Kept open: the next asset opens in another window instead of replacing this one.
+    pinned: bool,
+}
+
+/// The asset windows (double-click in the asset browser). Like a preview: the next asset
+/// replaces the one shown, unless that window is pinned.
 #[derive(Default)]
 pub struct AssetViewer {
-    open: Option<Open>,
-    previewer: Option<Previewer>,
+    windows: Vec<ViewerWindow>,
+    /// Windows asked for again: raised next frame.
+    focus: Vec<usize>,
+    /// Images of closed or replaced assets, freed next frame.
+    freed: Vec<egui::TextureId>,
 }
+
+/// What a viewer window asks of the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewerAction {
+    /// Show the asset in the asset browser.
+    Reveal(String),
+    /// Add the model or scene to the edited scene.
+    AddToScene(String),
+    /// Open the scene for editing.
+    OpenScene(String),
+}
+
+/// At most this many viewer windows: opening another closes the oldest.
+const MAX_WINDOWS: usize = 6;
 
 /// Whether the viewer can show `kind`.
 pub fn can_view(kind: AssetKind) -> bool {
@@ -88,126 +124,343 @@ pub fn can_view(kind: AssetKind) -> bool {
     )
 }
 
-impl AssetViewer {
-    /// Opens `path` (a project asset of `kind`), replacing what was shown.
-    pub fn open(&mut self, project: &Path, path: &str, kind: AssetKind) {
-        let file = project.join(path);
-        let body = match kind {
-            AssetKind::Image => {
-                let name = file
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_lowercase())
-                    .unwrap_or_default();
-                let decode = file.clone();
-                Body::Image(ImageView {
-                    loading: Some(jobs::spawn_background("ab-image-viewer", move || {
-                        image::open(&decode)
-                            .map(|i| ImageData { rgba: i.to_rgba8() })
-                            .map_err(|e| format!("{}: {e}", decode.display()))
-                    })),
-                    data: None,
-                    texture: None,
-                    channel: Channel::All,
-                    shown: None,
-                    zoom: 1.0,
-                    pan: egui::Vec2::ZERO,
-                    fit: true,
-                    normal_map: crate::thumbnails::looks_like_normal_map(&name, &[]),
-                    light: 0.6,
-                })
-            }
-            AssetKind::Material => Body::Render(RenderView {
-                subject: Subject::Material(path.to_owned(), Shape::Sphere),
-                orbit: Orbit::default(),
-                target: None,
+fn body(project: &Path, path: &str, kind: AssetKind) -> Body {
+    let file = project.join(path);
+    let render = |subject| {
+        Body::Render(RenderView {
+            subject,
+            orbit: Orbit::default(),
+            target: None,
+            texture: None,
+            info: None,
+            material: None,
+            drawn: None,
+        })
+    };
+    match kind {
+        AssetKind::Image => {
+            let name = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let decode = file.clone();
+            Body::Image(ImageView {
+                loading: Some(jobs::spawn_background("ab-image-viewer", move || {
+                    image::open(&decode)
+                        .map(|i| ImageData { rgba: i.to_rgba8() })
+                        .map_err(|e| format!("{}: {e}", decode.display()))
+                })),
+                data: None,
                 texture: None,
-                info: None,
-                material: std::fs::read_to_string(&file)
+                channel: Channel::All,
+                shown: None,
+                zoom: 1.0,
+                pan: egui::Vec2::ZERO,
+                fit: true,
+                normal_map: crate::thumbnails::looks_like_normal_map(&name, &[]),
+                light: 0.6,
+            })
+        }
+        AssetKind::Material => {
+            let mut body = render(Subject::Material(path.to_owned(), Shape::Sphere));
+            if let Body::Render(view) = &mut body {
+                view.material = std::fs::read_to_string(&file)
                     .ok()
-                    .and_then(|t| MaterialDesc::from_toml(&t).ok()),
-            }),
-            AssetKind::Scene => Body::Render(RenderView {
-                subject: Subject::Scene(path.to_owned()),
-                orbit: Orbit::default(),
-                target: None,
-                texture: None,
-                info: None,
-                material: None,
-            }),
-            _ => Body::Render(RenderView {
-                subject: Subject::Model(path.to_owned()),
-                orbit: Orbit::default(),
-                target: None,
-                texture: None,
-                info: None,
-                material: None,
-            }),
-        };
-        self.open = Some(Open {
-            path: path.to_owned(),
-            kind,
-            body,
-            error: None,
-            file_size: std::fs::metadata(&file).ok().map(|m| m.len()),
+                    .and_then(|t| MaterialDesc::from_toml(&t).ok());
+            }
+            body
+        }
+        AssetKind::Scene => render(Subject::Scene(path.to_owned())),
+        _ => render(Subject::Model(path.to_owned())),
+    }
+}
+
+fn opened(project: &Path, path: &str, kind: AssetKind) -> Open {
+    Open {
+        path: path.to_owned(),
+        kind,
+        body: body(project, path, kind),
+        error: None,
+        file_size: std::fs::metadata(project.join(path)).ok().map(|m| m.len()),
+    }
+}
+
+fn window_key(slot: usize) -> String {
+    format!("asset-viewer-{slot}")
+}
+
+/// The image a render view registered with the renderer, if any.
+fn image_of(open: &Open) -> Option<egui::TextureId> {
+    match &open.body {
+        Body::Render(view) => view.texture,
+        Body::Image(_) => None,
+    }
+}
+
+impl AssetViewer {
+    /// Shows `path` (a project asset of `kind`): raises its window when it is open, else
+    /// shows it in the preview window (the last unpinned one), else in a new window.
+    pub fn open(&mut self, project: &Path, path: &str, kind: AssetKind) {
+        if let Some(window) = self.windows.iter().find(|w| w.open.path == path) {
+            self.focus.push(window.slot);
+            return;
+        }
+        if let Some(window) = self.windows.iter_mut().rev().find(|w| !w.pinned) {
+            self.freed.extend(image_of(&window.open));
+            window.open = opened(project, path, kind);
+            self.focus.push(window.slot);
+            return;
+        }
+        if self.windows.len() >= MAX_WINDOWS {
+            let oldest = self.windows.remove(0);
+            self.freed.extend(image_of(&oldest.open));
+        }
+        let slot = (0..)
+            .find(|slot| self.windows.iter().all(|w| w.slot != *slot))
+            .expect("fewer windows than slots");
+        self.windows.push(ViewerWindow {
+            slot,
+            open: opened(project, path, kind),
+            previewer: None,
+            pinned: false,
         });
     }
 
+    /// Whether any asset window is open.
+    pub fn is_open(&self) -> bool {
+        !self.windows.is_empty()
+    }
+
+    pub fn close_all(&mut self) {
+        for window in self.windows.drain(..) {
+            self.freed.extend(image_of(&window.open));
+        }
+    }
+
+    /// Shows every asset window; returns what they asked for.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        host: &mut crate::tool_window::Host,
         project: &Path,
         render_state: Option<&egui_wgpu::RenderState>,
-    ) {
-        let Some(open) = &mut self.open else {
-            return;
-        };
-        let mut keep = true;
-        let title = format!("{}  {}", open.kind.icon(), open.path);
-        egui::Window::new(title)
-            .id(egui::Id::new("asset-viewer"))
-            .open(&mut keep)
-            .default_size([760.0, 520.0])
-            .min_size([360.0, 260.0])
-            .resizable(true)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
-                    let details_width = 220.0;
-                    let view_width = (ui.available_width() - details_width - 12.0).max(120.0);
-                    let view_size = egui::vec2(view_width, ui.available_height().max(240.0));
-                    ui.allocate_ui(view_size, |ui| match &mut open.body {
-                        Body::Image(view) => image_view(ui, view, &mut open.error),
-                        Body::Render(view) => render_view(
-                            ui,
-                            view,
-                            &mut self.previewer,
-                            project,
-                            render_state,
-                            &mut open.error,
-                        ),
-                    });
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.set_width(details_width);
-                        details(ui, open);
-                    });
-                });
+    ) -> Vec<ViewerAction> {
+        for slot in self.focus.drain(..) {
+            crate::tool_window::focus(ctx, &window_key(slot));
+        }
+        let mut actions = Vec::new();
+        let mut index = 0;
+        while index < self.windows.len() {
+            let window = &mut self.windows[index];
+            let mut title = window.open.path.clone();
+            if !window.pinned {
+                title.push_str(&format!("  ·  {}", crate::i18n::t("viewer.preview")));
+            }
+            let spec = crate::tool_window::Spec {
+                key: window_key(window.slot),
+                icon: window.open.kind.icon(),
+                title,
+                size: [980.0, 680.0],
+                min_size: [520.0, 360.0],
+                dockable: false,
+                remember: true,
+                escape_closes: true,
+            };
+            let response = host.show(ctx, &spec, |ui| {
+                window.show(ui, project, render_state, &mut actions);
             });
-        if !keep {
-            if let Some(Open {
-                body:
-                    Body::Render(RenderView {
-                        texture: Some(id), ..
-                    }),
-                ..
-            }) = self.open.take()
-            {
-                if let Some(state) = render_state {
-                    state.renderer.write().free_texture(&id);
-                }
+            if response.close {
+                let window = self.windows.remove(index);
+                self.freed.extend(image_of(&window.open));
+            } else {
+                index += 1;
             }
         }
+        // Their images go back to the renderer.
+        if let Some(state) = render_state {
+            for id in self.freed.drain(..) {
+                state.renderer.write().free_texture(&id);
+            }
+        }
+        actions
     }
+}
+
+impl ViewerWindow {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        project: &Path,
+        render_state: Option<&egui_wgpu::RenderState>,
+        actions: &mut Vec<ViewerAction>,
+    ) {
+        let key = window_key(self.slot);
+        crate::tool_window::toolbar(ui, &key, |ui| {
+            if let Some(action) = toolbar(ui, &mut self.open, &mut self.pinned) {
+                match action {
+                    Toolbar::Reload => {
+                        self.open.error = None;
+                        match &mut self.open.body {
+                            Body::Render(view) => {
+                                view.info = None;
+                                view.drawn = None;
+                            }
+                            body @ Body::Image(_) => {
+                                *body = self::body(project, &self.open.path, self.open.kind)
+                            }
+                        }
+                        self.open.file_size = std::fs::metadata(project.join(&self.open.path))
+                            .ok()
+                            .map(|m| m.len());
+                    }
+                    Toolbar::Editor(action) => actions.push(action),
+                }
+            }
+        });
+        crate::tool_window::side(
+            ui,
+            (&key, "details"),
+            false,
+            250.0,
+            icon::INFO,
+            &crate::i18n::t("viewer.details"),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| details(ui, &mut self.open));
+            },
+        );
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::BG_0))
+            .show(ui, |ui| match &mut self.open.body {
+                Body::Image(view) => image_view(ui, view, &mut self.open.error),
+                Body::Render(view) => render_view(
+                    ui,
+                    view,
+                    &mut self.previewer,
+                    project,
+                    render_state,
+                    &mut self.open.error,
+                ),
+            });
+    }
+}
+
+enum Toolbar {
+    Reload,
+    Editor(ViewerAction),
+}
+
+/// The view's controls on the left, the asset's actions on the right.
+fn toolbar(ui: &mut egui::Ui, open: &mut Open, pinned: &mut bool) -> Option<Toolbar> {
+    use crate::i18n::t;
+    let mut action = None;
+    match &mut open.body {
+        Body::Image(view) => {
+            for (channel, name) in [
+                (Channel::All, "RGBA"),
+                (Channel::Red, "R"),
+                (Channel::Green, "G"),
+                (Channel::Blue, "B"),
+                (Channel::Alpha, "A"),
+            ] {
+                ui.selectable_value(&mut view.channel, channel, name);
+            }
+            if view.normal_map {
+                ui.selectable_value(&mut view.channel, Channel::Lit, "Lit")
+                    .on_hover_text(t("viewer.lit_hint"));
+            }
+            if view.channel == Channel::Lit {
+                ui.add(
+                    egui::Slider::new(
+                        &mut view.light,
+                        -std::f32::consts::PI..=std::f32::consts::PI,
+                    )
+                    .show_value(false),
+                )
+                .on_hover_text(t("viewer.light"));
+            }
+            ui.separator();
+            if ui
+                .button(format!("{}  {}", icon::CORNERS_OUT, t("ui_designer.fit")))
+                .clicked()
+            {
+                view.fit = true;
+            }
+            if ui.button("1:1").clicked() {
+                view.fit = false;
+                view.zoom = 1.0;
+                view.pan = egui::Vec2::ZERO;
+            }
+            ui.label(RichText::new(format!("{:.0} %", view.zoom * 100.0)).color(theme::TEXT_DIM));
+            ui.separator();
+            ui.checkbox(&mut view.normal_map, t("viewer.normal_map"))
+                .on_hover_text("A tangent-space normal map: shown lit, loaded as linear data");
+        }
+        Body::Render(view) => {
+            if let Subject::Material(_, shape) = &mut view.subject {
+                for (s, name) in [
+                    (Shape::Sphere, "Sphere"),
+                    (Shape::Cube, "Cube"),
+                    (Shape::Plane, "Plane"),
+                ] {
+                    ui.selectable_value(shape, s, name);
+                }
+                ui.separator();
+            }
+            if ui
+                .button(format!(
+                    "{}  {}",
+                    icon::ARROW_COUNTER_CLOCKWISE,
+                    t("viewer.reset_view")
+                ))
+                .clicked()
+            {
+                view.orbit = Orbit::default();
+            }
+            ui.label(
+                RichText::new(t("viewer.render_hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        }
+    }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.toggle_value(pinned, icon::PUSH_PIN)
+            .on_hover_text(t("viewer.pin_hint"));
+        if ui
+            .button(icon::ARROW_CLOCKWISE)
+            .on_hover_text(t("viewer.reload"))
+            .clicked()
+        {
+            action = Some(Toolbar::Reload);
+        }
+        if ui
+            .button(format!("{}  {}", icon::FOLDER_OPEN, t("viewer.reveal")))
+            .clicked()
+        {
+            action = Some(Toolbar::Editor(ViewerAction::Reveal(open.path.clone())));
+        }
+        if matches!(open.kind, AssetKind::Model | AssetKind::Scene)
+            && ui
+                .button(format!("{}  {}", icon::PLUS, t("viewer.add_to_scene")))
+                .clicked()
+        {
+            action = Some(Toolbar::Editor(ViewerAction::AddToScene(open.path.clone())));
+        }
+        if open.kind == AssetKind::Scene
+            && ui
+                .button(format!(
+                    "{}  {}",
+                    icon::PENCIL_SIMPLE,
+                    t("viewer.open_scene")
+                ))
+                .clicked()
+        {
+            action = Some(Toolbar::Editor(ViewerAction::OpenScene(open.path.clone())));
+        }
+    });
+    action
 }
 
 fn details(ui: &mut egui::Ui, open: &mut Open) {
@@ -219,7 +472,7 @@ fn details(ui: &mut egui::Ui, open: &mut Open) {
             });
         });
     };
-    ui.label(RichText::new("Details").font(theme::bold(13.0)));
+    row(ui, "Type", format!("{:?}", open.kind));
     if let Some(size) = open.file_size {
         row(ui, "File size", human_bytes(size));
     }
@@ -245,44 +498,6 @@ fn details(ui: &mut egui::Ui, open: &mut Open) {
                     ),
                 );
             }
-            ui.add_space(6.0);
-            ui.checkbox(&mut view.normal_map, "Normal map")
-                .on_hover_text("A tangent-space normal map: shown lit, loaded as linear data");
-            ui.add_space(6.0);
-            ui.label(RichText::new("Show").color(theme::TEXT_DIM));
-            ui.horizontal_wrapped(|ui| {
-                for (channel, name) in [
-                    (Channel::All, "RGBA"),
-                    (Channel::Red, "R"),
-                    (Channel::Green, "G"),
-                    (Channel::Blue, "B"),
-                    (Channel::Alpha, "A"),
-                ] {
-                    ui.selectable_value(&mut view.channel, channel, name);
-                }
-                if view.normal_map {
-                    ui.selectable_value(&mut view.channel, Channel::Lit, "Lit");
-                }
-            });
-            if view.channel == Channel::Lit {
-                ui.add(
-                    egui::Slider::new(
-                        &mut view.light,
-                        -std::f32::consts::PI..=std::f32::consts::PI,
-                    )
-                    .text("Light"),
-                );
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Fit").clicked() {
-                    view.fit = true;
-                }
-                if ui.button("1:1").clicked() {
-                    view.fit = false;
-                    view.zoom = 1.0;
-                    view.pan = egui::Vec2::ZERO;
-                }
-            });
         }
         Body::Render(view) => {
             if let Some(info) = &view.info {
@@ -343,27 +558,6 @@ fn details(ui: &mut egui::Ui, open: &mut Open) {
                     row(ui, name, text(value));
                 }
             }
-            if let Subject::Material(_, shape) = &mut view.subject {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    for (s, name) in [
-                        (Shape::Sphere, "Sphere"),
-                        (Shape::Cube, "Cube"),
-                        (Shape::Plane, "Plane"),
-                    ] {
-                        ui.selectable_value(shape, s, name);
-                    }
-                });
-            }
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new("Drag: turn · Wheel: zoom · Right drag: light")
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            if ui.button("Reset view").clicked() {
-                view.orbit = Orbit::default();
-            }
         }
     }
     if let Some(error) = &open.error {
@@ -418,7 +612,10 @@ fn image_view(ui: &mut egui::Ui, view: &mut ImageView, error: &mut Option<String
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    checkerboard(&painter, rect);
+    crate::tool_window::tile(&painter, rect, "checker", 24.0, || {
+        let (dark, light) = (Color32::from_gray(40), Color32::from_gray(52));
+        egui::ColorImage::new([2, 2], vec![light, dark, dark, light])
+    });
     let size = egui::vec2(data.rgba.width() as f32, data.rgba.height() as f32);
     if view.fit {
         view.zoom = (rect.width() / size.x).min(rect.height() / size.y).min(8.0);
@@ -503,24 +700,6 @@ fn channel_image(rgba: &image::RgbaImage, channel: Channel, light: f32) -> egui:
     )
 }
 
-fn checkerboard(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, 0.0, Color32::from_gray(40));
-    let cell = 12.0;
-    let (cols, rows) = (
-        (rect.width() / cell) as i32 + 1,
-        (rect.height() / cell) as i32 + 1,
-    );
-    for y in 0..rows {
-        for x in 0..cols {
-            if (x + y) % 2 == 0 {
-                let min = rect.min + egui::vec2(x as f32 * cell, y as f32 * cell);
-                let r = egui::Rect::from_min_size(min, egui::Vec2::splat(cell)).intersect(rect);
-                painter.rect_filled(r, 0.0, Color32::from_gray(52));
-            }
-        }
-    }
-}
-
 fn render_view(
     ui: &mut egui::Ui,
     view: &mut RenderView,
@@ -589,7 +768,11 @@ fn render_view(
         view.target = Some(target);
     }
     if let (Some(target), Some(texture)) = (&view.target, view.texture) {
-        previewer.render(target, &view.orbit);
+        let now = (view.subject.clone(), view.orbit, (width, height));
+        if view.drawn.as_ref() != Some(&now) {
+            previewer.render(target, &view.orbit);
+            view.drawn = Some(now);
+        }
         ui.painter().image(
             texture,
             rect,

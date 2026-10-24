@@ -10,6 +10,8 @@
 //!   game.toml             title, main scene, window, input map
 //!   input.toml            the input map: actions and their keys and buttons
 //!   assets/…              scenes, models, sounds: only the game's content
+//!   packed-assets/…       the binary assets, compressed, as git keeps them
+//!   .ablink/              the editor's caches, logs and backups (not in git)
 //! ```
 //!
 //! Its scripts build with any Rust toolchain into a library that the editor and the player
@@ -22,6 +24,7 @@
 //!   one file and the script library, checked by running the result.
 
 pub mod archive;
+pub mod asset_store;
 mod engine;
 pub mod export;
 pub mod path;

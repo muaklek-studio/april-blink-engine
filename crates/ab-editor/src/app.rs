@@ -105,33 +105,218 @@ impl Tab {
     }
 }
 
+/// The default layout's panel groups: the right side, the left side, below the viewport.
+const RIGHT: &[Tab] = &[
+    Tab::Inspector,
+    Tab::Environment,
+    Tab::Effects,
+    Tab::Config,
+    Tab::Debug,
+];
+const LEFT: &[Tab] = &[Tab::Scene, Tab::SourceControl];
+const BOTTOM: &[Tab] = &[
+    Tab::Assets,
+    Tab::Build,
+    Tab::Animation,
+    Tab::Console,
+    Tab::Profiler,
+];
+
+impl Tab {
+    /// The panels it shares a place with in the default layout.
+    fn group(self) -> &'static [Tab] {
+        [RIGHT, LEFT, BOTTOM]
+            .into_iter()
+            .find(|group| group.contains(&self))
+            .unwrap_or(&[])
+    }
+
+    /// Size of the panel's own window.
+    fn window_size(self) -> [f32; 2] {
+        match self {
+            Tab::Animation => [1360.0, 820.0],
+            Tab::Assets => [1100.0, 700.0],
+            Tab::Console | Tab::Profiler | Tab::Build => [960.0, 560.0],
+            Tab::SourceControl | Tab::Effects => [760.0, 720.0],
+            _ => [460.0, 720.0],
+        }
+    }
+}
+
 fn default_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport]);
     let surface = dock.main_surface_mut();
-    let [center, _right] = surface.split_right(
-        NodeIndex::root(),
-        0.77,
-        vec![
-            Tab::Inspector,
-            Tab::Environment,
-            Tab::Effects,
-            Tab::Config,
-            Tab::Debug,
-        ],
-    );
-    let [center, _left] = surface.split_left(center, 0.22, vec![Tab::Scene, Tab::SourceControl]);
-    let [_center, _bottom] = surface.split_below(
-        center,
-        0.70,
-        vec![
-            Tab::Assets,
-            Tab::Build,
-            Tab::Animation,
-            Tab::Console,
-            Tab::Profiler,
-        ],
-    );
+    let [center, _right] = surface.split_right(NodeIndex::root(), 0.77, RIGHT.to_vec());
+    let [center, _left] = surface.split_left(center, 0.22, LEFT.to_vec());
+    let [_center, _bottom] = surface.split_below(center, 0.70, BOTTOM.to_vec());
     dock
+}
+
+/// A tool in a native window of its own (see [`crate::tool_window`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolWindow {
+    /// A panel taken out of the main window. The Animation panel's window is the animation
+    /// workspace: a preview view, the scene tree and the inspector around the timeline.
+    Panel(Tab),
+    /// The UI Designer (only in a window).
+    UiDesigner,
+    /// The Git client: graph, branches, merges, diffs (only in a window).
+    Git,
+}
+
+impl ToolWindow {
+    /// Its name in the settings and for `--show window:<name>`.
+    fn key(self) -> &'static str {
+        match self {
+            ToolWindow::Panel(tab) => tab.name(),
+            ToolWindow::UiDesigner => "ui_designer",
+            ToolWindow::Git => "git",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        if key == "ui_designer" {
+            return Some(ToolWindow::UiDesigner);
+        }
+        if key == "git" {
+            return Some(ToolWindow::Git);
+        }
+        Tab::ALL
+            .into_iter()
+            .find(|tab| tab.name() == key && *tab != Tab::Viewport)
+            .map(ToolWindow::Panel)
+    }
+
+    fn spec(self) -> crate::tool_window::Spec {
+        let (icon, title, size, min_size) = match self {
+            ToolWindow::Panel(Tab::Animation) => (
+                icon::FILM_STRIP,
+                t("window.animation_editor"),
+                Tab::Animation.window_size(),
+                [900.0, 520.0],
+            ),
+            ToolWindow::Panel(Tab::Assets) => (
+                icon::FOLDERS,
+                t("window.asset_browser"),
+                Tab::Assets.window_size(),
+                [640.0, 400.0],
+            ),
+            ToolWindow::Panel(tab) => (
+                tab.icon(),
+                t(&format!("tab.{}", tab.name())),
+                tab.window_size(),
+                [320.0, 240.0],
+            ),
+            ToolWindow::UiDesigner => (
+                icon::BROWSERS,
+                t("window.ui_designer"),
+                [1480.0, 900.0],
+                [960.0, 560.0],
+            ),
+            ToolWindow::Git => (
+                icon::GIT_BRANCH,
+                t("window.git"),
+                [1500.0, 920.0],
+                [1000.0, 600.0],
+            ),
+        };
+        crate::tool_window::Spec {
+            key: self.key().to_owned(),
+            icon,
+            title,
+            size,
+            min_size,
+            dockable: matches!(self, ToolWindow::Panel(_)),
+            remember: true,
+            escape_closes: false,
+        }
+    }
+}
+
+/// The animation workspace's own panels (the timeline is the Animation panel's).
+#[derive(Default)]
+struct AnimationWorkspace {
+    /// A view of the scene with its own camera, made on first show.
+    view: Option<crate::viewport::Viewport>,
+    redraw: crate::tool_window::Redraw,
+    scene_tree: SceneTreePanel,
+    inspector: InspectorPanel,
+}
+
+impl AnimationWorkspace {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        animation: &mut crate::panels::animation::AnimationPanel,
+        editor: &mut Editor,
+        main: &ViewportArea,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        let view = self.view.get_or_insert_with(|| {
+            let mut view = main.sharing(crate::viewport::ViewKind::Perspective);
+            view.frame_selection(editor);
+            view
+        });
+        let focus = view.camera.pivot;
+        // Every frame while in use or playing a clip; a few times a second otherwise.
+        let active = crate::tool_window::in_use(ui.ctx()) || animation.is_playing();
+        view.redraw = self.redraw.due(active, editor.revision());
+        crate::tool_window::side(
+            ui,
+            "animation-scene",
+            true,
+            250.0,
+            Tab::Scene.icon(),
+            &t("tab.scene"),
+            |ui| {
+                self.scene_tree.show(ui, editor, focus);
+            },
+        );
+        if std::mem::take(&mut self.scene_tree.frame_request) {
+            view.frame_selection(editor);
+        }
+        crate::tool_window::side(
+            ui,
+            "animation-inspector",
+            false,
+            320.0,
+            Tab::Inspector.icon(),
+            &t("tab.inspector"),
+            |ui| self.inspector.show(ui, editor),
+        );
+        egui::Panel::bottom("animation-timeline")
+            .resizable(true)
+            .default_size(340.0)
+            .size_range(160.0..=900.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::BG_1)
+                    .inner_margin(egui::Margin::same(6))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER)),
+            )
+            .show(ui, |ui| animation.show(ui, editor));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::BG_0))
+            .show(ui, |ui| {
+                // The main view sets the camera the game is drawn with: keep it.
+                keeping_camera(editor, |editor| view.show(ui, editor, render_state));
+            });
+    }
+}
+
+/// Runs `draw` (another view of the scene) and puts back the camera the main view chose.
+fn keeping_camera(editor: &mut Editor, draw: impl FnOnce(&mut Editor)) {
+    use ab_engine::rendering::CameraOverride;
+    let saved = editor
+        .tree_mut()
+        .world_mut()
+        .remove_resource::<CameraOverride>();
+    draw(editor);
+    let world = editor.tree_mut().world_mut();
+    world.remove_resource::<CameraOverride>();
+    if let Some(camera) = saved {
+        world.insert_resource(camera);
+    }
 }
 
 /// Something that would discard unsaved changes.
@@ -156,6 +341,9 @@ enum Dialog {
 }
 
 const OPEN_REQUEST: &str = "ab-editor.open-request";
+
+/// Most the decoded-image cache keeps (the oldest images go first).
+const IMAGE_CACHE_BYTES: u64 = 2 << 30;
 
 /// Where Save As suggests saving a scene that has no file yet.
 const NEW_SCENE_PATH: &str = "scenes/new_scene.abscene";
@@ -222,6 +410,8 @@ pub struct EditorApp {
     /// Rebuilds the game's scripts when their sources change (projects opened from the
     /// project manager; `cargo xtask editor` watches them itself).
     watch: Option<ScriptWatch>,
+    /// Keeps the project's packed assets (in git) and its files in step.
+    asset_sync: Option<crate::asset_sync::AssetSync>,
     /// File → Close Project was chosen: the shell goes back to the project manager.
     close_project: bool,
     /// File → Export Game.
@@ -236,6 +426,17 @@ pub struct EditorApp {
     preferences: crate::preferences::PreferencesWindow,
     /// Controllers, opened on first use (`Some(None)`: none can be read here).
     gamepads: Option<Option<ab_engine::platform::Gamepads>>,
+    /// Tools open in native windows of their own, in the order they were opened.
+    windows: Vec<ToolWindow>,
+    ui_designer: crate::ui_designer::UiDesigner,
+    animation_workspace: AnimationWorkspace,
+    git_window: crate::git_window::GitWindow,
+    /// Where each tool window opens: taken from the settings when it opens, then fixed.
+    placements: std::collections::BTreeMap<String, crate::tool_window::Placement>,
+    /// Windows moved or resized lately, kept in the settings once they stay put a moment
+    /// (not on every frame of a drag).
+    moved: std::collections::BTreeMap<String, crate::tool_window::Placement>,
+    moved_at: Option<Instant>,
 }
 
 /// Watches a project's `src/` and rebuilds its script library on change; the engine's hot
@@ -316,6 +517,34 @@ impl EditorApp {
         let project = ab_project::path::canonicalize_lossy(&project);
         let project_dir = project.clone();
         let mut editor = Editor::new(project, options.scripts, Default::default());
+        // Screenshots and tests start from the defaults, not this machine's preferences, and
+        // leave the project's folder alone.
+        let settings_store = options.screenshot.is_none().then(EditorSettings::store);
+        // A real project keeps its caches, logs and backups in its own data folder, and its
+        // binary assets packed for git: unpacked now, before the first scene loads.
+        let game = settings_store
+            .as_ref()
+            .and_then(|_| ab_project::Project::open(&project_dir).ok());
+        let data = game.as_ref().map(ab_project::Project::data_dir);
+        crate::console::log_to(data.as_ref().map(|d| d.join("logs")).as_deref());
+        let asset_sync = game
+            .clone()
+            .map(|game| crate::asset_sync::AssetSync::start(game, &mut editor));
+        let images = data.as_ref().map(|d| d.join("cache/images"));
+        ab_engine::asset::set_decode_cache(images.clone());
+        if let Some(images) = images {
+            let trim = std::thread::Builder::new()
+                .name("ab-cache-trim".into())
+                .spawn(move || {
+                    let freed = crate::projects::trim_cache(&images, IMAGE_CACHE_BYTES);
+                    if freed > 0 {
+                        tracing::info!(freed, "decoded-image cache trimmed");
+                    }
+                });
+            if let Err(err) = trim {
+                tracing::debug!("cache not trimmed: {err}");
+            }
+        }
         if let Some(scene) = &options.scene {
             editor.open_scene(scene);
         }
@@ -327,11 +556,11 @@ impl EditorApp {
             editor.set_selection(nodes, None);
         }
         let mut viewport = ViewportArea::new(render_state);
-        // Screenshots and tests start from the defaults, not this machine's preferences.
-        let settings_store = options.screenshot.is_none().then(EditorSettings::store);
-        editor.backups = settings_store
-            .as_ref()
-            .map(|store| crate::state::backup_dir(store.dir(), &project_dir));
+        editor.backups = match (&settings_store, &data) {
+            (Some(_), Some(data)) => Some(data.join("backups")),
+            (Some(store), None) => Some(crate::state::backup_dir(store.dir(), &project_dir)),
+            (None, _) => None,
+        };
         let mut settings = settings_store
             .as_ref()
             .map(EditorSettings::load)
@@ -375,6 +604,32 @@ impl EditorApp {
         if options.show.iter().any(|name| name == "export") {
             export.show_window();
         }
+        // The tool windows open when the editor last closed, and `--show window:<name>`.
+        let windows: Vec<ToolWindow> = settings
+            .windows
+            .iter()
+            .map(String::as_str)
+            .chain(
+                options
+                    .show
+                    .iter()
+                    .filter_map(|name| name.strip_prefix("window:")),
+            )
+            .filter_map(ToolWindow::from_key)
+            .fold(Vec::new(), |mut all, window| {
+                if !all.contains(&window) {
+                    all.push(window);
+                }
+                all
+            });
+        for window in &windows {
+            if let ToolWindow::Panel(tab) = window {
+                if let Some(found) = dock.find_tab(tab) {
+                    dock.remove_tab(found);
+                }
+            }
+        }
+        let placements = settings.window_rects.clone();
         // `--show unsaved`: the Unsaved Changes dialog (screenshots of it).
         let dialog = options
             .show
@@ -406,6 +661,7 @@ impl EditorApp {
             allow_close: false,
             custom_frame: !options.system_titlebar,
             watch,
+            asset_sync,
             close_project: false,
             export,
             saved_settings: settings.clone(),
@@ -413,6 +669,207 @@ impl EditorApp {
             settings_store,
             preferences: Default::default(),
             gamepads: None,
+            windows,
+            ui_designer: Default::default(),
+            animation_workspace: Default::default(),
+            git_window: Default::default(),
+            placements,
+            moved: Default::default(),
+            moved_at: None,
+        }
+    }
+
+    // =========================================================================================
+    // Tool windows
+    // =========================================================================================
+
+    /// Opens `window`, or raises it when it is open already. A panel leaves the main window.
+    fn open_window(&mut self, ctx: &egui::Context, window: ToolWindow) {
+        if self.windows.contains(&window) {
+            crate::tool_window::focus(ctx, window.key());
+            return;
+        }
+        if let ToolWindow::Panel(tab) = window {
+            if tab == Tab::Viewport {
+                return;
+            }
+            if let Some(found) = self.dock.find_tab(&tab) {
+                self.dock.remove_tab(found);
+            }
+        }
+        self.place(window.key());
+        self.windows.push(window);
+    }
+
+    /// The window `key` opens where it was last.
+    fn place(&mut self, key: &str) {
+        let last = self
+            .moved
+            .get(key)
+            .or_else(|| self.settings.window_rects.get(key));
+        if let Some(rect) = last.copied() {
+            self.placements.insert(key.to_owned(), rect);
+        }
+    }
+
+    /// Takes where the tool windows are now; keeps it once they have stayed put a second.
+    fn track_placements(&mut self, rects: Vec<(String, crate::tool_window::Placement)>) {
+        for (key, rect) in rects {
+            let kept = self.moved.get(&key).or_else(|| self.settings.window_rects.get(&key));
+            if kept != Some(&rect) {
+                self.moved.insert(key, rect);
+                self.moved_at = Some(Instant::now());
+            }
+        }
+        if self
+            .moved_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(1))
+        {
+            let moved = std::mem::take(&mut self.moved);
+            self.settings.window_rects.extend(moved);
+            self.moved_at = None;
+        }
+    }
+
+    fn close_window(&mut self, window: ToolWindow) {
+        self.windows.retain(|w| *w != window);
+        if window == ToolWindow::Panel(Tab::Animation) {
+            // Its preview poses the scene: not once nobody sees it.
+            self.animation.end_preview(&mut self.editor);
+        }
+    }
+
+    /// Puts a panel's window back into the main window, with the panels it was with.
+    fn dock_window(&mut self, window: ToolWindow) {
+        self.close_window(window);
+        if let ToolWindow::Panel(tab) = window {
+            self.dock_tab(tab);
+        }
+    }
+
+    fn dock_tab(&mut self, tab: Tab) {
+        if let Some(found) = self.dock.find_tab(&tab) {
+            // Found just now, so the index is valid.
+            _ = self.dock.set_active_tab(found);
+            return;
+        }
+        let sibling = tab
+            .group()
+            .iter()
+            .filter(|t| **t != tab)
+            .find_map(|t| self.dock.find_tab(t));
+        match sibling.and_then(|found| self.dock.leaf_mut(found.node_path()).ok()) {
+            Some(leaf) => leaf.append_tab(tab),
+            None => self.dock.push_to_focused_leaf(tab),
+        }
+    }
+
+    /// Shows a panel wherever it is: raises its window, or makes it the active tab (put
+    /// back in the main window when it was closed).
+    fn reveal_panel(&mut self, ctx: &egui::Context, tab: Tab) {
+        if self.windows.contains(&ToolWindow::Panel(tab)) {
+            crate::tool_window::focus(ctx, tab.name());
+        } else {
+            self.dock_tab(tab);
+        }
+    }
+
+    /// The dock's panels, for the main window or a tool window.
+    fn tabs<'a>(&'a mut self, render_state: Option<&'a egui_wgpu::RenderState>) -> Tabs<'a> {
+        Tabs {
+            editor: &mut self.editor,
+            viewport: &mut self.viewport,
+            scene_tree: &mut self.scene_tree,
+            inspector: &mut self.inspector,
+            effects: &mut self.effects,
+            animation: &mut self.animation,
+            config: &mut self.config,
+            build: &mut self.build,
+            assets: &mut self.assets,
+            console: &mut self.console,
+            profiler: &mut self.profiler,
+            git_panel: &mut self.git_panel,
+            git: self.git.as_mut(),
+            render_state,
+            pop_out: None,
+        }
+    }
+
+    /// Shows the tool windows and the asset windows, and does what they asked.
+    fn show_windows(
+        &mut self,
+        ctx: &egui::Context,
+        host: &mut crate::tool_window::Host,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        let mut closed = Vec::new();
+        let mut docked = Vec::new();
+        for window in self.windows.clone() {
+            let spec = window.spec();
+            let response = match window {
+                ToolWindow::UiDesigner => {
+                    let (designer, editor, viewport) =
+                        (&mut self.ui_designer, &mut self.editor, &self.viewport);
+                    host.show(ctx, &spec, |ui| {
+                        designer.show(ui, editor, render_state, || viewport.share_renderer());
+                    })
+                }
+                ToolWindow::Git => {
+                    let (window, git) = (&mut self.git_window, self.git.as_mut());
+                    let project = self.editor.project().to_path_buf();
+                    host.show(ctx, &spec, |ui| window.show(ui, git, &project))
+                }
+                ToolWindow::Panel(Tab::Animation) => {
+                    let (workspace, animation, editor, viewport) = (
+                        &mut self.animation_workspace,
+                        &mut self.animation,
+                        &mut self.editor,
+                        &self.viewport,
+                    );
+                    host.show(ctx, &spec, |ui| {
+                        workspace.show(ui, animation, editor, viewport, render_state);
+                    })
+                }
+                ToolWindow::Panel(mut tab) => {
+                    let mut tabs = self.tabs(render_state);
+                    host.show(ctx, &spec, |ui| {
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.set_min_size(ui.available_size());
+                                tabs.ui(ui, &mut tab);
+                            });
+                    })
+                }
+            };
+            if response.dock {
+                docked.push(window);
+            } else if response.close {
+                closed.push(window);
+            }
+        }
+        for window in closed {
+            self.close_window(window);
+        }
+        for window in docked {
+            self.dock_window(window);
+        }
+
+        let project = self.editor.project().to_path_buf();
+        for action in self.assets.viewer.show(ctx, host, &project, render_state) {
+            use crate::asset_viewer::ViewerAction;
+            match action {
+                ViewerAction::Reveal(path) => {
+                    self.assets.reveal(&path);
+                    self.reveal_panel(ctx, Tab::Assets);
+                }
+                ViewerAction::AddToScene(path) if !self.editor.is_playing() => {
+                    let at = self.viewport.camera.pivot;
+                    instance_asset(&mut self.editor, &path, Some(at));
+                }
+                ViewerAction::OpenScene(path) => self.guard(Pending::Open(path)),
+                ViewerAction::AddToScene(_) => {}
+            }
         }
     }
 
@@ -440,6 +897,7 @@ impl EditorApp {
         self.settings.snap = options.snap.sanitized();
         self.settings.highlight_selection = options.highlight_selection;
         self.settings.highlight_hover = options.highlight_hover;
+        self.settings.windows = self.windows.iter().map(|w| w.key().to_owned()).collect();
         if self.settings == self.saved_settings {
             return;
         }
@@ -652,6 +1110,12 @@ impl EditorApp {
             }
             Command::Shortcuts => self.dialog = Some(Dialog::Shortcuts),
             Command::Preferences => self.preferences.show_window(),
+            Command::OpenUiDesigner => self.open_window(ctx, ToolWindow::UiDesigner),
+            Command::OpenAnimationEditor => {
+                self.open_window(ctx, ToolWindow::Panel(Tab::Animation));
+            }
+            Command::OpenAssetBrowser => self.open_window(ctx, ToolWindow::Panel(Tab::Assets)),
+            Command::OpenGit => self.open_window(ctx, ToolWindow::Git),
             // Not while playing.
             Command::NewScene | Command::OpenScene | Command::SaveAs | Command::SelectNone => {}
         }
@@ -745,14 +1209,15 @@ impl EditorApp {
         ui.menu_button(t("menu.view"), |ui| {
             ui.set_min_width(220.0);
             for tab in Tab::ALL {
-                let open = self.dock.find_tab(&tab).is_some();
-                let mut checked = open;
+                let windowed = self.windows.contains(&ToolWindow::Panel(tab));
+                let mut checked = windowed || self.dock.find_tab(&tab).is_some();
                 if ui.checkbox(&mut checked, tab.title()).clicked() {
                     match self.dock.find_tab(&tab) {
+                        _ if windowed && !checked => self.close_window(ToolWindow::Panel(tab)),
                         Some(found) if !checked && tab != Tab::Viewport => {
                             self.dock.remove_tab(found);
                         }
-                        None if checked => self.dock.push_to_focused_leaf(tab),
+                        None if checked && !windowed => self.dock_tab(tab),
                         _ => {}
                     }
                 }
@@ -785,9 +1250,13 @@ impl EditorApp {
                 .clicked()
             {
                 self.dock = default_layout();
+                for window in std::mem::take(&mut self.windows) {
+                    self.close_window(window);
+                }
                 ui.close();
             }
         });
+        self.window_menu(ui);
         ui.menu_button(t("menu.play"), |ui| {
             ui.set_min_width(220.0);
             let playing = self.editor.is_playing();
@@ -815,6 +1284,94 @@ impl EditorApp {
             commands::menu_item(ui, Command::Shortcuts, true);
             if menu_item(ui, icon::INFO, &t("menu.about"), "", true) {
                 self.dialog = Some(Dialog::About);
+            }
+        });
+    }
+
+    /// Window: the tools in windows of their own.
+    fn window_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(t("window.menu"), |ui| {
+            ui.set_min_width(250.0);
+            let ctx = ui.ctx().clone();
+            for (window, command) in [
+                (ToolWindow::UiDesigner, Command::OpenUiDesigner),
+                (ToolWindow::Panel(Tab::Animation), Command::OpenAnimationEditor),
+                (ToolWindow::Panel(Tab::Assets), Command::OpenAssetBrowser),
+                (ToolWindow::Git, Command::OpenGit),
+            ] {
+                let open = self.windows.contains(&window);
+                let text = format!("{}  {}", command.icon(), command.label());
+                let button = egui::Button::new(text)
+                    .selected(open)
+                    .shortcut_text(command.shortcut_text(&ctx));
+                if ui.add(button).clicked() {
+                    self.open_window(&ctx, window);
+                    ui.close();
+                }
+            }
+            ui.menu_button(
+                format!("{}  {}", icon::ARROW_SQUARE_OUT, t("window.pop_out_panel")),
+                |ui| {
+                    for tab in Tab::ALL.into_iter().filter(|t| *t != Tab::Viewport) {
+                        let open = self.windows.contains(&ToolWindow::Panel(tab));
+                        if ui
+                            .add(egui::Button::new(tab.title()).selected(open))
+                            .clicked()
+                        {
+                            self.open_window(&ctx, ToolWindow::Panel(tab));
+                            ui.close();
+                        }
+                    }
+                },
+            );
+            ui.separator();
+            let any = !self.windows.is_empty();
+            if ui
+                .add_enabled(
+                    any,
+                    egui::Button::new(format!(
+                        "{}  {}",
+                        icon::ARROW_SQUARE_IN,
+                        t("window.dock_all")
+                    )),
+                )
+                .clicked()
+            {
+                for window in self.windows.clone() {
+                    self.dock_window(window);
+                }
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    any || self.assets.viewer.is_open(),
+                    egui::Button::new(format!("{}  {}", icon::X_SQUARE, t("window.close_all"))),
+                )
+                .clicked()
+            {
+                for window in std::mem::take(&mut self.windows) {
+                    self.close_window(window);
+                }
+                self.assets.viewer.close_all();
+                ui.close();
+            }
+            if !self.windows.is_empty() {
+                ui.separator();
+                ui.label(
+                    RichText::new(t("window.open_now"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                for window in self.windows.clone() {
+                    let spec = window.spec();
+                    if ui
+                        .button(format!("{}  {}", spec.icon, spec.title))
+                        .clicked()
+                    {
+                        crate::tool_window::focus(&ctx, &spec.key);
+                        ui.close();
+                    }
+                }
             }
         });
     }
@@ -995,14 +1552,10 @@ impl EditorApp {
                             egui::Label::new(RichText::new(text).color(theme::TEXT_DIM))
                                 .sense(egui::Sense::click()),
                         )
-                        .on_hover_text("Git: branch, unpushed/unpulled commits and changed files. Click for Source Control.")
+                        .on_hover_text("Git: branch, unpushed/unpulled commits and changed files. Click for the Git window.")
                         .clicked();
                     if open {
-                        match self.dock.find_tab(&Tab::SourceControl) {
-                            // Found just now, so the index is valid.
-                            Some(found) => _ = self.dock.set_active_tab(found),
-                            None => self.dock.push_to_focused_leaf(Tab::SourceControl),
-                        }
+                        self.open_window(ui.ctx(), ToolWindow::Git);
                     }
                 }
                 let (errors, warnings) = self.console.counts();
@@ -1195,6 +1748,9 @@ impl EditorApp {
                         "pan",
                         "zoom",
                         "release_mouse",
+                        "close_window",
+                        "viewer_close",
+                        "ui_nudge",
                     ] {
                         rows.push((t(&format!("shortcuts.{name}_keys")), t(&format!("shortcuts.{name}"))));
                     }
@@ -1292,6 +1848,8 @@ struct Tabs<'a> {
     git_panel: &'a mut GitPanel,
     git: Option<&'a mut GitClient>,
     render_state: Option<&'a egui_wgpu::RenderState>,
+    /// A tab's Open in New Window was chosen.
+    pop_out: Option<Tab>,
 }
 
 impl TabViewer for Tabs<'_> {
@@ -1346,6 +1904,30 @@ impl TabViewer for Tabs<'_> {
         *tab != Tab::Viewport
     }
 
+    fn context_menu(&mut self, ui: &mut egui::Ui, tab: &mut Tab, _path: egui_dock::NodePath) {
+        if *tab == Tab::Viewport {
+            return;
+        }
+        if ui
+            .button(format!(
+                "{}  {}",
+                icon::ARROW_SQUARE_OUT,
+                t("window.pop_out")
+            ))
+            .clicked()
+        {
+            self.pop_out = Some(*tab);
+            ui.close();
+        }
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        // A double click on a tab takes the panel out into a window of its own.
+        if *tab != Tab::Viewport && response.double_clicked() {
+            self.pop_out = Some(*tab);
+        }
+    }
+
     fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
         [false, false]
     }
@@ -1362,7 +1944,11 @@ impl EditorApp {
         let git = self.git.get_or_insert_with(|| {
             let ctx = ctx.clone();
             let root = crate::panels::git::project_root(self.editor.project());
-            GitClient::start(root, move || ctx.request_repaint())
+            let notify = move || ctx.request_repaint();
+            match &self.asset_sync {
+                Some(sync) => GitClient::start_with(root, notify, sync.git_hook()),
+                None => GitClient::start(root, notify),
+            }
         });
         git.poll();
         // The status bar shows the branch, so keep it roughly current even with the
@@ -1402,6 +1988,9 @@ impl EditorApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.poll_gamepads();
+        if let Some(sync) = &mut self.asset_sync {
+            sync.poll(&mut self.editor);
+        }
         let now = Instant::now();
         let delta = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -1486,6 +2075,7 @@ impl EditorApp {
             .show(ui, |ui| self.status_bar(ui));
 
         let render_state = frame.wgpu_render_state();
+        let mut pop_out = None;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -1529,6 +2119,7 @@ impl EditorApp {
                     git_panel: &mut self.git_panel,
                     git: self.git.as_mut(),
                     render_state,
+                    pop_out: None,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
@@ -1536,15 +2127,30 @@ impl EditorApp {
                     .show_leaf_collapse_buttons(false)
                     .show_leaf_close_all_buttons(false)
                     .show_inside(ui, &mut tabs);
+                pop_out = tabs.pop_out;
             });
+        if let Some(tab) = pop_out {
+            self.open_window(ctx, ToolWindow::Panel(tab));
+        }
 
         let assets = self.editor.assets.root.clone();
         let unsaved = self.editor.modified && !self.editor.is_playing();
         if self.export.show(ctx, &assets, unsaved) {
             self.save_or_ask();
         }
-        let project = self.editor.project().to_path_buf();
-        self.assets.viewer.show(ctx, &project, render_state);
+        // The tool windows, after the main window's panels (they borrow the same state).
+        let mut host =
+            crate::tool_window::Host::new(&self.editor, self.custom_frame, self.placements.clone());
+        self.show_windows(ctx, &mut host, render_state);
+        self.track_placements(std::mem::take(&mut host.rects));
+        if self.moved_at.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        if self.dialog.is_none() {
+            for (command, text) in std::mem::take(&mut host.commands) {
+                self.execute(ctx, command, text);
+            }
+        }
         self.dialogs(ctx);
         self.preferences
             .show(ctx, &mut self.settings, &mut self.viewport.options);
@@ -1556,7 +2162,8 @@ impl EditorApp {
         }
 
         // One undo step per drag or text edit.
-        let idle = ctx.input(|i| !i.pointer.any_down()) && !ctx.egui_wants_keyboard_input();
+        let idle =
+            ctx.input(|i| !i.pointer.any_down()) && !ctx.egui_wants_keyboard_input() && !host.busy;
         if idle {
             self.editor.end_gesture();
             // Not while a step is being dragged: once, when it is let go.

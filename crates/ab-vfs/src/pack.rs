@@ -3,7 +3,7 @@
 //! ```text
 //! header   64 bytes   "ABPK", version u32, flags u32, file count u32,
 //!                     TOC offset u64, TOC size u64, TOC checksum u64, reserved
-//! data                each file's bytes, stored or LZ4-compressed
+//! data                each file's bytes, stored, LZ4- or Deflate-compressed
 //! TOC                 per file: path length u16, path (UTF-8), offset u64, stored size u64,
 //!                     size u64, compression u8, checksum u64 (of the original bytes)
 //! trailer  16 bytes   pack size u64 (all of the above + trailer), "ABPKTAIL"
@@ -38,6 +38,8 @@ const TRAILER_SIZE: usize = 16;
 const MIN_ENTRY_SIZE: usize = 2 + 8 + 8 + 8 + 1 + 8;
 /// LZ4 never expands data by more than this factor, so larger claimed sizes are damage.
 const LZ4_MAX_RATIO: u64 = 255;
+/// Nor Deflate by more than this one.
+const DEFLATE_MAX_RATIO: u64 = 1032;
 
 /// Extensions of formats that are already compressed: stored as they are.
 const PRECOMPRESSED: &[&str] = &["png", "jpg", "jpeg", "ogg", "mp3", "flac", "zip", "abp"];
@@ -46,7 +48,10 @@ const PRECOMPRESSED: &[&str] = &["png", "jpg", "jpeg", "ogg", "mp3", "flac", "zi
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     None = 0,
+    /// Fast to read: games' packs.
     Lz4 = 1,
+    /// Smaller, slower: packs kept rather than read often (a project's assets in git).
+    Deflate = 2,
 }
 
 /// One file of a pack.
@@ -60,6 +65,13 @@ pub struct PackEntry {
     pub size: u64,
     pub compression: Compression,
     checksum: u64,
+}
+
+impl PackEntry {
+    /// FNV-1a 64 of the file's original bytes.
+    pub fn checksum(&self) -> u64 {
+        self.checksum
+    }
 }
 
 /// Totals of a written pack.
@@ -77,14 +89,31 @@ pub struct PackStats {
 pub(crate) type PendingFile = (String, Vec<u8>, bool);
 
 /// Builds a pack in memory, then writes it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PackWriter {
     files: Vec<PendingFile>,
+    /// How files that compress are compressed.
+    method: Compression,
+}
+
+impl Default for PackWriter {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            method: Compression::Lz4,
+        }
+    }
 }
 
 impl PackWriter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Compresses with `method` instead of LZ4 ([`Compression::None`] stores everything).
+    pub fn with_compression(mut self, method: Compression) -> Self {
+        self.method = method;
+        self
     }
 
     /// Adds a file, compressed when that makes it smaller (and its format is not already
@@ -158,13 +187,18 @@ impl PackWriter {
 
     /// Writes the pack (header, data, table of contents, trailer).
     pub fn write_to(&self, out: &mut impl Write) -> VfsResult<PackStats> {
-        write_files(self.files.iter().collect(), out)
+        write_files(self.files.iter().collect(), self.method, out)
+    }
+
+    pub(crate) fn method(&self) -> Compression {
+        self.method
     }
 }
 
 /// Writes a pack of `files` (in path order, so the same files give the same bytes).
 pub(crate) fn write_files(
     mut files: Vec<&PendingFile>,
+    method: Compression,
     out: &mut impl Write,
 ) -> VfsResult<PackStats> {
     files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -176,14 +210,15 @@ pub(crate) fn write_files(
     let mut toc = Vec::new();
     for (path, bytes, compress) in files {
         let packed = compress
-            .then(|| lz4_flex::block::compress(bytes))
+            .then(|| compress_with(method, bytes))
+            .flatten()
             // Keep compression only when it saves at least 5 %.
             .filter(|packed| packed.len() * 20 < bytes.len() * 19);
         let (stored, compression) = match &packed {
-            Some(packed) => (packed.as_slice(), Compression::Lz4),
+            Some(packed) => (packed.as_slice(), method),
             None => (bytes.as_slice(), Compression::None),
         };
-        if compression == Compression::Lz4 {
+        if compression != Compression::None {
             stats.compressed_files += 1;
         }
         stats.original_bytes += bytes.len() as u64;
@@ -218,6 +253,19 @@ pub(crate) fn write_files(
     out.write_all(TAIL_MAGIC)?;
     stats.pack_bytes = pack_size;
     Ok(stats)
+}
+
+fn compress_with(method: Compression, bytes: &[u8]) -> Option<Vec<u8>> {
+    match method {
+        Compression::None => None,
+        Compression::Lz4 => Some(lz4_flex::block::compress(bytes)),
+        Compression::Deflate => {
+            use flate2::write::DeflateEncoder;
+            let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+            encoder.write_all(bytes).ok()?;
+            encoder.finish().ok()
+        }
+    }
 }
 
 /// Writes `executable` followed by the pack to `output`: one file that finds its own data
@@ -373,6 +421,7 @@ impl Pack {
                     compression: match toc.get(field + 24)? {
                         0 => Compression::None,
                         1 => Compression::Lz4,
+                        2 => Compression::Deflate,
                         _ => return None,
                     },
                     checksum: u64_at(toc, field + 25)?,
@@ -398,6 +447,9 @@ impl Pack {
                 Compression::None => entry.size == entry.stored_size,
                 Compression::Lz4 => {
                     entry.size <= entry.stored_size.saturating_mul(LZ4_MAX_RATIO) + 64
+                }
+                Compression::Deflate => {
+                    entry.size <= entry.stored_size.saturating_mul(DEFLATE_MAX_RATIO) + 64
                 }
             };
             if !size_ok {
@@ -450,6 +502,16 @@ impl Pack {
             Compression::None => stored.to_vec(),
             Compression::Lz4 => lz4_flex::block::decompress(stored, entry.size as usize)
                 .map_err(|e| VfsError::Corrupt(format!("{}: {e}", entry.path)))?,
+            Compression::Deflate => {
+                use std::io::Read as _;
+                let mut bytes = Vec::with_capacity(entry.size as usize);
+                // Never more than the entry claims: a damaged stream cannot balloon.
+                flate2::read::DeflateDecoder::new(stored)
+                    .take(entry.size + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| VfsError::Corrupt(format!("{}: {e}", entry.path)))?;
+                bytes
+            }
         };
         if bytes.len() as u64 != entry.size || fnv1a64(&bytes) != entry.checksum {
             return Err(VfsError::Corrupt(format!(
@@ -490,6 +552,29 @@ mod tests {
         let mut bytes = Vec::new();
         let stats = writer.write_to(&mut bytes).unwrap();
         (bytes, stats)
+    }
+
+    #[test]
+    fn deflate_packs_are_smaller_and_read_back() {
+        let text = "a fairly repetitive line of level data\n".repeat(400);
+        let mut writer = PackWriter::new().with_compression(Compression::Deflate);
+        writer.add("data/level.txt", text.clone().into_bytes());
+        writer.add("textures/wall.png", vec![1, 2, 3]);
+        let mut bytes = Vec::new();
+        let stats = writer.write_to(&mut bytes).unwrap();
+        let mut lz4 = Vec::new();
+        let mut fast = PackWriter::new();
+        fast.add("data/level.txt", text.clone().into_bytes());
+        fast.add("textures/wall.png", vec![1, 2, 3]);
+        fast.write_to(&mut lz4).unwrap();
+        assert!(bytes.len() < lz4.len(), "deflate beats lz4 on size");
+        assert_eq!(stats.compressed_files, 1);
+        let pack = Pack::from_bytes(bytes).unwrap();
+        let entry = pack.entry("data/level.txt").unwrap();
+        assert_eq!(entry.compression, Compression::Deflate);
+        assert_eq!(entry.checksum(), fnv1a64(text.as_bytes()));
+        assert_eq!(pack.read("data/level.txt").unwrap(), text.as_bytes());
+        pack.verify().unwrap();
     }
 
     #[test]

@@ -82,6 +82,13 @@ impl AssetsPanel {
         panel
     }
 
+    /// Goes to `path`'s folder with `path` selected.
+    pub fn reveal(&mut self, path: &str) {
+        self.folder = parent(path).to_owned();
+        self.filter.clear();
+        self.selected = Some(path.to_owned());
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,

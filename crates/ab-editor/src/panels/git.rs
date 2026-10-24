@@ -298,7 +298,7 @@ impl GitPanel {
                     .on_hover_text(tip("Pull (fast-forward only)"))
                     .clicked()
                 {
-                    *action = Some(Action::Op(GitOp::Pull));
+                    *action = Some(Action::Op(GitOp::Pull { rebase: false }));
                 }
                 if ui
                     .add_enabled(enabled, egui::Button::new(icon::ARROWS_CLOCKWISE))
@@ -453,7 +453,7 @@ impl GitPanel {
 }
 
 /// The empty state: offers `git init` in the project folder.
-fn no_repository(ui: &mut egui::Ui, busy: bool, root: &Path) -> Option<GitOp> {
+pub fn no_repository(ui: &mut egui::Ui, busy: bool, root: &Path) -> Option<GitOp> {
     super::empty_hint(
         ui,
         icon::GIT_BRANCH,
@@ -596,7 +596,7 @@ fn paths(changes: &[&FileChange]) -> Vec<String> {
 }
 
 /// (tracked, untracked) paths of the work-tree changes.
-fn split_untracked(changes: &[&FileChange]) -> (Vec<String>, Vec<String>) {
+pub fn split_untracked(changes: &[&FileChange]) -> (Vec<String>, Vec<String>) {
     let (untracked, tracked): (Vec<&&FileChange>, Vec<&&FileChange>) = changes
         .iter()
         .partition(|c| c.unstaged == Some(FileState::Untracked));
@@ -607,7 +607,7 @@ fn split_untracked(changes: &[&FileChange]) -> (Vec<String>, Vec<String>) {
 }
 
 /// A plausible branch name (git has the final word).
-fn valid_branch_name(name: &str) -> bool {
+pub fn valid_branch_name(name: &str) -> bool {
     let name = name.trim();
     !name.is_empty()
         && !name.starts_with('-')

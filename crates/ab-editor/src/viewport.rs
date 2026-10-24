@@ -324,6 +324,16 @@ impl ViewportRenderer {
         }
     }
 
+    /// The last image, when it was drawn at `width` × `height` (a view that need not redraw
+    /// this frame shows it again).
+    pub fn cached(&self, width: u32, height: u32) -> Option<egui::TextureId> {
+        let size = (width.clamp(1, 8192), height.clamp(1, 8192));
+        self.target
+            .as_ref()
+            .filter(|t| t.size() == size)
+            .and(self.texture)
+    }
+
     /// Another view drawing with the same scene renderer, into its own image.
     fn sharing(&self) -> Self {
         Self {
@@ -335,7 +345,7 @@ impl ViewportRenderer {
         }
     }
 
-    fn render(
+    pub fn render(
         &mut self,
         state: &egui_wgpu::RenderState,
         world: &ab_engine::ecs::World,
@@ -414,6 +424,9 @@ pub struct Viewport {
     pub main: bool,
     /// The layout button was pressed (the viewport area acts on it).
     pub toggle_layout: bool,
+    /// Draw the scene this frame; when off, the last image is shown again (a view in a
+    /// background window, see [`crate::tool_window::Redraw`]).
+    pub redraw: bool,
     renderer: Option<ViewportRenderer>,
     drag: Option<GizmoDrag>,
     /// What the gizmo drag moves: each selected root with its transforms at the start.
@@ -455,6 +468,12 @@ impl Viewport {
         view
     }
 
+    /// A renderer drawing with this view's scene renderer into an image of its own (a
+    /// tool window's view of the scene).
+    pub fn share_renderer(&self) -> Option<ViewportRenderer> {
+        self.renderer.as_ref().map(ViewportRenderer::sharing)
+    }
+
     fn with_renderer(renderer: Option<ViewportRenderer>) -> Self {
         Self {
             camera: EditorCamera::default(),
@@ -462,6 +481,7 @@ impl Viewport {
             kind: ViewKind::Perspective,
             main: true,
             toggle_layout: false,
+            redraw: true,
             renderer,
             drag: None,
             drag_group: Vec::new(),
@@ -598,6 +618,17 @@ impl Viewport {
         // The scene image.
         let painter = ui.painter_at(rect);
         match (&mut self.renderer, render_state) {
+            (Some(renderer), Some(_))
+                if !self.redraw && renderer.cached(width, height).is_some() =>
+            {
+                let texture = renderer.cached(width, height).expect("checked above");
+                painter.image(
+                    texture,
+                    rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
             (Some(renderer), Some(state)) => {
                 let lit = self.options.editor_lighting && editor.mode == Mode::Edit;
                 let saved = lit.then(|| brighten(editor.tree().world())).flatten();

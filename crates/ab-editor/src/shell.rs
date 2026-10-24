@@ -215,6 +215,9 @@ impl eframe::App for Shell {
             Screen::Editor(editor) => {
                 editor.update(ui, frame);
                 if editor.wants_close_project() {
+                    // The project's log and caches are its own: not the next one's.
+                    crate::console::log_to(None);
+                    ab_engine::asset::set_decode_cache(None);
                     let report = self.report.clone().unwrap_or(Report {
                         results: Vec::new(),
                     });

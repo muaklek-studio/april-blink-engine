@@ -30,6 +30,11 @@ pub struct EditorSettings {
     pub system_fonts: bool,
     /// Interface zoom, 1 = 100 %.
     pub ui_scale: f32,
+    /// The tool windows open when the editor last closed (`animation`, `ui_designer`, …),
+    /// opened again with the next project.
+    pub windows: Vec<String>,
+    /// Where each tool window was last: outer position and inner size, in points.
+    pub window_rects: std::collections::BTreeMap<String, [f32; 4]>,
 }
 
 /// The interface zoom a user can pick.
@@ -46,6 +51,8 @@ impl Default for EditorSettings {
             ui_font: None,
             system_fonts: true,
             ui_scale: 1.0,
+            windows: Vec::new(),
+            window_rects: Default::default(),
         }
     }
 }

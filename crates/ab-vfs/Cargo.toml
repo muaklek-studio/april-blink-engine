@@ -12,6 +12,9 @@ ab-core.workspace = true
 thiserror.workspace = true
 memmap2 = "0.9.11"
 lz4_flex = "0.14"
+# Deflate: smaller packs where size matters more than read speed (a project's packed
+# assets in git).
+flate2 = "1.1"
 
 [lints]
 workspace = true

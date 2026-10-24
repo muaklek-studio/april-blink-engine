@@ -42,6 +42,9 @@ pub struct Project {
     pub config: Option<String>,
     /// Cargo package of the scripts (`None` for a project without scripts).
     pub package: Option<String>,
+    /// Its packed assets go to Git LFS (`asset_lfs` in `game.toml`, on unless `false`; see
+    /// [`crate::asset_store`]).
+    pub lfs: bool,
 }
 
 impl Project {
@@ -87,6 +90,10 @@ impl Project {
             main_scene: text("main_scene"),
             input: text("input"),
             config: text("config"),
+            lfs: settings
+                .get("asset_lfs")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true),
             package,
             root,
         })

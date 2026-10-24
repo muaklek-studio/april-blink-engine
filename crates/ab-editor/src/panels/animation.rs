@@ -605,6 +605,11 @@ impl AnimationPanel {
     }
 
     /// Puts the animated nodes back where they were before the preview.
+    /// Whether a clip is playing in the preview (its views animate).
+    pub fn is_playing(&self) -> bool {
+        self.playing && self.preview.is_some()
+    }
+
     pub fn end_preview(&mut self, editor: &mut Editor) {
         self.playing = false;
         let Some(preview) = self.preview.take() else {

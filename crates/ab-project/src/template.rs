@@ -149,7 +149,9 @@ pub fn create(new: &NewProject) -> Result<Project> {
                 Err(_) => std::fs::write(&dest, bytes)?,
             }
         }
-        Project::open(&root)
+        let project = Project::open(&root)?;
+        crate::asset_store::ensure_git_files(&project)?;
+        Ok(project)
     })();
     result.map_err(|err| {
         if created_root {

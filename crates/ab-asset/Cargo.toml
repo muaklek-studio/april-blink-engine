@@ -17,6 +17,8 @@ ab-scene.workspace = true
 ab-vfs.workspace = true
 gltf = { workspace = true, default-features = false, features = ["utils", "names", "KHR_materials_emissive_strength", "KHR_materials_unlit"] }
 image.workspace = true
+# The decoded-image cache (editor): RGBA kept LZ4-compressed, fast to read back.
+lz4_flex = "0.14"
 thiserror.workspace = true
 tracing.workspace = true
 

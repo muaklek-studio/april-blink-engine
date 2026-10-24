@@ -91,6 +91,9 @@ pub struct Editor {
     /// Every selected node, in the order they were selected (the active one included).
     pub selected: Vec<NodeHandle>,
     pub modified: bool,
+    /// Counts edits and scene replacements: views drawn in the background redraw when it
+    /// moves (see [`Editor::revision`]).
+    revision: u64,
     pub history: History,
     pub mode: Mode,
     /// Particles and other effects animate while editing.
@@ -241,6 +244,7 @@ impl Editor {
             selection: None,
             selected: Vec::new(),
             modified: false,
+            revision: 0,
             history: History::default(),
             mode: Mode::Edit,
             preview_effects: true,
@@ -518,6 +522,7 @@ impl Editor {
 
     /// Builds `scene` in place of the current one. On error the current scene stays.
     fn replace_scene(&mut self, scene: &SceneFile) -> anyhow::Result<()> {
+        self.revision = self.revision.wrapping_add(1);
         let tree = self.engine.tree_mut();
         let root = instantiate_scene(tree, scene, "scene")?;
         for child in tree.children(tree.root()) {
@@ -575,15 +580,28 @@ impl Editor {
     /// typed in) only the first call records. While playing, edits are live tweaks: not
     /// recorded, discarded on stop.
     pub fn begin_edit(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         if self.is_playing() {
             return;
         }
         if !self.gesture {
             let snapshot = self.snapshot();
-            self.history.push(snapshot);
+            self.record(snapshot);
             self.gesture = true;
         }
         self.modified = true;
+    }
+
+    /// Records the state before an edit as an undo step.
+    fn record(&mut self, before: Snapshot) {
+        self.revision = self.revision.wrapping_add(1);
+        self.history.push(before);
+    }
+
+    /// Changes when the scene may look different: an edit (each step of a drag too), an undo
+    /// or redo, another scene. Cheap to read every frame.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Runs `edit`, a series of edits, as one undo step.
@@ -597,7 +615,7 @@ impl Editor {
         edit(self);
         if self.history.undo_len() > steps {
             self.history.truncate_undo(steps);
-            self.history.push(before);
+            self.record(before);
         }
     }
 
@@ -911,7 +929,7 @@ impl Editor {
         ab_engine::scene_file::generator::rebuild_grounded(tree, node);
         // Humanoid ragdolls find their character now that they are in the scene.
         let failed = ab_engine::ragdoll::build_rigs(tree, node);
-        self.history.push(before);
+        self.record(before);
         self.modified = true;
         self.select(Some(node));
         let name = self
@@ -978,7 +996,7 @@ impl Editor {
             }
         }
         tree.flush_deletions();
-        self.history.push(before);
+        self.record(before);
         self.modified = true;
         self.prune_selection();
         if inside_instance {
@@ -1060,7 +1078,7 @@ impl Editor {
             return;
         }
         self.tree_mut().update_transforms();
-        self.history.push(before);
+        self.record(before);
         self.modified = true;
         let count = copies.len();
         self.set_selection(copies, active);
@@ -1672,7 +1690,7 @@ impl Editor {
             let _ = self.tree_mut().move_child(new_parent, node, index);
         }
         self.tree_mut().update_transforms();
-        self.history.push(before);
+        self.record(before);
         self.modified = true;
     }
 
@@ -1694,7 +1712,7 @@ impl Editor {
         }
         let before = self.snapshot();
         let _ = self.tree_mut().move_child(parent, node, target as usize);
-        self.history.push(before);
+        self.record(before);
         self.modified = true;
     }
 

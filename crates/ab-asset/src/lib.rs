@@ -25,7 +25,7 @@ mod source;
 
 pub use error::AssetError;
 pub use gltf_loader::{GltfMesh, GltfNode, GltfPrimitive, GltfScene, GltfSkin};
-pub use image_loader::decode_image;
+pub use image_loader::{decode_image, set_decode_cache};
 pub use instantiate::{instantiate_gltf, spawn_gltf, ANIMATION_PLAYER_CLASS};
 pub use server::AssetServer;
 pub use source::{normalize_path, AssetSource, FileSystemSource, MemorySource};

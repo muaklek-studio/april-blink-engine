@@ -298,6 +298,11 @@ pub fn export(game: &Game, options: &Options, log: Log<'_>) -> Result<Vec<Export
         bail!("asset directory {} not found", assets.display());
     }
     if let Game::Project(project) = game {
+        // A clone or a pull may have packs not unpacked yet: export what git holds.
+        if project.pack_dir().is_dir() {
+            let report = crate::asset_store::sync(project).context("unpacking the assets")?;
+            log(&report.summary());
+        }
         if project.package.is_none() {
             bail!(
                 "{} has no Cargo.toml (no scripts to build)",

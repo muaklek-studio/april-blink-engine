@@ -5,6 +5,9 @@ main_scene = "scenes/main.abscene"
 input = "input.toml"
 # Named values for scripts (Player.MoveSpeed, …), next to this file.
 config = "config.toml"
+# Images, models and sounds are kept compressed in packed-assets/, stored with Git LFS.
+# Set to false to keep them in git itself (a git server without Git LFS).
+asset_lfs = true
 
 [window]
 width = 1280
