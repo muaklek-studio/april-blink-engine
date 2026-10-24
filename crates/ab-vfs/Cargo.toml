@@ -1,6 +1,6 @@
 [package]
 name = "ab-vfs"
-description = "Virtual file system and .abp asset packs for April Blink Engine"
+description = "Virtual file system, asset chunks and .abp packs for April Blink Engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

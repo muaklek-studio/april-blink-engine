@@ -24,7 +24,7 @@ foundation for making games, with a small codebase that one person can read and 
 
 - **Scenes**: a node tree (`Node3D`, physics bodies, lights, cameras, UI controls…) on a
   small sparse-set ECS, with signals, groups, tweens and `.abscene` scene files (TOML
-  inside; `.toml` scenes of older projects still load).
+  inside).
 - **Rendering**: a wgpu forward renderer with shadows, bloom, skinned meshes, particles,
   debug lines and MSDF text (complex scripts such as Thai included).
 - **Physics**: Rapier 3D bodies, joints, ragdolls, areas, scene queries and a kinematic
@@ -50,8 +50,10 @@ foundation for making games, with a small codebase that one person can read and 
 - **Scripting**: Rust scripts built against the `ab-script` SDK and loaded through a stable
   C ABI, so the editor and games never need rebuilding with them; rebuilt and hot reloaded
   while the game or the editor runs.
-- **Shipping**: a prebuilt player plus the game's script library and a single `.abp` asset
-  pack, for Linux and Windows; the editor itself ships as a standalone download.
+- **Shipping**: a prebuilt player plus the game's script library and an `assets/` folder of
+  chunks named by hash (one `.abp` pack per top-level asset folder, plus an index), so a
+  patch ships only the chunks that changed; or one pack inside the executable. For Linux
+  and Windows; the editor itself ships as a standalone download.
 
 ## Requirements
 
@@ -71,7 +73,7 @@ foundation for making games, with a small codebase that one person can read and 
 | `ab-platform` | Windowing, OS events, frame pacing (winit), gamepads (gilrs) |
 | `ab-input` | Keyboard, mouse and gamepad state with an action map |
 | `ab-asset` | glTF 2.0 and PNG/JPEG loading and caching |
-| `ab-vfs` | Virtual file system and `.abp` asset packs |
+| `ab-vfs` | Virtual file system, `.abp` asset packs and chunk folders |
 | `ab-rendering` | wgpu forward renderer |
 | `ab-animation` | Keyframe clips and playback |
 | `ab-physics` | Rapier 3D physics, joints, ragdolls, character controller |
@@ -88,7 +90,7 @@ foundation for making games, with a small codebase that one person can read and 
 | `ab-editor` | The editor |
 | `ab-app`, `ab-demo-scripts` | The demo and its scripts |
 | `ab-slice` | Night Relics, the vertical slice |
-| `tools/ab-pack` | Creates, inspects and verifies `.abp` packs |
+| `tools/ab-pack` | Creates, inspects and verifies `.abp` packs and chunk folders |
 | `xtask` | Project automation (`cargo xtask`) |
 
 ## Main dependencies

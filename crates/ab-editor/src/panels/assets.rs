@@ -76,7 +76,7 @@ impl AssetsPanel {
             ..Self::default()
         };
         if let Some(path) = view {
-            let kind = AssetKind::of_path(std::path::Path::new(path));
+            let kind = AssetKind::of(std::path::Path::new(path));
             panel.viewer.open(project, path, kind);
         }
         panel

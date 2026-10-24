@@ -4,23 +4,22 @@
 //!
 //! 1. a pack appended to the game's executable (single-file builds, `cargo xtask export
 //!    --single-file`);
-//! 2. a pack next to the executable: `<executable name>.abp`, else `assets.abp`;
+//! 2. the chunks of an exported game: [`CHUNK_DIR`] next to the executable, holding an index
+//!    ([`ab_vfs::ChunkedSource`]; patched by replacing chunks and the index);
 //! 3. the asset directory ([`EngineConfig::asset_root`](crate::EngineConfig), looked up in the
 //!    working directory, then next to the executable), so during development files are read
-//!    from disk, and in a shipped game a folder of loose files can patch or mod the pack.
+//!    from disk. A directory holding an index is mounted as chunks.
 //!
-//! `AB_ASSETS=<directory or pack>` replaces all of this (testing a build against other data).
+//! `AB_ASSETS=<directory, chunk folder or single-file game>` replaces all of this (testing a
+//! build against other data).
 //!
 //! The project's own files (`game.toml`, the input map) are not assets: during development
 //! they are read from the project folder ([`read_project_file`]), and exports pack them under
 //! [`PROJECT_DIR`], out of the way of the game's assets.
 
-use ab_vfs::{DirSource, FileSource, Pack, PackSource, Vfs};
+use ab_vfs::{is_chunked, ChunkedSource, DirSource, FileSource, Pack, PackSource, Vfs, CHUNK_DIR};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
-
-/// Name of the pack looked for next to the executable when none is named after it.
-pub const DEFAULT_PACK: &str = "assets.abp";
 
 /// Builds the asset file system for a game whose executable is `executable` (usually
 /// `std::env::current_exe()`) and whose asset directory is `asset_root`.
@@ -52,6 +51,7 @@ pub(crate) fn mount(asset_root: &Path, executable: Option<&Path>) -> Vfs {
 fn discover(asset_root: &Path, executable: Option<&Path>) -> Vfs {
     let mut vfs = Vfs::new();
     mount_packs(&mut vfs, executable);
+    let chunks = exported_chunks(executable);
     let directory = if asset_root.is_absolute() || asset_root.is_dir() {
         Some(asset_root.to_path_buf()).filter(|d| d.is_dir())
     } else {
@@ -60,33 +60,46 @@ fn discover(asset_root: &Path, executable: Option<&Path>) -> Vfs {
             .map(|dir| dir.join(asset_root))
             .filter(|d| d.is_dir())
     };
-    if let Some(dir) = directory {
-        vfs.mount(DirSource::new(dir));
+    // The exported game's chunk folder is usually the asset directory too: mounted once.
+    let same = |dir: &Path| {
+        chunks.as_deref().is_some_and(|chunks| {
+            std::fs::canonicalize(chunks).ok() == std::fs::canonicalize(dir).ok()
+        })
+    };
+    if let Some(dir) = directory.filter(|dir| !same(dir)) {
+        mount_path(&mut vfs, &dir);
     }
     vfs
 }
 
-/// The packs of the game whose executable is `executable`: appended to it, then next to it.
+/// [`CHUNK_DIR`] next to `executable`, when it holds an index.
+fn exported_chunks(executable: Option<&Path>) -> Option<PathBuf> {
+    executable?
+        .parent()
+        .map(|dir| dir.join(CHUNK_DIR))
+        .filter(|dir| is_chunked(dir))
+}
+
+/// The packs of the game whose executable is `executable`: appended to it, then its chunks.
 fn mount_packs(vfs: &mut Vfs, executable: Option<&Path>) {
-    if let Some(exe) = executable {
-        if Pack::is_pack(exe) {
-            mount_path(vfs, exe);
-        }
-        if let Some(dir) = exe.parent() {
-            let named = exe
-                .file_stem()
-                .map(|stem| dir.join(stem).with_extension(ab_vfs::PACK_EXTENSION));
-            let pack = named
-                .filter(|p| p.is_file())
-                .or_else(|| Some(dir.join(DEFAULT_PACK)).filter(|p| p.is_file()));
-            if let Some(pack) = pack {
-                mount_path(vfs, &pack);
-            }
-        }
+    if let Some(exe) = executable.filter(|exe| Pack::is_pack(exe)) {
+        mount_path(vfs, exe);
+    }
+    if let Some(chunks) = exported_chunks(executable) {
+        mount_path(vfs, &chunks);
     }
 }
 
 fn mount_path(vfs: &mut Vfs, path: &Path) {
+    if is_chunked(path) {
+        match ChunkedSource::open(path) {
+            Ok(chunks) => {
+                vfs.mount(chunks);
+            }
+            Err(err) => warn!(path = %path.display(), "cannot read asset chunk index: {err}"),
+        }
+        return;
+    }
     if path.is_dir() {
         vfs.mount(DirSource::new(path));
         return;
@@ -101,7 +114,7 @@ fn mount_path(vfs: &mut Vfs, path: &Path) {
 
 pub use ab_vfs::PROJECT_DIR;
 
-/// Reads the project file `name` (`game.toml`, `input.toml`): from the game's pack
+/// Reads the project file `name` (`game.toml`, `input.toml`): from the game's pack or chunks
 /// (`.project/<name>`), else from `project_dir` on disk (looked up like the asset directory:
 /// as given, then next to the executable).
 pub fn read_project_file(
@@ -136,11 +149,12 @@ pub fn is_packed(executable: Option<&Path>, name: &str) -> bool {
     project_packs(executable).exists(&format!("{PROJECT_DIR}/{name}"))
 }
 
-/// The packs project files can come from (`AB_ASSETS`, when it names a pack, instead).
+/// The packs project files can come from (`AB_ASSETS`, when it names a single-file game or
+/// a chunk folder, instead).
 fn project_packs(executable: Option<&Path>) -> Vfs {
     let mut vfs = Vfs::new();
     match std::env::var_os("AB_ASSETS").map(PathBuf::from) {
-        Some(over) if over.is_file() => mount_path(&mut vfs, &over),
+        Some(over) if over.is_file() || is_chunked(&over) => mount_path(&mut vfs, &over),
         Some(_) => {}
         None => mount_packs(&mut vfs, executable),
     }
@@ -171,72 +185,82 @@ mod tests {
         writer
     }
 
-    #[test]
-    fn a_shipped_game_reads_its_pack_and_loose_files_patch_it() {
-        let dir = temp("shipped");
+    /// `dir/game`: a program with `pack` appended.
+    fn single_file_game(dir: &Path, pack: &PackWriter) -> PathBuf {
+        let plain = dir.join("plain");
+        std::fs::write(&plain, b"program").unwrap();
         let exe = dir.join("game");
-        std::fs::write(&exe, b"program").unwrap();
-        pack_with("main.toml", "packed")
-            .write_file(&dir.join("game.abp"))
-            .unwrap();
-        // No asset folder: the pack alone.
-        let vfs = mount_assets(Path::new("missing-assets"), Some(&exe));
-        assert_eq!(vfs.read("main.toml").unwrap(), b"packed");
-        assert_eq!(vfs.source_count(), 1);
-
-        // A folder next to the game overrides single files.
-        std::fs::create_dir_all(dir.join("assets")).unwrap();
-        std::fs::write(dir.join("assets/main.toml"), b"patched").unwrap();
-        let vfs = mount_assets(&dir.join("assets"), Some(&exe));
-        assert_eq!(vfs.read("main.toml").unwrap(), b"patched");
-        std::fs::remove_dir_all(dir).unwrap();
+        ab_vfs::append_to_executable(&plain, pack, &exe).unwrap();
+        exe
     }
 
     #[test]
     fn a_single_file_game_finds_the_pack_inside_itself() {
         let dir = temp("single");
-        let plain = dir.join("plain");
-        std::fs::write(&plain, b"program").unwrap();
-        let exe = dir.join("game");
-        ab_vfs::append_to_executable(&plain, &pack_with("a.txt", "inside"), &exe).unwrap();
-        // A default-named pack is found too, below the appended one.
-        pack_with("b.txt", "beside")
-            .write_file(&dir.join(DEFAULT_PACK))
-            .unwrap();
+        let exe = single_file_game(&dir, &pack_with("a.txt", "inside"));
         let vfs = mount_assets(Path::new("missing-assets"), Some(&exe));
         assert_eq!(vfs.read("a.txt").unwrap(), b"inside");
-        assert_eq!(vfs.read("b.txt").unwrap(), b"beside");
+        assert_eq!(vfs.source_count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn project_files_come_from_the_pack_else_the_project_folder() {
         let dir = temp("project-files");
-        let exe = dir.join("game");
-        std::fs::write(&exe, b"program").unwrap();
+        let mut pack = pack_with("game.toml", "an asset");
+        pack.add(".project/game.toml", b"packed".to_vec());
+        let exe = single_file_game(&dir, &pack);
+        let plain = dir.join("plain");
         let project = dir.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("game.toml"), b"on disk").unwrap();
-        // Development: the project folder, as given or next to the executable.
+        // Development (a program without a pack): the project folder, as given or next to
+        // the executable.
         assert_eq!(
-            read_project_file(&project, Some(&exe), "game.toml").unwrap(),
+            read_project_file(&project, Some(&plain), "game.toml").unwrap(),
             b"on disk"
         );
         assert_eq!(
-            read_project_file(Path::new("project"), Some(&exe), "game.toml").unwrap(),
+            read_project_file(Path::new("project"), Some(&plain), "game.toml").unwrap(),
             b"on disk"
         );
-        assert!(read_project_file(&project, Some(&exe), "input.toml").is_err());
+        assert!(read_project_file(&project, Some(&plain), "input.toml").is_err());
+        assert!(!is_packed(Some(&plain), "game.toml"));
         // Shipped: the pack's project folder wins, and plain assets are not project files.
-        let mut pack = pack_with("game.toml", "an asset");
-        pack.add(".project/game.toml", b"packed".to_vec());
-        pack.write_file(&dir.join("game.abp")).unwrap();
         assert_eq!(
             read_project_file(&project, Some(&exe), "game.toml").unwrap(),
             b"packed"
         );
         assert!(is_packed(Some(&exe), "game.toml"));
         assert!(!is_packed(Some(&exe), "input.toml"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_exported_game_reads_its_chunks() {
+        let dir = temp("chunked");
+        let exe = dir.join("game");
+        std::fs::write(&exe, b"program").unwrap();
+        let mut pack = pack_with("models/a.txt", "packed");
+        pack.add(".project/game.toml", b"packed".to_vec());
+        pack.write_chunks(&dir.join(CHUNK_DIR)).unwrap();
+        // Found next to the game whatever the working directory, and mounted once even
+        // though it is also the asset directory.
+        for root in [PathBuf::from("missing-assets"), dir.join(CHUNK_DIR)] {
+            let vfs = mount_assets(&root, Some(&exe));
+            assert_eq!(vfs.source_count(), 1, "{:?}", vfs.describe());
+            assert_eq!(vfs.read("models/a.txt").unwrap(), b"packed");
+            assert!(vfs.describe()[0].starts_with("chunks:"));
+            assert!(
+                !vfs.exists(ab_vfs::MANIFEST_FILE),
+                "chunk files are not assets"
+            );
+        }
+        assert!(is_packed(Some(&exe), "game.toml"));
+        assert_eq!(
+            read_project_file(Path::new("missing"), Some(&exe), "game.toml").unwrap(),
+            b"packed"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

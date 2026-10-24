@@ -46,9 +46,6 @@ pub struct Project {
 
 impl Project {
     /// Reads the project in `path` (the project folder, or its `assets` folder).
-    ///
-    /// A project of the first layout, with `game.toml` and the input map inside `assets/`, is
-    /// moved to the current one: those are project files, not assets.
     pub fn open(path: &Path) -> Result<Self> {
         let mut root = crate::path::canonicalize(path)
             .with_context(|| format!("{} does not exist", path.display()))?;
@@ -58,15 +55,9 @@ impl Project {
                     && dir.parent().is_some_and(|p| p.join("Cargo.toml").is_file()))
         };
         if !is_project(&root) {
-            if let Some(parent) = root
-                .parent()
-                .filter(|p| is_project(p) || p.join("assets").join(GAME_FILE).is_file())
-            {
+            if let Some(parent) = root.parent().filter(|p| is_project(p)) {
                 root = parent.to_path_buf();
             }
-        }
-        if !root.join(GAME_FILE).is_file() && root.join("assets").join(GAME_FILE).is_file() {
-            move_project_files_out_of_assets(&root)?;
         }
         let settings_path = root.join(GAME_FILE);
         if !settings_path.is_file() {
@@ -162,24 +153,6 @@ fn read_settings(path: &Path) -> Result<toml::Table> {
         .with_context(|| format!("reading {}", path.display()))?
         .parse()
         .with_context(|| format!("invalid {}", path.display()))
-}
-
-/// Moves `assets/game.toml` and the input map it names to the project folder.
-fn move_project_files_out_of_assets(root: &Path) -> Result<()> {
-    let assets = root.join("assets");
-    let settings = read_settings(&assets.join(GAME_FILE))?;
-    let input = settings.get("input").and_then(|v| v.as_str());
-    for name in std::iter::once(GAME_FILE).chain(input) {
-        let (from, to) = (assets.join(name), root.join(name));
-        if from.is_file() && !to.exists() {
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::rename(&from, &to)
-                .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn read_manifest(path: &Path) -> Result<toml::Table> {

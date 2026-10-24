@@ -4,7 +4,9 @@
 //! ```text
 //! MyGame/
 //!   my-game(.exe)                     this player
-//!   my-game.abp                       the assets, and game.toml and the input map
+//!   assets/                           the assets, and game.toml and the input map:
+//!     index.abm                       which chunk holds each file
+//!     3fa2c1d09b7e5a44.abp …          the chunks, named by hash
 //!   libmy-game_scripts.so             the scripts (my-game_scripts.dll on Windows)
 //! ```
 //!

@@ -206,9 +206,9 @@ type = "CameraShake"
 
 #[test]
 fn loads_every_node_type() {
-    let (mut engine, _assets) = engine_with(&[("level.toml", LEVEL)]);
+    let (mut engine, _assets) = engine_with(&[("level.abscene", LEVEL)]);
     let tree = engine.tree_mut();
-    let level = load_scene(tree, "level.toml").unwrap();
+    let level = load_scene(tree, "level.abscene").unwrap();
     tree.add_child(tree.root(), level).unwrap();
 
     let node = |path: &str| {
@@ -334,17 +334,17 @@ type = "Node3D"
 [[node]]
 name = "Kitchen"
 parent = "."
-instance = "room.toml"
+instance = "room.abscene"
 
 [[node]]
 name = "Bedroom"
 parent = "."
-instance = "room.toml"
+instance = "room.abscene"
 position = [5.0, 0.0, 0.0]
 "##;
-    let (mut engine, _assets) = engine_with(&[("room.toml", room), ("house.toml", house)]);
+    let (mut engine, _assets) = engine_with(&[("room.abscene", room), ("house.abscene", house)]);
     let tree = engine.tree_mut();
-    let house_node = load_scene(tree, "house.toml").unwrap();
+    let house_node = load_scene(tree, "house.abscene").unwrap();
     assert!(tree.get_node(house_node, "Kitchen/Pillar").is_some());
     let bedroom = tree.get_node(house_node, "Bedroom").unwrap();
     assert_eq!(tree.position(bedroom), Some(Vec3::new(5.0, 0.0, 0.0)));
@@ -354,43 +354,20 @@ position = [5.0, 0.0, 0.0]
     };
     let before = counts(tree);
     // Loading the same scene again reuses meshes and materials.
-    load_scene(tree, "house.toml").unwrap();
+    load_scene(tree, "house.abscene").unwrap();
     assert_eq!(counts(tree), before);
 
     // Saving writes instances, not their contents.
     let saved = save_scene(tree, house_node);
     assert_eq!(saved.nodes.len(), 3);
-    assert_eq!(saved.nodes[1].instance.as_deref(), Some("room.toml"));
-}
-
-#[test]
-fn abscene_files_instance_alongside_older_toml_scenes() {
-    let room = "[[node]]\nname = \"Room\"\ntype = \"Node3D\"\n\n[[node]]\nname = \"Lamp\"\nparent = \".\"\ntype = \"OmniLight3D\"\n";
-    let house = "[[node]]\nname = \"House\"\ntype = \"Node3D\"\n\n\
-                 [[node]]\nname = \"New\"\nparent = \".\"\ninstance = \"rooms/new.abscene\"\n\n\
-                 [[node]]\nname = \"Old\"\nparent = \".\"\ninstance = \"rooms/old.toml\"\n";
-    let (mut engine, _assets) = engine_with(&[
-        ("rooms/new.abscene", room),
-        ("rooms/old.toml", room),
-        ("house.abscene", house),
-    ]);
-    let tree = engine.tree_mut();
-    let house = load_scene(tree, "house.abscene").unwrap();
-    assert!(tree.get_node(house, "New/Lamp").is_some());
-    assert!(tree.get_node(house, "Old/Lamp").is_some());
-    let saved = save_scene(tree, house);
-    assert_eq!(
-        saved.nodes[1].instance.as_deref(),
-        Some("rooms/new.abscene")
-    );
-    assert_eq!(saved.nodes[2].instance.as_deref(), Some("rooms/old.toml"));
+    assert_eq!(saved.nodes[1].instance.as_deref(), Some("room.abscene"));
 }
 
 #[test]
 fn save_and_reload_round_trips() {
-    let (mut engine, _assets) = engine_with(&[("level.toml", LEVEL)]);
+    let (mut engine, _assets) = engine_with(&[("level.abscene", LEVEL)]);
     let tree = engine.tree_mut();
-    let level = load_scene(tree, "level.toml").unwrap();
+    let level = load_scene(tree, "level.abscene").unwrap();
     let first = save_scene(tree, level);
     assert_eq!(first.nodes.len(), LEVEL.matches("[[node]]").count());
     let text = first.to_toml();
@@ -407,9 +384,9 @@ fn save_and_reload_round_trips() {
 fn nodes_with_several_scripts_load_and_save() {
     let scene = "[[node]]\nname = \"A\"\nscripts = [\"Spin\", \"Glow\"]\n\n\
                  [[node]]\nname = \"B\"\nparent = \".\"\nscript = \"Glow\"\nscripts = [\"Spin\"]\n";
-    let (mut engine, _assets) = engine_with(&[("multi.toml", scene)]);
+    let (mut engine, _assets) = engine_with(&[("multi.abscene", scene)]);
     let tree = engine.tree_mut();
-    let a = load_scene(tree, "multi.toml").unwrap();
+    let a = load_scene(tree, "multi.abscene").unwrap();
     assert_eq!(tree.script_names(a), ["Spin", "Glow"]);
     assert!(tree.script::<Spin>(a).is_some() && tree.script::<Glow>(a).is_some());
     let b = tree.get_node(a, "B").unwrap();
@@ -439,45 +416,45 @@ fn errors_name_the_file_and_node_and_leave_nothing_behind() {
         "[[node]]\nname = \"A\"\n\n[[node]]\nname = \"B\"\nparent = \".\"\ntype = \"Teapot\"\n";
     let bad_script = "[[node]]\nname = \"A\"\nscript = \"Missing\"\n";
     let bad_toml = "[[node]]\nname = \"A\"\nsize = 3\n";
-    let cycle = "[[node]]\nname = \"Loop\"\ninstance = \"cycle.toml\"\n";
+    let cycle = "[[node]]\nname = \"Loop\"\ninstance = \"cycle.abscene\"\n";
     let preset =
         "[[node]]\nname = \"P\"\ntype = \"Particles3D\"\nparticles = { preset = \"lava\" }\n";
     let (mut engine, _assets) = engine_with(&[
-        ("parent.toml", bad_parent),
-        ("type.toml", bad_type),
-        ("script.toml", bad_script),
-        ("toml.toml", bad_toml),
-        ("cycle.toml", cycle),
-        ("preset.toml", preset),
+        ("parent.abscene", bad_parent),
+        ("type.abscene", bad_type),
+        ("script.abscene", bad_script),
+        ("toml.abscene", bad_toml),
+        ("cycle.abscene", cycle),
+        ("preset.abscene", preset),
     ]);
     let tree = engine.tree_mut();
     let nodes = tree.node_count();
     let message =
         |tree: &mut SceneTree, path: &str| load_scene(tree, path).unwrap_err().to_string();
 
-    let m = message(tree, "parent.toml");
+    let m = message(tree, "parent.abscene");
     assert!(
-        m.contains("parent.toml") && m.contains("`B`") && m.contains("`Nope`"),
+        m.contains("parent.abscene") && m.contains("`B`") && m.contains("`Nope`"),
         "{m}"
     );
-    let m = message(tree, "type.toml");
+    let m = message(tree, "type.abscene");
     assert!(m.contains("unknown type `Teapot`"), "{m}");
-    let m = message(tree, "script.toml");
+    let m = message(tree, "script.abscene");
     assert!(m.contains("no script is registered as `Missing`"), "{m}");
-    let m = message(tree, "toml.toml");
+    let m = message(tree, "toml.abscene");
     assert!(
-        m.contains("toml.toml") && m.contains("size") && m.contains("line 3"),
+        m.contains("toml.abscene") && m.contains("size") && m.contains("line 3"),
         "{m}"
     );
-    let m = message(tree, "preset.toml");
+    let m = message(tree, "preset.abscene");
     assert!(
         m.contains("unknown particle preset `lava`") && m.contains("smoke"),
         "{m}"
     );
-    let m = message(tree, "cycle.toml");
+    let m = message(tree, "cycle.abscene");
     assert!(m.contains("nested deeper"), "{m}");
     assert!(matches!(
-        load_scene(tree, "missing.toml"),
+        load_scene(tree, "missing.abscene"),
         Err(SceneFileError::Asset { .. })
     ));
     assert_eq!(
@@ -590,12 +567,12 @@ image = { texture = "logo.png", stretch = "keep_aspect", tint = "#ffffffc0" }
 
 #[test]
 fn ui_scenes_load_lay_out_and_save_back() {
-    let (mut engine, assets) = engine_with(&[("hud.toml", HUD)]);
+    let (mut engine, assets) = engine_with(&[("hud.abscene", HUD)]);
     let logo =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/totem_albedo.png");
     std::fs::copy(logo, assets.0.join("logo.png")).unwrap();
     let tree = engine.tree_mut();
-    let hud = load_scene(tree, "hud.toml").unwrap();
+    let hud = load_scene(tree, "hud.abscene").unwrap();
     tree.add_child(tree.root(), hud).unwrap();
     let tree = engine.tree();
     ab_engine::ui::prepare_ui(tree.world(), 1920, 1080);

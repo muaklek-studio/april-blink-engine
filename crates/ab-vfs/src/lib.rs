@@ -1,8 +1,10 @@
 //! Virtual file system: where a game's assets come from.
 //!
 //! * [`DirSource`]: a directory on disk (development).
-//! * [`PackSource`]: an `.abp` pack ([`Pack`]), either a file next to the game or appended to
-//!   the executable itself (single-file distribution).
+//! * [`ChunkedSource`]: a folder of packs split by top-level folder, named by hash, with an
+//!   index (exported games; patched one chunk at a time). See [`PackWriter::write_chunks`].
+//! * [`PackSource`]: one `.abp` pack ([`Pack`]) appended to the executable itself
+//!   (single-file distribution).
 //! * [`Vfs`]: several sources stacked; later mounts win, so a mod or patch directory can
 //!   override packed files.
 //!
@@ -20,10 +22,14 @@
 //! assert_eq!(vfs.read("scenes/main.abscene").unwrap()[..8], *b"[[node]]");
 //! ```
 
+mod chunks;
 mod pack;
 mod path;
 mod source;
 
+pub use chunks::{
+    chunk_of, is_chunked, ChunkInfo, ChunkStats, ChunkedSource, Manifest, CHUNK_DIR, MANIFEST_FILE,
+};
 pub use pack::{
     append_to_executable, Compression, Pack, PackEntry, PackStats, PackWriter, PACK_EXTENSION,
     PROJECT_DIR,

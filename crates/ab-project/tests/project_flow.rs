@@ -65,7 +65,7 @@ fn a_new_project_builds_and_exports_with_the_player() {
     let platform = ab_project::Platform::host();
     for file in [
         platform.executable("flow-check"),
-        "flow-check.abp".to_owned(),
+        "assets/index.abm".to_owned(),
         platform.shipped_library("flow-check"),
     ] {
         assert!(folder.join(&file).is_file(), "{file} missing\n{log}");

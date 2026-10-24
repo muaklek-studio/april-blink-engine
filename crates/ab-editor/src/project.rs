@@ -18,7 +18,8 @@ pub enum AssetKind {
 }
 
 impl AssetKind {
-    fn of(path: &Path, text_probe: impl FnOnce() -> bool) -> Self {
+    /// The kind of a file by its name.
+    pub fn of(path: &Path) -> Self {
         match path
             .extension()
             .and_then(|e| e.to_str())
@@ -31,16 +32,9 @@ impl AssetKind {
             Some("ttf" | "otf") => Self::Font,
             Some(ab_engine::scene_file::SCENE_EXTENSION) => Self::Scene,
             Some(ab_engine::scene_file::MATERIAL_EXTENSION) => Self::Material,
-            // Scenes saved before `.abscene`; other TOML files are settings or clips.
-            Some("toml") if text_probe() => Self::Scene,
             Some("toml" | "json") => Self::Config,
             _ => Self::Other,
         }
-    }
-
-    /// The kind of a file by its name (a `.toml` scene is not told from settings).
-    pub fn of_path(path: &Path) -> Self {
-        Self::of(path, || false)
     }
 
     pub fn icon(self) -> &'static str {
@@ -173,9 +167,7 @@ fn walk(root: &Path, dir: &Path, entries: &mut Vec<AssetEntry>) {
             });
             walk(root, &path, entries);
         } else {
-            let kind = AssetKind::of(&path, || {
-                std::fs::read_to_string(&path).is_ok_and(|t| t.contains("[[node]]"))
-            });
+            let kind = AssetKind::of(&path);
             entries.push(AssetEntry {
                 path: rel,
                 name,
@@ -215,7 +207,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut index = AssetIndex::new(dir.clone());
         assert!(index.entries.is_empty());
-        std::fs::write(dir.join("level.toml"), "[[node]]\nname = \"Root\"\n").unwrap();
+        std::fs::write(dir.join("level.abscene"), "[[node]]\nname = \"Root\"\n").unwrap();
         index.request_rescan();
         assert!(index.is_scanning());
         let start = Instant::now();
@@ -225,7 +217,7 @@ mod tests {
             index.refresh();
         }
         assert_eq!(index.of_kind(AssetKind::Scene).count(), 1);
-        // `.abscene` files are scenes without looking inside.
+        // Scenes by extension, without looking inside.
         std::fs::write(dir.join("empty.abscene"), "").unwrap();
         std::fs::write(dir.join("clip.toml"), "[[track]]\n").unwrap();
         index.rescan();
@@ -234,7 +226,7 @@ mod tests {
             .map(|a| a.path.clone())
             .collect();
         scenes.sort();
-        assert_eq!(scenes, ["empty.abscene", "level.toml"]);
+        assert_eq!(scenes, ["empty.abscene", "level.abscene"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

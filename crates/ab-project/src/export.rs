@@ -12,8 +12,9 @@
 //!
 //!    Windows builds link the C runtime statically, so players need no Visual C++
 //!    redistributable;
-//! 2. packs the asset directory into `<name>.abp` next to the executable, or, with
-//!    `single_file`, appends the pack to the executable;
+//! 2. packs the asset directory into chunks in `assets/` next to the executable (one pack per
+//!    top-level folder, named by hash, plus `assets/index.abm`; see `ab_vfs::ChunkedSource`),
+//!    or, with `single_file`, appends one pack to the executable;
 //! 3. with `extras`, adds a README and the licenses as files (they always ship inside the
 //!    pack, and the game shows them with `--licenses`);
 //! 4. verifies: the pack is read back in full, the exported game is run headless from an empty
@@ -26,7 +27,7 @@
 //! report results.
 
 use crate::{archive, engine_root, process, Platform, Profile, Project};
-use ab_vfs::{append_to_executable, Pack, PackWriter};
+use ab_vfs::{append_to_executable, is_chunked, ChunkedSource, Pack, PackWriter, CHUNK_DIR};
 use anyhow::{bail, Context as _, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -178,7 +179,7 @@ impl Build {
 /// How to export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The pack appended to the executable instead of next to it.
+    /// One pack appended to the executable instead of chunks in `assets/`.
     pub single_file: bool,
     /// README.txt and licenses/ next to the executable.
     pub extras: bool,
@@ -335,7 +336,16 @@ pub fn export(game: &Game, options: &Options, log: Log<'_>) -> Result<Vec<Export
     Ok(results)
 }
 
+/// Bytes of a file, or of everything in a folder.
 fn file_size(path: &Path) -> u64 {
+    if path.is_dir() {
+        return std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| file_size(&entry.path()))
+            .sum();
+    }
     std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
@@ -363,16 +373,20 @@ fn export_one(
     }
     std::fs::create_dir_all(&dir)?;
     let exe = dir.join(&exe_name);
-    let (stats, pack_path) = if options.single_file {
+    let (stats, packs, assets) = if options.single_file {
         (
             append_to_executable(&built.executable, pack, &exe)?,
+            1,
             exe.clone(),
         )
     } else {
         std::fs::copy(&built.executable, &exe)
             .with_context(|| format!("copying {}", built.executable.display()))?;
-        let pack_path = dir.join(format!("{name}.{}", ab_vfs::PACK_EXTENSION));
-        (pack.write_file(&pack_path)?, pack_path)
+        let chunks = dir.join(CHUNK_DIR);
+        let written = pack
+            .write_chunks(&chunks)
+            .with_context(|| format!("writing {}", chunks.display()))?;
+        (written.totals, written.chunks, chunks)
     };
     let library = match &built.library {
         Some(library) => {
@@ -388,9 +402,10 @@ fn export_one(
     }
     say!(
         log,
-        "packed {} files ({} compressed): {:.1} MB of assets → {:.1} MB",
+        "packed {} files ({} compressed) in {packs} {}: {:.1} MB of assets → {:.1} MB",
         stats.files,
         stats.compressed_files,
+        if packs == 1 { "pack" } else { "chunks" },
         stats.original_bytes as f64 / 1e6,
         stats.pack_bytes as f64 / 1e6,
     );
@@ -403,12 +418,10 @@ fn export_one(
             }
         }
         if build.triple.is_none() {
-            verify_export(&exe, &pack_path, log)?;
+            verify_export(&exe, &assets, log)?;
         } else {
             // Cannot run another platform's program here; the pack can still be checked.
-            Pack::open(&pack_path)?
-                .verify()
-                .context("the pack is damaged")?;
+            verify_assets(&assets)?;
             say!(
                 log,
                 "verify: pack OK (run the game once on {} to finish checking)",
@@ -820,11 +833,23 @@ fn check_windows_exe(exe: &Path, log: Log<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Checks the pack and runs the exported game headless from an empty directory.
-fn verify_export(exe: &Path, pack_path: &Path, log: Log<'_>) -> Result<()> {
-    let pack = Pack::open(pack_path).with_context(|| format!("opening {}", pack_path.display()))?;
-    pack.verify().context("the pack is damaged")?;
-    say!(log, "verify: pack OK ({} files)", pack.len());
+/// Reads a pack or a chunk folder in full; returns how many files it holds.
+fn verify_assets(path: &Path) -> Result<usize> {
+    let opening = || format!("opening {}", path.display());
+    if is_chunked(path) {
+        let chunks = ChunkedSource::open(path).with_context(opening)?;
+        chunks.verify().context("the asset chunks are damaged")?;
+        Ok(chunks.manifest().file_count())
+    } else {
+        let pack = Pack::open(path).with_context(opening)?;
+        pack.verify().context("the pack is damaged")?;
+        Ok(pack.len())
+    }
+}
+
+/// Checks the pack or chunks and runs the exported game headless from an empty directory.
+fn verify_export(exe: &Path, assets: &Path, log: Log<'_>) -> Result<()> {
+    say!(log, "verify: pack OK ({} files)", verify_assets(assets)?);
 
     let sandbox = std::env::temp_dir().join(format!("ab-export-check-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sandbox);
@@ -854,7 +879,7 @@ fn verify_export(exe: &Path, pack_path: &Path, log: Log<'_>) -> Result<()> {
     let _ = std::fs::remove_dir_all(&sandbox);
     let from_pack = output_log
         .lines()
-        .any(|l| l.contains("assets mounted") && l.contains("pack:"));
+        .any(|l| l.contains("assets mounted") && (l.contains("pack:") || l.contains("chunks:")));
     let errors: Vec<&str> = output_log.lines().filter(|l| l.contains("ERROR")).collect();
     let shipping = output_log.contains("is a developer option");
     if !shipping {

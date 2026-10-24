@@ -11,7 +11,7 @@ pub trait FileSource: Send + Sync + 'static {
     fn read(&self, path: &str) -> VfsResult<Vec<u8>>;
     /// Every file, sorted.
     fn list(&self) -> Vec<String>;
-    /// For logs: `dir:assets`, `pack:game.abp`.
+    /// For logs: `dir:assets`, `chunks:assets`, `pack:game`.
     fn describe(&self) -> String;
 }
 

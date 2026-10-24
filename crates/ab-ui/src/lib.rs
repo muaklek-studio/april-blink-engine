@@ -47,7 +47,7 @@ mod text;
 mod widgets;
 
 /// The built-in font's license (SIL Open Font License 1.1). It must ship with every copy of a
-/// game: exports put it in the asset pack, and `--licenses` shows it.
+/// game: exports put it in the game's assets, and `--licenses` shows it.
 pub const FONT_LICENSE: &str = include_str!("../fonts/OFL.txt");
 pub use anim::{ui_animation_system, Easing, TweenTarget, UiAnimator, UiTween};
 pub use control::{Control, LayoutPreset, MouseFilter, Rect};

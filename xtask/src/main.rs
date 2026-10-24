@@ -28,7 +28,8 @@ commands:
   export <slice|demo|project folder> [--platform linux|windows|all] [--archive]
          [--single-file] [--extras] [--target <triple>] [--out <dir>] [--no-verify]
                        a shippable build in dist/<name>: the game's executable (a project
-                       ships the player + its script library) and asset pack, or one file
+                       ships the player + its script library) and assets/ (chunks named
+                       by hash + index.abm: a patch ships the changed ones), or one file
                        (--single-file; --extras adds README and licenses as files); then
                        runs it from an empty folder to prove it is self-contained.
                        --platform builds for Windows and/or Linux (dist/<name>-<platform>;

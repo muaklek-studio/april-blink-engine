@@ -84,7 +84,7 @@ impl AssetSource for FileSystemSource {
     }
 }
 
-/// The engine's virtual file system (directories and `.abp` packs) as an asset source.
+/// The engine's virtual file system (directories, chunk folders and packs) as an asset source.
 impl AssetSource for ab_vfs::Vfs {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         ab_vfs::FileSource::read(self, path).map_err(|e| match e {

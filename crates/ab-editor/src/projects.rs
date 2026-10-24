@@ -48,15 +48,7 @@ impl RecentProjects {
     }
 
     pub fn load(store: &SaveStore) -> Result<Self> {
-        let mut recent: Self = store.load(RECENT_SLOT)?.unwrap_or_default();
-        // Settings written on Windows used to keep canonical paths with the `\\?\` prefix.
-        for project in &mut recent.projects {
-            project.path = ab_project::path::without_verbatim(&project.path);
-        }
-        if let Some(dir) = &mut recent.last_location {
-            *dir = ab_project::path::without_verbatim(dir);
-        }
-        Ok(recent)
+        Ok(store.load(RECENT_SLOT)?.unwrap_or_default())
     }
 
     pub fn save(&self, store: &SaveStore) -> Result<()> {
@@ -188,28 +180,6 @@ mod tests {
         assert_eq!(titles, ["a", "b"]);
         loaded.remove(&dir.join("a"));
         assert!(!loaded.contains(&dir.join("a")));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn saved_windows_verbatim_paths_load_without_the_prefix() {
-        let dir = temp("verbatim");
-        let store = SaveStore::in_dir(&dir);
-        let saved = RecentProjects {
-            projects: vec![RecentProject {
-                path: PathBuf::from(r"\\?\D:\Games\My Game"),
-                title: "My Game".to_owned(),
-                last_opened: 0,
-            }],
-            last_location: Some(PathBuf::from(r"\\?\D:\Games")),
-        };
-        saved.save(&store).unwrap();
-        let loaded = RecentProjects::load(&store).unwrap();
-        assert_eq!(loaded.projects[0].path, Path::new(r"D:\Games\My Game"));
-        assert_eq!(
-            loaded.last_location.as_deref(),
-            Some(Path::new(r"D:\Games"))
-        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -104,8 +104,6 @@ pub struct WindowSettings {
 
 /// The main scene when `game.toml` names none.
 const DEFAULT_MAIN_SCENE: &str = "main.abscene";
-/// The default main scene before scene files ended in `.abscene`.
-const LEGACY_MAIN_SCENE: &str = "main.toml";
 
 impl Default for GameSettings {
     fn default() -> Self {
@@ -484,12 +482,7 @@ impl Game {
         if let Err(err) = crate::localization::install(tree.world_mut(), &localization) {
             warn!("languages not loaded: {err}");
         }
-        let scene = scene.unwrap_or(&settings.main_scene);
-        match change_scene(tree, scene) {
-            // Projects from before `.abscene` that relied on the default name.
-            Err(_) if scene == DEFAULT_MAIN_SCENE => Ok(change_scene(tree, LEGACY_MAIN_SCENE)?),
-            result => Ok(result?),
-        }
+        Ok(change_scene(tree, scene.unwrap_or(&settings.main_scene))?)
     }
 
     /// Parses the command line and runs the game (windowed unless told otherwise).
@@ -619,7 +612,7 @@ mod tests {
 
     #[test]
     fn developer_options_follow_the_build() {
-        let args = ["--overlay", "--scene", "x.toml", "--headless", "5"].map(String::from);
+        let args = ["--overlay", "--scene", "x.abscene", "--headless", "5"].map(String::from);
         let cli = Cli::parse(args).unwrap().unwrap();
         assert_eq!(cli.headless, Some(5), "the export's check needs --headless");
         assert_eq!(cli.overlay, !crate::SHIPPING);
@@ -654,11 +647,11 @@ mod tests {
     #[test]
     fn command_line() {
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let cli = Cli::parse(args(&["--headless", "60", "--scene", "b.toml", "--hot"]))
+        let cli = Cli::parse(args(&["--headless", "60", "--scene", "b.abscene", "--hot"]))
             .unwrap()
             .unwrap();
         assert_eq!(cli.headless, Some(60));
-        assert_eq!(cli.scene.as_deref(), Some("b.toml"));
+        assert_eq!(cli.scene.as_deref(), Some("b.abscene"));
         assert_eq!(cli.hot, Some(None));
         let cli = Cli::parse(args(&["--hot", "lib.so", "--windowed"]))
             .unwrap()

@@ -146,7 +146,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ab-archive-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("licenses")).unwrap();
-        std::fs::write(dir.join("game.abp"), vec![7u8; 10_000]).unwrap();
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/index.abm"), vec![7u8; 10_000]).unwrap();
         std::fs::write(dir.join("README.txt"), "สวัสดี hello\n".repeat(20)).unwrap();
         std::fs::write(dir.join("licenses/OFL.txt"), "license").unwrap();
         dir
@@ -182,7 +183,11 @@ mod tests {
             assert!(list.status.success());
             assert_eq!(
                 names.lines().collect::<Vec<_>>(),
-                ["game/README.txt", "game/game.abp", "game/licenses/OFL.txt"]
+                [
+                    "game/README.txt",
+                    "game/assets/index.abm",
+                    "game/licenses/OFL.txt"
+                ]
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

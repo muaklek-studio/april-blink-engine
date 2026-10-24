@@ -61,7 +61,7 @@ pub struct ExportOptions {
     pub windows: bool,
     /// Also a `.zip` (Windows) / `.tar.gz` (Linux).
     pub archive: bool,
-    /// Assets inside the executable instead of a `.abp` next to it.
+    /// Assets inside the executable instead of chunks in `assets/` next to it.
     pub single_file: bool,
     /// README.txt and licenses/ as files next to the executable.
     pub extras: bool,
@@ -531,8 +531,8 @@ impl ExportWindow {
                         );
                         ui.checkbox(&mut options.extras, "README and license files")
                             .on_hover_text(
-                                "Off: the folder holds only the game and its asset pack. The \
-                                 licenses ship inside the pack either way (the game shows them \
+                                "Off: the folder holds only the game and its assets. The \
+                                 licenses ship inside the assets either way (the game shows them \
                                  with --licenses).",
                             );
                     });

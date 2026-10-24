@@ -306,23 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn projects_of_the_first_layout_move_their_files_out_of_the_assets() {
-        let dir = temp("old-layout");
-        let project = create(&new("Old Times", &dir)).unwrap();
-        let root = project.root.clone();
-        for name in ["game.toml", "input.toml"] {
-            std::fs::rename(root.join(name), root.join("assets").join(name)).unwrap();
-        }
-        // Opened from its assets folder, as the editor used to.
-        let moved = Project::open(&root.join("assets")).unwrap();
-        assert_eq!(moved, project);
-        assert!(root.join("game.toml").is_file() && root.join("input.toml").is_file());
-        assert!(!root.join("assets/game.toml").exists());
-        assert!(!root.join("assets/input.toml").exists());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn project_files_are_the_settings_the_input_map_and_the_config() {
         let dir = temp("project-files");
         let project = create(&new("Packed", &dir)).unwrap();

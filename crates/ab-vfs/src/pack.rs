@@ -73,10 +73,13 @@ pub struct PackStats {
     pub compressed_files: usize,
 }
 
+/// A file waiting to be packed: path, bytes, whether to try compressing it.
+pub(crate) type PendingFile = (String, Vec<u8>, bool);
+
 /// Builds a pack in memory, then writes it.
 #[derive(Debug, Default)]
 pub struct PackWriter {
-    files: Vec<(String, Vec<u8>, bool)>,
+    files: Vec<PendingFile>,
 }
 
 impl PackWriter {
@@ -149,69 +152,72 @@ impl PackWriter {
         self.files.is_empty()
     }
 
-    /// Writes the pack (header, data, table of contents, trailer).
-    pub fn write_to(&self, out: &mut impl Write) -> VfsResult<PackStats> {
-        let mut files: Vec<&(String, Vec<u8>, bool)> = self.files.iter().collect();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut stats = PackStats {
-            files: files.len(),
-            ..Default::default()
-        };
-        let mut data = Vec::new();
-        let mut toc = Vec::new();
-        for (path, bytes, compress) in files {
-            let packed = compress
-                .then(|| lz4_flex::block::compress(bytes))
-                // Keep compression only when it saves at least 5 %.
-                .filter(|packed| packed.len() * 20 < bytes.len() * 19);
-            let (stored, compression) = match &packed {
-                Some(packed) => (packed.as_slice(), Compression::Lz4),
-                None => (bytes.as_slice(), Compression::None),
-            };
-            if compression == Compression::Lz4 {
-                stats.compressed_files += 1;
-            }
-            stats.original_bytes += bytes.len() as u64;
-            let offset = (HEADER_SIZE + data.len()) as u64;
-            data.extend_from_slice(stored);
-            let path_bytes = path.as_bytes();
-            let path_len =
-                u16::try_from(path_bytes.len()).map_err(|_| VfsError::InvalidPath(path.clone()))?;
-            toc.extend_from_slice(&path_len.to_le_bytes());
-            toc.extend_from_slice(path_bytes);
-            toc.extend_from_slice(&offset.to_le_bytes());
-            toc.extend_from_slice(&(stored.len() as u64).to_le_bytes());
-            toc.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-            toc.push(compression as u8);
-            toc.extend_from_slice(&fnv1a64(bytes).to_le_bytes());
-        }
-        let toc_offset = (HEADER_SIZE + data.len()) as u64;
-        let mut header = Vec::with_capacity(HEADER_SIZE);
-        header.extend_from_slice(MAGIC);
-        header.extend_from_slice(&VERSION.to_le_bytes());
-        header.extend_from_slice(&0u32.to_le_bytes());
-        header.extend_from_slice(&(stats.files as u32).to_le_bytes());
-        header.extend_from_slice(&toc_offset.to_le_bytes());
-        header.extend_from_slice(&(toc.len() as u64).to_le_bytes());
-        header.extend_from_slice(&fnv1a64(&toc).to_le_bytes());
-        header.resize(HEADER_SIZE, 0);
-        let pack_size = (HEADER_SIZE + data.len() + toc.len() + TRAILER_SIZE) as u64;
-        out.write_all(&header)?;
-        out.write_all(&data)?;
-        out.write_all(&toc)?;
-        out.write_all(&pack_size.to_le_bytes())?;
-        out.write_all(TAIL_MAGIC)?;
-        stats.pack_bytes = pack_size;
-        Ok(stats)
+    pub(crate) fn pending(&self) -> &[PendingFile] {
+        &self.files
     }
 
-    /// Writes the pack to a file.
-    pub fn write_file(&self, path: &Path) -> VfsResult<PackStats> {
-        let mut file = std::io::BufWriter::new(File::create(path)?);
-        let stats = self.write_to(&mut file)?;
-        file.flush()?;
-        Ok(stats)
+    /// Writes the pack (header, data, table of contents, trailer).
+    pub fn write_to(&self, out: &mut impl Write) -> VfsResult<PackStats> {
+        write_files(self.files.iter().collect(), out)
     }
+}
+
+/// Writes a pack of `files` (in path order, so the same files give the same bytes).
+pub(crate) fn write_files(
+    mut files: Vec<&PendingFile>,
+    out: &mut impl Write,
+) -> VfsResult<PackStats> {
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut stats = PackStats {
+        files: files.len(),
+        ..Default::default()
+    };
+    let mut data = Vec::new();
+    let mut toc = Vec::new();
+    for (path, bytes, compress) in files {
+        let packed = compress
+            .then(|| lz4_flex::block::compress(bytes))
+            // Keep compression only when it saves at least 5 %.
+            .filter(|packed| packed.len() * 20 < bytes.len() * 19);
+        let (stored, compression) = match &packed {
+            Some(packed) => (packed.as_slice(), Compression::Lz4),
+            None => (bytes.as_slice(), Compression::None),
+        };
+        if compression == Compression::Lz4 {
+            stats.compressed_files += 1;
+        }
+        stats.original_bytes += bytes.len() as u64;
+        let offset = (HEADER_SIZE + data.len()) as u64;
+        data.extend_from_slice(stored);
+        let path_bytes = path.as_bytes();
+        let path_len =
+            u16::try_from(path_bytes.len()).map_err(|_| VfsError::InvalidPath(path.clone()))?;
+        toc.extend_from_slice(&path_len.to_le_bytes());
+        toc.extend_from_slice(path_bytes);
+        toc.extend_from_slice(&offset.to_le_bytes());
+        toc.extend_from_slice(&(stored.len() as u64).to_le_bytes());
+        toc.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        toc.push(compression as u8);
+        toc.extend_from_slice(&fnv1a64(bytes).to_le_bytes());
+    }
+    let toc_offset = (HEADER_SIZE + data.len()) as u64;
+    let mut header = Vec::with_capacity(HEADER_SIZE);
+    header.extend_from_slice(MAGIC);
+    header.extend_from_slice(&VERSION.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&(stats.files as u32).to_le_bytes());
+    header.extend_from_slice(&toc_offset.to_le_bytes());
+    header.extend_from_slice(&(toc.len() as u64).to_le_bytes());
+    header.extend_from_slice(&fnv1a64(&toc).to_le_bytes());
+    header.resize(HEADER_SIZE, 0);
+    let pack_size = (HEADER_SIZE + data.len() + toc.len() + TRAILER_SIZE) as u64;
+    out.write_all(&header)?;
+    out.write_all(&data)?;
+    out.write_all(&toc)?;
+    out.write_all(&pack_size.to_le_bytes())?;
+    out.write_all(TAIL_MAGIC)?;
+    stats.pack_bytes = pack_size;
+    Ok(stats)
 }
 
 /// Writes `executable` followed by the pack to `output`: one file that finds its own data
@@ -267,15 +273,15 @@ impl std::fmt::Debug for Pack {
     }
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+pub(crate) fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
+pub(crate) fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 

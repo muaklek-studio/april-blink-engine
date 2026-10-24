@@ -474,8 +474,7 @@ impl Editor {
         }
     }
 
-    /// Saves to the open scene's file. A `.toml` scene of an older project stays where it
-    /// is, so the scenes and code that name it keep working (Save As makes an `.abscene`).
+    /// Saves to the open scene's file.
     pub fn save(&mut self) {
         match self.scene_path.clone() {
             Some(path) => self.write_scene(path),
@@ -483,7 +482,7 @@ impl Editor {
         }
     }
 
-    /// Saves as `path` with the `.abscene` extension (added, or replacing `.toml`).
+    /// Saves as `path` with the `.abscene` extension (added when missing).
     pub fn save_as(&mut self, path: &str) {
         let path = path.trim().replace('\\', "/");
         self.write_scene(ab_engine::scene_file::with_scene_extension(&path));
@@ -1868,7 +1867,10 @@ impl Editor {
             let kept: Vec<NodeHandle> = tree
                 .children(node)
                 .into_iter()
-                .filter(|&c| tree.component::<ab_engine::scene_file::Generated>(c).is_none())
+                .filter(|&c| {
+                    tree.component::<ab_engine::scene_file::Generated>(c)
+                        .is_none()
+                })
                 .collect();
             for child in kept {
                 let _ = tree.reparent(child, fresh, false);
@@ -2642,18 +2644,6 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("levels/new.abscene")).unwrap();
         assert_eq!(SceneFile::from_toml(&text).unwrap(), other.describe());
 
-        // A scene of an older project is saved where it is (others may instance it) …
-        std::fs::write(dir.join("old.toml"), &text).unwrap();
-        other.open_scene("old.toml");
-        assert_eq!(other.status.as_ref().map(|s| s.error), Some(false));
-        other.modified = true;
-        other.save();
-        assert_eq!(other.scene_path.as_deref(), Some("old.toml"));
-        assert!(!dir.join("old.abscene").exists());
-        // … and Save As turns it into an .abscene.
-        other.save_as("old.toml");
-        assert_eq!(other.scene_path.as_deref(), Some("old.abscene"));
-        assert!(dir.join("old.abscene").is_file() && dir.join("old.toml").is_file());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
