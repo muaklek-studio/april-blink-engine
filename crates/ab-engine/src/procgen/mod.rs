@@ -68,8 +68,14 @@ impl Output {
 /// What a parameter holds, for reading it and for the editor's fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ParamKind {
-    Int { min: i64, max: i64 },
-    Float { min: f32, max: f32 },
+    Int {
+        min: i64,
+        max: i64,
+    },
+    Float {
+        min: f32,
+        max: f32,
+    },
     Bool,
     Text,
     /// A colour (`"#rrggbb"`).
@@ -163,7 +169,10 @@ pub fn world_of(tree: &SceneTree, node: NodeHandle) -> Affine3A {
         }
         current = tree.parent(n);
     }
-    chain.iter().rev().fold(Affine3A::IDENTITY, |acc, t| acc * *t)
+    chain
+        .iter()
+        .rev()
+        .fold(Affine3A::IDENTITY, |acc, t| acc * *t)
 }
 
 fn top_of(tree: &SceneTree, node: NodeHandle) -> NodeHandle {
@@ -205,7 +214,8 @@ impl<'a> Context<'a> {
             _ => 0.0,
         };
         let value = match self.params.get(key) {
-            Some(toml::Value::Float(v)) => *v as f32,
+            // TOML allows `nan` and `inf`: those keep the default.
+            Some(toml::Value::Float(v)) if v.is_finite() => *v as f32,
             Some(toml::Value::Integer(v)) => *v as f32,
             _ => default,
         };
@@ -224,7 +234,7 @@ impl<'a> Context<'a> {
         };
         let value = match self.params.get(key) {
             Some(toml::Value::Integer(v)) => *v,
-            Some(toml::Value::Float(v)) => *v as i64,
+            Some(toml::Value::Float(v)) if v.is_finite() => *v as i64,
             _ => default,
         };
         match param.map(|p| p.kind) {
@@ -286,7 +296,11 @@ impl<'a> Context<'a> {
         let assets = self.tree.world().resource::<RenderAssets>()?;
         let mut best: Option<f32> = None;
         for (global, handle, bounds) in meshes {
-            if at.x < bounds.min.x || at.x > bounds.max.x || at.z < bounds.min.z || at.z > bounds.max.z {
+            if at.x < bounds.min.x
+                || at.x > bounds.max.x
+                || at.z < bounds.min.z
+                || at.z > bounds.max.z
+            {
                 continue;
             }
             let Some(mesh) = assets.mesh(*handle) else {
@@ -352,7 +366,13 @@ fn ray_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f3
 
 /// Up to `count` points in a `width` × `depth` rectangle around the origin, none closer
 /// than `min_distance` to another (dart throwing: dense but not on a grid).
-pub fn scatter_points(rng: &mut Rng, count: usize, width: f32, depth: f32, min_distance: f32) -> Vec<(f32, f32)> {
+pub fn scatter_points(
+    rng: &mut Rng,
+    count: usize,
+    width: f32,
+    depth: f32,
+    min_distance: f32,
+) -> Vec<(f32, f32)> {
     let mut points: Vec<(f32, f32)> = Vec::with_capacity(count);
     let tries = count * 30 + 10;
     let min2 = min_distance * min_distance;
@@ -360,7 +380,10 @@ pub fn scatter_points(rng: &mut Rng, count: usize, width: f32, depth: f32, min_d
         if points.len() >= count {
             break;
         }
-        let p = (rng.range(-width / 2.0, width / 2.0), rng.range(-depth / 2.0, depth / 2.0));
+        let p = (
+            rng.range(-width / 2.0, width / 2.0),
+            rng.range(-depth / 2.0, depth / 2.0),
+        );
         if points
             .iter()
             .all(|q| (q.0 - p.0).powi(2) + (q.1 - p.1).powi(2) >= min2)
@@ -391,9 +414,19 @@ mod tests {
 
     #[test]
     fn rays_hit_triangles_from_either_side() {
-        let (a, b, c) = (Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0));
-        assert_eq!(ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, a, b, c), Some(5.0));
+        let (a, b, c) = (
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::new(1.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+        assert_eq!(
+            ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, a, b, c),
+            Some(5.0)
+        );
         assert!(ray_triangle(Vec3::new(5.0, 5.0, 0.0), Vec3::NEG_Y, a, b, c).is_none());
-        assert_eq!(ray_triangle(Vec3::new(0.0, -2.0, 0.0), Vec3::Y, a, b, c), Some(2.0));
+        assert_eq!(
+            ray_triangle(Vec3::new(0.0, -2.0, 0.0), Vec3::Y, a, b, c),
+            Some(2.0)
+        );
     }
 }

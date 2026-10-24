@@ -63,6 +63,12 @@ fn a_new_project_builds_and_exports_with_the_player() {
     assert_eq!(exported.len(), 1);
     let folder = &exported[0].folder;
     let platform = ab_project::Platform::host();
+    // On macOS the game and its files are inside the app bundle.
+    let folder = if platform == ab_project::Platform::MacOs {
+        folder.join("Flow Check.app/Contents/MacOS")
+    } else {
+        folder.clone()
+    };
     for file in [
         platform.executable("flow-check"),
         "assets/index.abm".to_owned(),

@@ -20,7 +20,7 @@ pub enum Action {
     None,
     /// Open the editor on `project`, with its script library if it was built.
     Open {
-        project: Project,
+        project: Box<Project>,
         scripts: Option<PathBuf>,
     },
 }
@@ -437,6 +437,8 @@ impl ProjectManager {
         self.recent.touch(&project);
         self.save_recent();
         self.selected = Some(project.root.clone());
+        // Unpacks the project's assets while the scripts build.
+        crate::asset_sync::presync(&project);
         let build = if project.package.is_some() {
             match ScriptBuild::start(&project, Profile::Debug) {
                 Ok(build) => Some(build),
@@ -464,7 +466,8 @@ impl ProjectManager {
             .as_mut()
             .map_or(BuildState::Succeeded, |b| b.poll().clone());
         let library = opening.project.editor_library().filter(|l| l.is_file());
-        if state == BuildState::Succeeded {
+        let syncing = !crate::asset_sync::presync_finished(&opening.project.root);
+        if state == BuildState::Succeeded && !syncing {
             let opening = self.opening.take().expect("checked above");
             tracing::info!(
                 project = %opening.project.root.display(),
@@ -472,7 +475,7 @@ impl ProjectManager {
                 "opening project"
             );
             return Action::Open {
-                project: opening.project,
+                project: Box::new(opening.project),
                 scripts: library,
             };
         }
@@ -550,7 +553,15 @@ impl ProjectManager {
                         .color(theme::TEXT_DIM),
                     );
                 }
-                BuildState::Succeeded => {}
+                BuildState::Succeeded => {
+                    // Built; the assets are still being unpacked (a fresh clone).
+                    ui.label(
+                        RichText::new("Unpacking the project's images, models and sounds…")
+                            .color(Color32::WHITE),
+                    );
+                    ui.add_space(10.0);
+                    indeterminate_bar(ui);
+                }
             }
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -572,7 +583,7 @@ impl ProjectManager {
             Some(true) => {
                 let opening = self.opening.take().expect("checked above");
                 Action::Open {
-                    project: opening.project,
+                    project: Box::new(opening.project),
                     scripts: library,
                 }
             }

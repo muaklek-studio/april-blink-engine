@@ -559,7 +559,8 @@ impl Context<'_, '_> {
         let size_px = style.size * s;
         let px_range = DISTANCE_RANGE * size_px / BAKE_EM_PX;
         // An outline or glow can only extend as far as the stored distance band.
-        let max_extent = px_range * 0.5 - 0.5;
+        // Never below the softest edge: small text (or a small window) leaves almost no band.
+        let max_extent = (px_range * 0.5 - 0.5).max(0.5);
         let color = multiply(style.color, modulate);
 
         let mut passes: Vec<(Vec2, Color, f32, f32, Color)> = Vec::with_capacity(2);

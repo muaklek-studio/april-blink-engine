@@ -13,6 +13,9 @@
 //! * The scene is drawn every frame while the window is in use, and otherwise only when it
 //!   changes or a few times a second (see [`tool_window::Redraw`]).
 //! * Guides show the screen's centre and its title-safe area (90 %).
+//! * It edits one UI node (a canvas layer) at a time, the one double-clicked in the scene
+//!   tree or picked on the tool bar: its controls are listed, picked and added there, and
+//!   only there (the scene tree shows the UI node alone).
 
 use crate::i18n::t;
 use crate::panels::inspector::InspectorPanel;
@@ -63,6 +66,12 @@ pub struct UiDesigner {
     redraw: tool_window::Redraw,
     /// Zoom to the selected control next frame (F, or a double click in the hierarchy).
     frame_request: bool,
+    /// The UI node being edited (a canvas layer of the scene).
+    root: Option<NodeHandle>,
+    /// Show the edited UI node alone (the scene's other UIs hidden while drawing).
+    solo: bool,
+    /// What the screen was last drawn with (solo, root): a change draws it again.
+    drawn_with: Option<(bool, Option<NodeHandle>)>,
 }
 
 impl Default for UiDesigner {
@@ -78,6 +87,9 @@ impl Default for UiDesigner {
             inspector: InspectorPanel::default(),
             redraw: Default::default(),
             frame_request: false,
+            root: None,
+            solo: true,
+            drawn_with: None,
         }
     }
 }
@@ -88,7 +100,91 @@ fn is_ui(editor: &Editor, node: NodeHandle) -> bool {
     tree.component::<Control>(node).is_some() || tree.component::<CanvasLayer>(node).is_some()
 }
 
+/// The scene's UI nodes (canvas layers), in tree order.
+fn layers(editor: &Editor) -> Vec<NodeHandle> {
+    let tree = editor.tree();
+    tree.subtree(editor.scene_root)
+        .into_iter()
+        .filter(|&n| tree.component::<CanvasLayer>(n).is_some() && editor.is_editable(n))
+        .collect()
+}
+
+/// Runs `f` with the scene's other UI nodes hidden (when `solo`), then shows them again.
+fn with_solo<R>(
+    editor: &mut Editor,
+    root: Option<NodeHandle>,
+    solo: bool,
+    f: impl FnOnce(&mut Editor) -> R,
+) -> R {
+    match root {
+        Some(root) if solo => with_only_ui(editor, Some(root), f),
+        _ => f(editor),
+    }
+}
+
+/// Runs `f` with every UI node but `keep` hidden (all of them without one), then shows
+/// them again: views that are about something else (an effect, an animation) are not
+/// covered by the game's interface. Only the flag the drawing reads is touched: no edit,
+/// no undo step, no new revision.
+pub(crate) fn with_only_ui<R>(
+    editor: &mut Editor,
+    keep: Option<NodeHandle>,
+    f: impl FnOnce(&mut Editor) -> R,
+) -> R {
+    let hidden: Vec<NodeHandle> = layers(editor)
+        .into_iter()
+        .filter(|&l| Some(l) != keep)
+        .filter(|&l| {
+            editor
+                .tree()
+                .world()
+                .get::<ab_engine::scene::NodeInfo>(l.entity())
+                .is_some_and(|i| i.visible)
+        })
+        .collect();
+    let set = |editor: &mut Editor, visible: bool| {
+        for &layer in &hidden {
+            if let Some(mut info) = editor
+                .tree_mut()
+                .world_mut()
+                .get_mut::<ab_engine::scene::NodeInfo>(layer.entity())
+            {
+                info.visible = visible;
+            }
+        }
+    };
+    set(editor, false);
+    let result = f(editor);
+    set(editor, true);
+    result
+}
+
+/// Whether `node` is `root` or inside it (everything, without a root).
+fn in_scope(editor: &Editor, root: Option<NodeHandle>, node: NodeHandle) -> bool {
+    let Some(root) = root else {
+        return true;
+    };
+    let tree = editor.tree();
+    std::iter::successors(Some(node), |&n| tree.parent(n)).any(|n| n == root)
+}
+
 impl UiDesigner {
+    /// Edits the UI node `layer` (it is selected, the screen fitted).
+    pub fn edit(&mut self, editor: &mut Editor, layer: NodeHandle) {
+        self.root = Some(layer);
+        editor.select(Some(layer));
+        self.fit();
+    }
+
+    /// The UI node edited: the one chosen while it is still there, else the scene's first.
+    fn root(&mut self, editor: &Editor) -> Option<NodeHandle> {
+        let all = layers(editor);
+        if !self.root.is_some_and(|r| all.contains(&r)) {
+            self.root = all.first().copied();
+        }
+        self.root
+    }
+
     /// The window's body. `share` makes the renderer (from the main viewport's).
     pub fn show(
         &mut self,
@@ -100,7 +196,8 @@ impl UiDesigner {
         if self.renderer.is_none() {
             self.renderer = share();
         }
-        tool_window::toolbar(ui, "ui-designer", |ui| self.toolbar(ui, editor));
+        let root = self.root(editor);
+        tool_window::toolbar(ui, "ui-designer", |ui| self.toolbar(ui, editor, root));
         tool_window::side(
             ui,
             "ui-designer-hierarchy",
@@ -109,7 +206,7 @@ impl UiDesigner {
             icon::TREE_STRUCTURE,
             &t("ui_designer.hierarchy"),
             |ui| {
-                if hierarchy(ui, editor) {
+                if hierarchy(ui, editor, root) {
                     self.frame_request = true;
                 }
             },
@@ -125,16 +222,58 @@ impl UiDesigner {
         );
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_0))
-            .show(ui, |ui| self.canvas(ui, editor, render_state));
+            .show(ui, |ui| self.canvas(ui, editor, render_state, root));
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+    fn toolbar(&mut self, ui: &mut egui::Ui, editor: &mut Editor, root: Option<NodeHandle>) {
         let editing = !editor.is_playing();
+        // Which UI node is edited, or a new one.
+        let name = |n: NodeHandle| {
+            editor
+                .tree()
+                .name(n)
+                .map(|n| n.to_string())
+                .unwrap_or_default()
+        };
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("ui-designer-root")
+            .selected_text(format!(
+                "{}  {}",
+                theme::class_icon(class::CANVAS_LAYER),
+                root.map(name).unwrap_or_else(|| t("ui_designer.no_ui"))
+            ))
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for layer in layers(editor) {
+                    if ui
+                        .selectable_label(root == Some(layer), name(layer))
+                        .clicked()
+                    {
+                        chosen = Some(layer);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(t("ui_designer.root_hint"));
+        if let Some(layer) = chosen {
+            self.edit(editor, layer);
+        }
         ui.add_enabled_ui(editing, |ui| {
-            ui.menu_button(
-                RichText::new(format!("{}  {}", icon::PLUS, t("ui_designer.add"))).strong(),
-                |ui| add_menu(ui, editor),
-            );
+            if ui
+                .button(format!("{}  {}", icon::PLUS, t("ui_designer.new_ui")))
+                .on_hover_text(t("ui_designer.new_ui_hint"))
+                .clicked()
+            {
+                if let Some(layer) = new_ui(editor) {
+                    self.edit(editor, layer);
+                }
+            }
+            ui.add_enabled_ui(root.is_some(), |ui| {
+                ui.menu_button(
+                    RichText::new(format!("{}  {}", icon::PLUS, t("ui_designer.add"))).strong(),
+                    |ui| add_menu(ui, editor, root),
+                );
+            });
         });
         ui.separator();
         let (name, width, height) = SCREENS[self.screen];
@@ -168,9 +307,12 @@ impl UiDesigner {
         {
             self.step_zoom(ui.ctx(), -1);
         }
-        let percent = self
-            .zoom
-            .map_or_else(|| t("ui_designer.fit"), |z| format!("{:.0} %", z * 100.0));
+        // The zoom in effect, fitted or chosen (the Fit button says which).
+        let fitted = ui
+            .ctx()
+            .data(|d| d.get_temp::<f32>(egui::Id::new("ui-designer-fit")))
+            .unwrap_or(1.0);
+        let percent = format!("{:.0} %", self.zoom.unwrap_or(fitted) * 100.0);
         ui.add_sized([56.0, 20.0], egui::Label::new(percent));
         if ui
             .button(icon::MAGNIFYING_GLASS_PLUS)
@@ -204,11 +346,17 @@ impl UiDesigner {
             format!("{}  {}", icon::CROSSHAIR, t("ui_designer.guides")),
         )
         .on_hover_text(t("ui_designer.guides_hint"));
+        ui.toggle_value(
+            &mut self.solo,
+            format!("{}  {}", icon::EYE, t("ui_designer.solo")),
+        )
+        .on_hover_text(t("ui_designer.solo_hint"));
         ui.separator();
+        // The UI node itself is deleted from the scene tree, not here.
         let selection = editing
             && editor
                 .selection
-                .is_some_and(|n| is_ui(editor, n) && editor.is_editable(n));
+                .is_some_and(|n| is_ui(editor, n) && editor.is_editable(n) && Some(n) != root);
         if ui
             .add_enabled(selection, egui::Button::new(icon::COPY))
             .on_hover_text(crate::commands::Command::Duplicate.label())
@@ -250,6 +398,7 @@ impl UiDesigner {
         ui: &mut egui::Ui,
         editor: &mut Editor,
         render_state: Option<&egui_wgpu::RenderState>,
+        root: Option<NodeHandle>,
     ) {
         let (canvas, response) =
             ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -307,8 +456,10 @@ impl UiDesigner {
                 let due = self
                     .redraw
                     .due(tool_window::in_use(ui.ctx()), editor.revision());
-                let cached = renderer.cached(w, h).filter(|_| !due);
-                let texture = match cached {
+                let with = (self.solo, root);
+                let changed = self.drawn_with.replace(with) != Some(with);
+                let cached = renderer.cached(w, h).filter(|_| !due && !changed);
+                let texture = with_solo(editor, root, self.solo, |editor| match cached {
                     Some(texture) => {
                         // Not drawn, but laid out for this screen: editing needs the rects.
                         ab_engine::ui::prepare_ui(editor.tree().world(), w, h);
@@ -326,7 +477,7 @@ impl UiDesigner {
                         }
                         texture
                     }
-                };
+                });
                 painter.image(
                     texture,
                     screen,
@@ -364,7 +515,7 @@ impl UiDesigner {
         }
 
         // Editing (laid out just now, for this screen).
-        let view = UiView::new(editor, screen, ppp);
+        let view = UiView::new(editor, screen, ppp).map(|v| v.scoped(root));
         if editor.mode == Mode::Edit {
             if let Some(view) = &view {
                 let snapping = self.snap || ui.input(|i| i.modifiers.command);
@@ -378,7 +529,7 @@ impl UiDesigner {
                     snapping,
                 );
                 if response.clicked() {
-                    select_at(ui, &response, view, editor);
+                    select_at(ui, &response, view, editor, root);
                 }
                 self.nudge(ui, editor);
             }
@@ -393,8 +544,16 @@ impl UiDesigner {
             }
         }
         self.readout(ui, &painter, canvas, screen, editor);
-        if !has_ui(editor) {
-            empty(ui, canvas, editor);
+        match root {
+            None => {
+                if let Some(layer) = empty(ui, canvas, editor, None) {
+                    self.edit(editor, layer);
+                }
+            }
+            Some(root) if editor.tree().children(root).is_empty() => {
+                empty(ui, canvas, editor, Some(root));
+            }
+            Some(_) => {}
         }
     }
 
@@ -532,12 +691,20 @@ impl UiDesigner {
 
 /// Selects what a click at the pointer hit: the topmost control, else nothing (Ctrl and
 /// Shift add to the selection, as in the viewport).
-fn select_at(ui: &egui::Ui, response: &egui::Response, view: &UiView, editor: &mut Editor) {
+fn select_at(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    view: &UiView,
+    editor: &mut Editor,
+    root: Option<NodeHandle>,
+) {
     let Some(pos) = response.interact_pointer_pos() else {
         return;
     };
     let modifiers = ui.input(|i| i.modifiers);
-    let controls = ui_edit::controls(editor);
+    // Only the edited UI node's controls can be picked.
+    let mut controls = ui_edit::controls(editor);
+    controls.retain(|c| in_scope(editor, root, c.node));
     match ui_edit::pick(&controls, view, pos, editor) {
         Some(node) if modifiers.command => editor.toggle_selected(node),
         Some(node) if modifiers.shift => editor.add_to_selection(&[node]),
@@ -570,14 +737,6 @@ fn movable(editor: &Editor) -> Vec<NodeHandle> {
         .collect()
 }
 
-fn has_ui(editor: &Editor) -> bool {
-    editor
-        .tree()
-        .subtree(editor.scene_root)
-        .into_iter()
-        .any(|n| is_ui(editor, n))
-}
-
 /// The screen's centre lines and title-safe area.
 fn guides(painter: &egui::Painter, screen: Rect) {
     let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(90, 170, 255, 70));
@@ -607,8 +766,24 @@ fn guides(painter: &egui::Painter, screen: Rect) {
     }
 }
 
-/// No interface yet: offer to start one.
-fn empty(ui: &mut egui::Ui, canvas: Rect, editor: &mut Editor) {
+/// A new UI node (canvas layer) at the top of the scene; it is returned (and selected).
+fn new_ui(editor: &mut Editor) -> Option<NodeHandle> {
+    editor.select(None);
+    editor.add_scene(crate::create::UI[0].scene(), None);
+    editor
+        .selection
+        .filter(|&n| editor.tree().component::<CanvasLayer>(n).is_some())
+}
+
+/// No UI node yet: offer to make one (returned when made). With `root`, a UI node without
+/// controls: offer to add some.
+fn empty(
+    ui: &mut egui::Ui,
+    canvas: Rect,
+    editor: &mut Editor,
+    root: Option<NodeHandle>,
+) -> Option<NodeHandle> {
+    let mut made = None;
     let area = Rect::from_center_size(canvas.center(), Vec2::new(360.0, 150.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
         egui::Frame::NONE
@@ -623,26 +798,50 @@ fn empty(ui: &mut egui::Ui, canvas: Rect, editor: &mut Editor) {
                             .size(30.0)
                             .color(theme::ACCENT),
                     );
-                    ui.label(RichText::new(t("ui_designer.empty")).color(theme::TEXT_DIM));
+                    let hint = if root.is_some() {
+                        t("ui_designer.empty_ui")
+                    } else {
+                        t("ui_designer.empty")
+                    };
+                    ui.label(RichText::new(hint).color(theme::TEXT_DIM));
                     ui.add_space(6.0);
                     ui.add_enabled_ui(!editor.is_playing(), |ui| {
-                        ui.menu_button(
-                            RichText::new(format!("{}  {}", icon::PLUS, t("ui_designer.add")))
+                        if root.is_some() {
+                            ui.menu_button(
+                                RichText::new(format!("{}  {}", icon::PLUS, t("ui_designer.add")))
+                                    .strong(),
+                                |ui| add_menu(ui, editor, root),
+                            );
+                        } else if ui
+                            .button(
+                                RichText::new(format!(
+                                    "{}  {}",
+                                    icon::PLUS,
+                                    t("ui_designer.new_ui")
+                                ))
                                 .strong(),
-                            |ui| add_menu(ui, editor),
-                        );
+                            )
+                            .clicked()
+                        {
+                            made = new_ui(editor);
+                        }
                     });
                 });
             });
     });
+    made
 }
 
-/// Controls and whole screens to add: under the selected UI node, else the scene's canvas
-/// layer (see [`crate::create::place_ui`]).
-fn add_menu(ui: &mut egui::Ui, editor: &mut Editor) {
+/// Controls and whole screens to add to the edited UI node `root`: under the selected
+/// control when it is inside, else under `root` itself.
+fn add_menu(ui: &mut egui::Ui, editor: &mut Editor, root: Option<NodeHandle>) {
     ui.set_min_width(230.0);
     let mut chosen = None;
-    for template in crate::create::UI {
+    // The UI node itself is made with New UI, not added inside another.
+    for template in crate::create::UI
+        .iter()
+        .filter(|t| t.class != class::CANVAS_LAYER)
+    {
         let text = format!("{}  {}", theme::class_icon(template.class), template.label);
         if ui.button(text).clicked() {
             chosen = Some(template.scene());
@@ -653,9 +852,13 @@ fn add_menu(ui: &mut egui::Ui, editor: &mut Editor) {
     if ui
         .add_enabled(
             picture.is_some(),
-            egui::Button::new(format!("{}  Image", theme::class_icon("TextureRect"))),
+            egui::Button::new(format!(
+                "{}  {}",
+                theme::class_icon("TextureRect"),
+                t("create.image")
+            )),
         )
-        .on_disabled_hover_text("Add a PNG or JPEG to the project first")
+        .on_disabled_hover_text(t("create.image_hint"))
         .clicked()
     {
         chosen = picture;
@@ -675,6 +878,12 @@ fn add_menu(ui: &mut egui::Ui, editor: &mut Editor) {
         }
     }
     if let Some(scene) = chosen {
+        let inside = editor
+            .selection
+            .is_some_and(|n| root.is_some() && in_scope(editor, root, n) && is_ui(editor, n));
+        if !inside {
+            editor.select(root);
+        }
         let scene = crate::create::place_ui(editor, scene);
         editor.add_scene(scene, None);
     }
@@ -682,15 +891,19 @@ fn add_menu(ui: &mut egui::Ui, editor: &mut Editor) {
 
 /// The interface's nodes as a tree: canvas layers and the controls under them. Only the
 /// rows in view are drawn. Returns whether a row was double-clicked (frame it).
-fn hierarchy(ui: &mut egui::Ui, editor: &mut Editor) -> bool {
+fn hierarchy(ui: &mut egui::Ui, editor: &mut Editor, root: Option<NodeHandle>) -> bool {
+    let Some(root) = root else {
+        crate::panels::empty_hint(ui, icon::BROWSERS, &t("ui_designer.no_controls"));
+        return false;
+    };
     let rows: Vec<(NodeHandle, usize)> = {
         let tree = editor.tree();
-        tree.subtree(editor.scene_root)
+        tree.subtree(root)
             .into_iter()
             .filter(|&n| is_ui(editor, n))
             .map(|n| {
                 let depth = std::iter::successors(tree.parent(n), |&p| tree.parent(p))
-                    .take_while(|&p| p != editor.scene_root)
+                    .take_while(|&p| p != tree.parent(root).unwrap_or(editor.scene_root))
                     .filter(|&p| is_ui(editor, p))
                     .count();
                 (n, depth)
@@ -775,7 +988,7 @@ mod tests {
         editor.select(None);
         let menu = crate::create::place_ui(&mut editor, crate::create::UI_SCREENS[1].scene());
         editor.add_scene(menu, None);
-        assert!(has_ui(&editor));
+        assert_eq!(layers(&editor).len(), 1, "one UI node, made for the menu");
         let tree = editor.tree();
         let find = |name: &str| {
             tree.subtree(editor.scene_root)
@@ -787,5 +1000,39 @@ mod tests {
         editor.set_selection(vec![window, quit], None);
         // The button sits in the window's column: the window carries it.
         assert_eq!(movable(&editor), vec![window]);
+    }
+
+    #[test]
+    fn each_ui_node_is_edited_on_its_own() {
+        let assets = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        let mut editor = Editor::new(assets, None, ab_engine::audio::AudioOutput::Silent);
+        let mut designer = UiDesigner::default();
+        let hud = new_ui(&mut editor).expect("a UI node");
+        let menu = new_ui(&mut editor).expect("another");
+        assert_eq!(layers(&editor), vec![hud, menu]);
+
+        // Controls are added to the UI node being edited.
+        designer.edit(&mut editor, menu);
+        editor.add_scene(crate::create::UI[2].scene(), None);
+        let control = editor.selection.unwrap();
+        assert_eq!(editor.tree().parent(control), Some(menu));
+        assert!(in_scope(&editor, Some(menu), control));
+        assert!(!in_scope(&editor, Some(hud), control));
+
+        // Only the edited UI is drawn, and nothing changes in the scene for it.
+        let revision = editor.revision();
+        let shown = with_solo(&mut editor, Some(menu), true, |editor| {
+            (
+                editor.tree().is_visible_in_tree(hud),
+                editor.tree().is_visible_in_tree(menu),
+            )
+        });
+        assert_eq!(shown, (false, true));
+        assert!(editor.tree().is_visible_in_tree(hud), "shown again");
+        assert_eq!(editor.revision(), revision);
+
+        // A UI node that goes away: the next one is edited.
+        editor.delete(menu);
+        assert_eq!(designer.root(&editor), Some(hud));
     }
 }

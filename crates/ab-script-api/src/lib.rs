@@ -574,9 +574,12 @@ pub struct ScriptType {
     pub properties: *const PropertyDesc,
     pub property_count: usize,
     /// Get a property value by name. Returns `true` if the property exists.
-    pub get_property: Option<unsafe extern "C" fn(instance: *const c_void, name: Str, out: *mut Value) -> Status>,
+    pub get_property:
+        Option<unsafe extern "C" fn(instance: *const c_void, name: Str, out: *mut Value) -> Status>,
     /// Set a property value by name. Returns `true` if the property exists and was set.
-    pub set_property: Option<unsafe extern "C" fn(instance: *mut c_void, name: Str, value: *const Value) -> Status>,
+    pub set_property: Option<
+        unsafe extern "C" fn(instance: *mut c_void, name: Str, value: *const Value) -> Status,
+    >,
 }
 
 /// Which [`Event`] it is.

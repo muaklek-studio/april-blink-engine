@@ -77,10 +77,10 @@ pub use world::{
 /// Everything a script usually needs: `use ab_script::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        debug, error, info, serde_state, trace, warn, Arg, Blood, BodyKind, Color, Easing,
-        EulerRot, Explosion, ffi, HAlign, LayoutPreset, MouseFilter, NavBakeSettings, Node,
-        ParticleEffect, PathFollower, PhysicsEvent, Property, Quat, QueryOptions, Registry,
-        Repeat, Rng, Script, Signal, SoundOptions, Transform, Tree, VAlign, Vec2, Vec3,
+        debug, error, ffi, info, serde_state, trace, warn, Arg, Blood, BodyKind, Color, Easing,
+        EulerRot, Explosion, HAlign, LayoutPreset, MouseFilter, NavBakeSettings, Node,
+        ParticleEffect, PathFollower, PhysicsEvent, Property, Quat, QueryOptions, Registry, Repeat,
+        Rng, Script, Signal, SoundOptions, Transform, Tree, VAlign, Vec2, Vec3,
     };
     pub use serde::{Deserialize, Serialize};
 }

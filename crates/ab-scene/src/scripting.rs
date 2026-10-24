@@ -442,9 +442,7 @@ impl SceneTree {
             replaced.push((node, id));
         }
         if !running.is_empty() {
-            let pending = self
-                .world
-                .resource_or_insert_with(PendingReloads::default);
+            let pending = self.world.resource_or_insert_with(PendingReloads::default);
             for item in running {
                 if !pending.0.contains(&item) {
                     pending.0.push(item);
@@ -517,7 +515,11 @@ mod tests {
             self.frames += 1;
             if self.frames == 1 && self.version == 1 {
                 VERSION.store(2, Ordering::Relaxed);
-                assert_eq!(tree.reload_scripts(), 0, "the running script is not swapped");
+                assert_eq!(
+                    tree.reload_scripts(),
+                    0,
+                    "the running script is not swapped"
+                );
             }
         }
 

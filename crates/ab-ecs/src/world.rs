@@ -447,7 +447,10 @@ mod tests {
         assert_eq!(world.entity_count(), 0);
         let new = world.spawn((Pos(2.0),));
         assert_eq!(new.index(), old.index());
-        assert!(!world.is_alive(old), "stale handle must not alias the new entity");
+        assert!(
+            !world.is_alive(old),
+            "stale handle must not alias the new entity"
+        );
         assert!(world.get::<Pos>(old).is_none());
         assert_eq!(world.get_copied::<Pos>(new), Some(Pos(2.0)));
     }

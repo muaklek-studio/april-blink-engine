@@ -72,7 +72,12 @@ impl Spline {
     /// The curve at `t` (0..1) of segment `segment`.
     pub fn segment_point(&self, segment: usize, t: f32) -> Vec3 {
         let i = segment as isize;
-        let (p0, p1, p2, p3) = (self.point(i - 1), self.point(i), self.point(i + 1), self.point(i + 2));
+        let (p0, p1, p2, p3) = (
+            self.point(i - 1),
+            self.point(i),
+            self.point(i + 1),
+            self.point(i + 2),
+        );
         centripetal(p0, p1, p2, p3, t)
     }
 
@@ -116,7 +121,8 @@ impl Spline {
     pub fn at_distance(&self, distance: f32) -> Option<(Vec3, Vec3)> {
         let length = self.length();
         let (first, _) = *self.samples.first()?;
-        if self.samples.len() < 2 || length <= 0.0 {
+        // A NaN length (points with NaN in them) would make `clamp` below panic.
+        if self.samples.len() < 2 || !length.is_finite() || length <= 0.0 {
             return Some((first, Vec3::Z));
         }
         let d = if self.closed {
@@ -124,7 +130,10 @@ impl Spline {
         } else {
             distance.clamp(0.0, length)
         };
-        let next = self.samples.partition_point(|s| s.1 < d).clamp(1, self.samples.len() - 1);
+        let next = self
+            .samples
+            .partition_point(|s| s.1 < d)
+            .clamp(1, self.samples.len() - 1);
         let (a, da) = self.samples[next - 1];
         let (b, db) = self.samples[next];
         let t = if db > da { (d - da) / (db - da) } else { 0.0 };
@@ -190,7 +199,8 @@ pub fn ribbon(spline: &Spline, width: f32) -> Option<Mesh> {
     if spline.length() < 1e-4 {
         return None;
     }
-    let frames = spline.frames(spline.length() / (spline.points.len().max(2) * SAMPLES_PER_SEGMENT) as f32);
+    let frames =
+        spline.frames(spline.length() / (spline.points.len().max(2) * SAMPLES_PER_SEGMENT) as f32);
     if frames.len() < 2 {
         return None;
     }
@@ -221,7 +231,8 @@ pub fn tube(spline: &Spline, radius: f32, sides: usize, sag: f32) -> Option<Mesh
         return None;
     }
     let sides = sides.clamp(3, 64);
-    let frames = spline.frames(spline.length() / (spline.points.len().max(2) * SAMPLES_PER_SEGMENT) as f32);
+    let frames =
+        spline.frames(spline.length() / (spline.points.len().max(2) * SAMPLES_PER_SEGMENT) as f32);
     if frames.len() < 2 {
         return None;
     }
@@ -238,7 +249,12 @@ pub fn tube(spline: &Spline, radius: f32, sides: usize, sag: f32) -> Option<Mesh
         for s in 0..=sides {
             let angle = s as f32 / sides as f32 * std::f32::consts::TAU;
             let normal = side * angle.cos() + up * angle.sin();
-            vertices.push(vertex(p + normal * radius, normal, [s as f32 / sides as f32, along], forward));
+            vertices.push(vertex(
+                p + normal * radius,
+                normal,
+                [s as f32 / sides as f32, along],
+                forward,
+            ));
         }
     }
     let ring = sides as u32 + 1;
@@ -253,6 +269,9 @@ pub fn tube(spline: &Spline, radius: f32, sides: usize, sag: f32) -> Option<Mesh
     Some(Mesh::new(vertices, indices))
 }
 
+/// Instances along one path, at most.
+const MAX_INSTANCES: usize = 5000;
+
 /// Where instances go: every `spacing` metres from the start (and at the end of an open
 /// path), each turned to face along the path when `align`.
 pub fn instance_places(spline: &Spline, spacing: f32, align: bool) -> Vec<(Vec3, Quat)> {
@@ -261,7 +280,8 @@ pub fn instance_places(spline: &Spline, spacing: f32, align: bool) -> Vec<(Vec3,
         return Vec::new();
     }
     let spacing = spacing.max(0.05);
-    let mut count = (length / spacing).floor() as usize;
+    // A very long path must not ask for millions of instances.
+    let mut count = ((length / spacing).floor() as usize).min(MAX_INSTANCES);
     if !spline.closed {
         count += 1;
     }
@@ -298,7 +318,11 @@ mod tests {
 
     #[test]
     fn the_curve_passes_through_its_points() {
-        let points = vec![Vec3::ZERO, Vec3::new(5.0, 0.0, 5.0), Vec3::new(10.0, 2.0, 0.0)];
+        let points = vec![
+            Vec3::ZERO,
+            Vec3::new(5.0, 0.0, 5.0),
+            Vec3::new(10.0, 2.0, 0.0),
+        ];
         let spline = Spline::new(points.clone(), false);
         for (i, p) in points.iter().enumerate().take(2) {
             assert!(spline.segment_point(i, 0.0).distance(*p) < 1e-4);
@@ -309,7 +333,10 @@ mod tests {
         assert!(mid.distance(Vec3::new(5.0, 0.0, 0.0)) < 1e-3);
         assert!(dir.distance(Vec3::X) < 1e-3);
         // Closed: back to the start, and wraps.
-        let ring = Spline::new(vec![Vec3::ZERO, Vec3::X * 4.0, Vec3::new(4.0, 0.0, 4.0)], true);
+        let ring = Spline::new(
+            vec![Vec3::ZERO, Vec3::X * 4.0, Vec3::new(4.0, 0.0, 4.0)],
+            true,
+        );
         let (end, _) = ring.at_distance(ring.length()).unwrap();
         assert!(end.distance(Vec3::ZERO) < 1e-3);
     }
@@ -320,13 +347,25 @@ mod tests {
         let (min_z, max_z) = road
             .vertices
             .iter()
-            .fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v.position[2]), b.max(v.position[2])));
+            .fold((f32::MAX, f32::MIN), |(a, b), v| {
+                (a.min(v.position[2]), b.max(v.position[2]))
+            });
         assert!((max_z - min_z - 4.0).abs() < 1e-3, "4 m wide");
-        assert!(road.vertices.iter().all(|v| v.normal[1] > 0.99), "facing up");
+        assert!(
+            road.vertices.iter().all(|v| v.normal[1] > 0.99),
+            "facing up"
+        );
         let pipe = tube(&straight(), 0.5, 8, 0.0).unwrap();
-        assert!(pipe.vertices.iter().all(|v| (Vec3::new(0.0, v.position[1], v.position[2]).length() - 0.5).abs() < 1e-3));
+        assert!(pipe
+            .vertices
+            .iter()
+            .all(|v| (Vec3::new(0.0, v.position[1], v.position[2]).length() - 0.5).abs() < 1e-3));
         let cable = tube(&straight(), 0.05, 6, 1.0).unwrap();
-        let lowest = cable.vertices.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min);
+        let lowest = cable
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MAX, f32::min);
         assert!(lowest < -0.9, "hangs down in the middle");
         // A fence post every 2.5 m, both ends included, facing along +X.
         let posts = instance_places(&straight(), 2.5, true);
@@ -338,7 +377,10 @@ mod tests {
 
     #[test]
     fn points_are_inserted_where_the_curve_is_nearest() {
-        let spline = Spline::new(vec![Vec3::ZERO, Vec3::X * 10.0, Vec3::new(10.0, 0.0, 10.0)], false);
+        let spline = Spline::new(
+            vec![Vec3::ZERO, Vec3::X * 10.0, Vec3::new(10.0, 0.0, 10.0)],
+            false,
+        );
         let (segment, t) = spline.nearest_segment(Vec3::new(10.5, 0.0, 6.0)).unwrap();
         assert_eq!(segment, 1);
         assert!(t > 0.4 && t < 0.8, "{t}");

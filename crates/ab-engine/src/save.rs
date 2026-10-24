@@ -282,10 +282,11 @@ fn is_reserved_name(name: &str) -> bool {
     match upper.as_str() {
         "CON" | "PRN" | "AUX" | "NUL" => true,
         _ => {
-            let (prefix, digit) = upper.split_at(upper.len().min(3));
-            matches!(prefix, "COM" | "LPT")
-                && digit.len() == 1
-                && matches!(digit.as_bytes()[0], b'1'..=b'9')
+            // By characters: a title in Cyrillic or Greek has no byte boundary at 3.
+            let mut chars = upper.chars();
+            let prefix: String = chars.by_ref().take(3).collect();
+            let digit: Vec<char> = chars.collect();
+            matches!(prefix.as_str(), "COM" | "LPT") && matches!(digit.as_slice(), ['1'..='9'])
         }
     }
 }
@@ -355,7 +356,9 @@ mod tests {
         ));
         assert!(saves.delete("slot1").unwrap());
         assert!(!saves.delete("slot1").unwrap());
-        assert!(!dir.join(".slot1.json.tmp").exists());
+        assert!(!dir
+            .join(format!(".slot1.json.{}.tmp", std::process::id()))
+            .exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -455,7 +458,18 @@ mod tests {
         for name in ["nul.json", "CON.txt", "aux ", "com1.tar.gz"] {
             assert!(is_reserved_name(name), "{name}");
         }
-        for name in ["console", "com", "com0", "com10", "lpt", "null", "slot1"] {
+        for name in [
+            "console",
+            "com",
+            "com0",
+            "com10",
+            "lpt",
+            "null",
+            "slot1",
+            "Игра",
+            "ÄÖÜ",
+            "เกม",
+        ] {
             assert!(!is_reserved_name(name), "{name}");
         }
     }

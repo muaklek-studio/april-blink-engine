@@ -46,8 +46,8 @@ mod profiler;
 pub mod ragdoll;
 pub mod save;
 pub mod scene_file;
-pub mod spline;
 pub mod script_host;
+pub mod spline;
 pub mod trace;
 pub mod tween;
 

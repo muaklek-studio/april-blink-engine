@@ -51,6 +51,10 @@ const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/";
 const STATE_FILE: &str = "asset-sync.txt";
 const STATE_HEADER: &str = "# April Blink asset sync v1: hash size modified path";
 const CONFLICTS_DIR: &str = "conflicts";
+/// Under the data folder: asset files a sync removed or replaced, kept in case.
+const TRASH_DIR: &str = "trash";
+/// Under the data folder: held during a sync, so the editor and an export never sync at once.
+const LOCK_FILE: &str = "asset-sync.lock";
 
 /// Extensions (lowercase) of the assets kept packed rather than as files in git.
 pub const PACKED_EXTENSIONS: &[&str] = &[
@@ -179,7 +183,10 @@ impl State {
         let mut text = String::from(STATE_HEADER);
         text.push('\n');
         for (file, r) in &self.files {
-            text.push_str(&format!("{:016x} {} {} {file}\n", r.hash, r.size, r.modified));
+            text.push_str(&format!(
+                "{:016x} {} {} {file}\n",
+                r.hash, r.size, r.modified
+            ));
         }
         write_replacing(path, text.as_bytes())
     }
@@ -266,14 +273,20 @@ fn pack_files(pack_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut packs, mut pointers) = (Vec::new(), Vec::new());
     let mut stack = vec![pack_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if dir == pack_dir && err.kind() == std::io::ErrorKind::NotFound => continue,
+            // A folder skipped would count its packs as deleted, and their assets with them.
+            Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
         };
         for entry in entries {
             let path = entry?.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == ab_vfs::PACK_EXTENSION) {
+            } else if path
+                .extension()
+                .is_some_and(|e| e == ab_vfs::PACK_EXTENSION)
+            {
                 if is_lfs_pointer(&path) {
                     pointers.push(path);
                 } else {
@@ -309,12 +322,40 @@ fn packed(packs: &[(PathBuf, Pack)]) -> BTreeMap<String, (u64, usize)> {
 
 /// Writes `path` through a temporary file, so it is the old file or the new one, never
 /// half of either.
+/// Whether `path` (from a pack) stays inside the folder it is joined to: plain names only,
+/// no `..`, roots or drive prefixes (`C:` would replace the base path on Windows).
+fn is_safe_relative(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(':')
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Moves asset `path` into the data folder's trash (replacing an older copy there): a
+/// sync never destroys a file it cannot get back.
+fn trash(data: &Path, assets: &Path, path: &str) -> Result<()> {
+    let file = assets.join(path);
+    let kept = data.join(TRASH_DIR).join(path);
+    if let Some(parent) = kept.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(&kept);
+    if std::fs::rename(&file, &kept).is_err() {
+        // Another volume: copy, then remove.
+        std::fs::copy(&file, &kept).with_context(|| format!("keeping {}", file.display()))?;
+        std::fs::remove_file(&file).with_context(|| format!("removing {}", file.display()))?;
+    }
+    Ok(())
+}
+
 fn write_replacing(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".partial");
+    // One temporary per process: two writers never share it.
+    name.push(format!(".{}.partial", std::process::id()));
     let temporary = path.with_file_name(name);
     std::fs::write(&temporary, bytes)
         .with_context(|| format!("writing {}", temporary.display()))?;
@@ -343,9 +384,22 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
     let assets = &project.assets;
     let pack_dir = project.pack_dir();
     let data = project.data_dir();
+    // And one at a time between processes (`ab-editor --export` syncs too).
+    std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
+    let lock = std::fs::File::create(data.join(LOCK_FILE))
+        .with_context(|| format!("creating {}", data.join(LOCK_FILE).display()))?;
+    lock.lock().context("waiting for another asset sync")?;
     let state_path = data.join(STATE_FILE);
     let base = State::read(&state_path);
     let mut report = SyncReport::default();
+    if !assets.is_dir() && !base.files.is_empty() {
+        // A renamed or mistyped assets folder is not "every asset deleted".
+        anyhow::bail!(
+            "the assets folder {} is missing: {} assets were there at the last sync",
+            assets.display(),
+            base.files.len()
+        );
+    }
 
     let (mut files, mut pointers) = pack_files(&pack_dir)?;
     if !pointers.is_empty() && lfs_available() {
@@ -378,6 +432,9 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
 
     // From the packs: what changed there and not here.
     for (path, &(hash, index)) in &in_packs {
+        if !is_safe_relative(path) {
+            anyhow::bail!("a packed asset has an unsafe path: {path}");
+        }
         let here = local.get(path).map(|r| r.hash);
         let before = base.files.get(path).map(|r| r.hash);
         let take = match (here, before) {
@@ -401,6 +458,9 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
         if take {
             let bytes = packs[index].1.read(path)?;
             let file = assets.join(path);
+            if file.exists() {
+                trash(&data, assets, path)?;
+            }
             write_replacing(&file, &bytes)?;
             let metadata = std::fs::metadata(&file)?;
             local.insert(
@@ -420,8 +480,7 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
             continue;
         }
         if local.get(path).is_some_and(|r| r.hash == before.hash) {
-            let file = assets.join(path);
-            std::fs::remove_file(&file).with_context(|| format!("removing {}", file.display()))?;
+            trash(&data, assets, path)?;
             local.remove(path);
             report.removed.push(path.clone());
         }
@@ -429,6 +488,8 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
 
     // To the packs: every asset whose pack does not hold it as it is now.
     let mut kept: BTreeSet<PathBuf> = BTreeSet::new();
+    // Written once the open packs are dropped (Windows cannot replace a mapped file).
+    let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let current: BTreeMap<&Path, Vec<(&str, u64)>> = packs
         .iter()
         .map(|(file, pack)| {
@@ -454,7 +515,7 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
         writer
             .write_to(&mut packed)
             .with_context(|| format!("packing {path}"))?;
-        write_replacing(&file, &packed)?;
+        writes.push((file.clone(), packed));
         kept.insert(file);
         report.packed.push(path.clone());
     }
@@ -467,6 +528,9 @@ pub fn sync(project: &Project) -> Result<SyncReport> {
         .collect();
     drop(current);
     drop(packs);
+    for (file, packed) in writes {
+        write_replacing(&file, &packed)?;
+    }
     for path in stale {
         std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         report.dropped.push(relative(&pack_dir, &path));
@@ -593,6 +657,7 @@ pub fn gitignore_block(project: &Project) -> String {
         BLOCK_START.to_owned(),
         "# Build output, and the editor's caches, logs and backups.".to_owned(),
         "/target/".to_owned(),
+        "/dist/".to_owned(),
         format!("/{DATA_DIR}/"),
         "*.partial".to_owned(),
         ".DS_Store".to_owned(),
@@ -726,7 +791,10 @@ mod tests {
         write(&p, "models/props/barrel.png", b"png bytes");
         write(&p, "scenes/level.abscene", b"[[node]]");
         let report = sync(&p).unwrap();
-        assert_eq!(report.packed, ["models/crate.glb", "models/props/barrel.png"]);
+        assert_eq!(
+            report.packed,
+            ["models/crate.glb", "models/props/barrel.png"]
+        );
         assert_eq!(report.files, 2, "the scene stays a text file in git");
         let crate_pack = Pack::open(&p.pack_dir().join("models/crate.glb.abp")).unwrap();
         assert_eq!(
@@ -821,6 +889,49 @@ mod tests {
     }
 
     #[test]
+    fn removed_and_replaced_files_are_kept_in_the_trash() {
+        let mine = project("trash-mine");
+        write(&mine, "models/crate.glb", b"crate v1");
+        write(&mine, "sounds/hit.wav", b"hit v1");
+        sync(&mine).unwrap();
+        // The packs go back to having the sound only (a discard, or a teammate's delete).
+        std::fs::remove_file(mine.pack_dir().join("models/crate.glb.abp")).unwrap();
+        let report = sync(&mine).unwrap();
+        assert_eq!(report.removed, ["models/crate.glb"]);
+        assert_eq!(
+            std::fs::read(mine.data_dir().join("trash/models/crate.glb")).unwrap(),
+            b"crate v1"
+        );
+        std::fs::remove_dir_all(&mine.root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_assets_folder_is_an_error_not_a_mass_delete() {
+        let mine = project("missing-assets");
+        write(&mine, "models/crate.glb", b"crate v1");
+        sync(&mine).unwrap();
+        std::fs::rename(&mine.assets, mine.root.join("assets-moved")).unwrap();
+        assert!(sync(&mine).is_err());
+        assert!(mine.pack_dir().join("models/crate.glb.abp").is_file());
+        std::fs::remove_dir_all(&mine.root).unwrap();
+    }
+
+    #[test]
+    fn packed_paths_stay_inside_the_assets() {
+        assert!(is_safe_relative("models/crate.glb"));
+        for bad in [
+            "",
+            "../x.png",
+            "/etc/x.png",
+            "C:/x.png",
+            "C:x.png",
+            "a/../../b.png",
+        ] {
+            assert!(!is_safe_relative(bad), "{bad}");
+        }
+    }
+
+    #[test]
     fn local_edits_are_never_overwritten() {
         let mine = project("edit-mine");
         write(&mine, "models/crate.glb", b"crate v1");
@@ -872,7 +983,10 @@ mod tests {
         assert!(!ignore.contains("/old\n") && ignore.ends_with("/after\n"));
         let attributes = std::fs::read_to_string(p.root.join(".gitattributes")).unwrap();
         assert!(attributes.contains("/packed-assets/** filter=lfs diff=lfs merge=lfs -text"));
-        let plain = Project { lfs: false, ..p.clone() };
+        let plain = Project {
+            lfs: false,
+            ..p.clone()
+        };
         assert!(gitattributes_block(&plain).contains("/packed-assets/** binary -delta"));
         std::fs::remove_dir_all(&p.root).unwrap();
     }

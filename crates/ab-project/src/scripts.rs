@@ -55,6 +55,8 @@ impl ScriptBuild {
         if profile == Profile::Release {
             command.arg("--release");
         }
+        // Cancel stops rustc and the build scripts too, not cargo alone.
+        process::own_group(&mut command);
         let mut child = command
             .spawn()
             .context("cannot run cargo: is Rust installed (https://rustup.rs)?")?;
@@ -123,8 +125,7 @@ impl ScriptBuild {
     }
 
     pub fn cancel(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        process::kill_tree(&mut self.child);
     }
 }
 

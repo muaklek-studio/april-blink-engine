@@ -190,7 +190,11 @@ fn font() -> FontId {
 
 /// The counts as a header shows them: `+12 −3`.
 pub fn counts(ui: &mut egui::Ui, added: usize, removed: usize) {
-    ui.label(RichText::new(format!("+{added}")).monospace().color(theme::PLAY));
+    ui.label(
+        RichText::new(format!("+{added}"))
+            .monospace()
+            .color(theme::PLAY),
+    );
     ui.label(
         RichText::new(format!("−{removed}"))
             .monospace()
@@ -266,9 +270,18 @@ fn gutter_width(largest: u32) -> f32 {
 }
 
 /// Shows `diff` in `layout`, filling the space given.
-pub fn show(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, diff: &Diff, layout: Layout) {
+pub fn show(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    diff: &Diff,
+    layout: Layout,
+) {
     if diff.binary {
-        crate::panels::empty_hint(ui, egui_phosphor::regular::FILE, "Binary file: no line changes to show");
+        crate::panels::empty_hint(
+            ui,
+            egui_phosphor::regular::FILE,
+            "Binary file: no line changes to show",
+        );
         return;
     }
     if diff.lines.iter().all(|l| matches!(l.kind, Kind::Meta)) {
@@ -290,7 +303,12 @@ pub fn show(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, diff:
     let row_height = ui.fonts_mut(|f| f.row_height(&font())) + 3.0;
     match layout {
         Layout::Unified => {
-            let longest = diff.lines.iter().map(|l| l.text.chars().count()).max().unwrap_or(0);
+            let longest = diff
+                .lines
+                .iter()
+                .map(|l| l.text.chars().count())
+                .max()
+                .unwrap_or(0);
             let width = (longest as f32 * 7.6 + gutter * 2.0 + 40.0).max(ui.available_width());
             egui::ScrollArea::both()
                 .id_salt(("diff", &id))
@@ -336,7 +354,9 @@ pub fn show(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, diff:
                             Vec2::new(half, row_height),
                         );
                         match (left, right) {
-                            (Some(l), _) if matches!(l.kind, Kind::Hunk | Kind::Meta | Kind::Note) => {
+                            (Some(l), _)
+                                if matches!(l.kind, Kind::Hunk | Kind::Meta | Kind::Note) =>
+                            {
                                 paint_line(ui, rect, l, None, gutter);
                             }
                             _ => {
@@ -420,7 +440,10 @@ mod tests {
         assert_eq!((diff.added, diff.removed), (2, 1));
         assert!(!diff.binary);
         let context = &diff.lines[4];
-        assert_eq!((context.kind, context.old, context.new), (Kind::Context, Some(3), Some(3)));
+        assert_eq!(
+            (context.kind, context.old, context.new),
+            (Kind::Context, Some(3), Some(3))
+        );
         let removed = diff.lines.iter().find(|l| l.kind == Kind::Removed).unwrap();
         assert_eq!(removed.old, Some(4));
         let last = diff.lines.last().unwrap();
@@ -439,7 +462,10 @@ mod tests {
         assert_eq!(&removed.text[removed.emphasis.clone().unwrap()], "4.0");
         assert_eq!(&added.text[added.emphasis.clone().unwrap()], "6.5");
         // The second added line has no partner: whole-line change.
-        assert_eq!(diff.lines.iter().filter(|l| l.emphasis.is_some()).count(), 2);
+        assert_eq!(
+            diff.lines.iter().filter(|l| l.emphasis.is_some()).count(),
+            2
+        );
         // Lines with nothing in common are not "partly" changed.
         assert_eq!(changed_parts("abc def", "xyz uvw"), None);
         // Non-ASCII text stays on character boundaries.
@@ -454,12 +480,18 @@ mod tests {
         let rows = side_by_side(&diff.lines);
         let changed: Vec<_> = rows
             .iter()
-            .filter(|(l, r)| l.is_some_and(|l| l.kind == Kind::Removed) || r.is_some_and(|r| r.kind == Kind::Added))
+            .filter(|(l, r)| {
+                l.is_some_and(|l| l.kind == Kind::Removed)
+                    || r.is_some_and(|r| r.kind == Kind::Added)
+            })
             .collect();
         assert_eq!(changed.len(), 2);
         assert_eq!(changed[0].0.unwrap().text, "speed = 4.0");
         assert_eq!(changed[0].1.unwrap().text, "speed = 6.5");
-        assert!(changed[1].0.is_none(), "an added line with no removed partner");
+        assert!(
+            changed[1].0.is_none(),
+            "an added line with no removed partner"
+        );
     }
 
     #[test]

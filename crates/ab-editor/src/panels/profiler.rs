@@ -1,5 +1,6 @@
 //! Frame-time graph and tables of the engine's sections, systems and scripts.
 
+use crate::i18n::{t, tf};
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::{FrameSample, Profiler};
@@ -9,11 +10,12 @@ use egui_phosphor::regular as icon;
 /// 60 fps budget.
 const BUDGET_MS: f32 = 1000.0 / 60.0;
 
+/// (text key, colour) of each part of a frame.
 const SERIES: [(&str, Color32); 4] = [
-    ("Update", Color32::from_rgb(90, 150, 255)),
-    ("Physics", Color32::from_rgb(255, 150, 60)),
-    ("Scripts", Color32::from_rgb(90, 210, 130)),
-    ("Render", Color32::from_rgb(190, 130, 255)),
+    ("profiler.update", Color32::from_rgb(90, 150, 255)),
+    ("profiler.physics", Color32::from_rgb(255, 150, 60)),
+    ("profiler.scripts", Color32::from_rgb(90, 210, 130)),
+    ("profiler.render", Color32::from_rgb(190, 130, 255)),
 ];
 
 fn series(sample: &FrameSample, index: usize) -> f32 {
@@ -39,16 +41,16 @@ impl ProfilerPanel {
         let stats = profiler.frame_statistics();
         ui.horizontal(|ui| {
             let (glyph, tip) = if profiler.paused {
-                (icon::PLAY, "Resume recording")
+                (icon::PLAY, t("profiler.resume"))
             } else {
-                (icon::PAUSE, "Freeze the numbers")
+                (icon::PAUSE, t("profiler.freeze"))
             };
             if ui.button(glyph).on_hover_text(tip).clicked() {
                 profiler.paused = !profiler.paused;
             }
             if ui
                 .button(icon::ARROW_COUNTER_CLOCKWISE)
-                .on_hover_text("Clear all measurements")
+                .on_hover_text(t("profiler.clear"))
                 .clicked()
             {
                 profiler.reset();
@@ -67,9 +69,13 @@ impl ProfilerPanel {
                     .color(fps_color),
             );
             ui.label(
-                RichText::new(format!(
-                    "{:.2} ms  (min {:.1} · max {:.1})",
-                    stats.average_ms, stats.min_ms, stats.max_ms
+                RichText::new(tf(
+                    "profiler.frame_stats",
+                    &[
+                        ("average", &format!("{:.2}", stats.average_ms)),
+                        ("min", &format!("{:.1}", stats.min_ms)),
+                        ("max", &format!("{:.1}", stats.max_ms)),
+                    ],
                 ))
                 .monospace()
                 .color(theme::TEXT_DIM),
@@ -77,7 +83,11 @@ impl ProfilerPanel {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text(format!("{}  Filter", icon::MAGNIFYING_GLASS))
+                        .hint_text(format!(
+                            "{}  {}",
+                            icon::MAGNIFYING_GLASS,
+                            t("console.filter")
+                        ))
                         .desired_width(150.0),
                 );
             });
@@ -85,11 +95,8 @@ impl ProfilerPanel {
         if !editor.is_playing() && profiler.history().is_empty() {
             ui.add_space(6.0);
             ui.label(
-                RichText::new(format!(
-                    "{}  Press Play (F5) to profile the game. Scripts, systems and physics are measured every frame.",
-                    icon::INFO
-                ))
-                .color(theme::TEXT_DIM),
+                RichText::new(format!("{}  {}", icon::INFO, t("profiler.idle")))
+                    .color(theme::TEXT_DIM),
             );
         }
         ui.add_space(2.0);
@@ -108,13 +115,14 @@ impl ProfilerPanel {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // (id, text key, icon).
                 let groups = [
-                    ("Frame", icon::TIMER),
-                    ("Scripts", icon::SCROLL),
-                    ("Systems", icon::GEAR_SIX),
-                    ("Custom", icon::TAG),
+                    ("Frame", "profiler.frame", icon::TIMER),
+                    ("Scripts", "profiler.scripts", icon::SCROLL),
+                    ("Systems", "profiler.systems", icon::GEAR_SIX),
+                    ("Custom", "profiler.custom", icon::TAG),
                 ];
-                for (index, (title, glyph)) in groups.into_iter().enumerate() {
+                for (index, (id, key, glyph)) in groups.into_iter().enumerate() {
                     let mut rows: Vec<_> = profiler
                         .entries()
                         .iter()
@@ -126,8 +134,8 @@ impl ProfilerPanel {
                         continue;
                     }
                     rows.sort_by(|a, b| b.average_ms.total_cmp(&a.average_ms));
-                    super::section(ui, &format!("profile_{title}"), glyph, title, |ui| {
-                        table(ui, title, &rows);
+                    super::section(ui, &format!("profile_{id}"), glyph, &t(key), |ui| {
+                        table(ui, id, &rows);
                     });
                 }
             });
@@ -154,15 +162,15 @@ fn table(ui: &mut egui::Ui, id: &str, rows: &[ab_engine::ProfileEntry]) {
         .striped(true)
         .show(ui, |ui| {
             for (label, align) in [
-                ("Name", egui::Align::Min),
-                ("Avg ms", egui::Align::Max),
-                ("Peak ms", egui::Align::Max),
-                ("Share of 16.7 ms", egui::Align::Min),
+                ("profiler.name", egui::Align::Min),
+                ("profiler.average", egui::Align::Max),
+                ("profiler.peak", egui::Align::Max),
+                ("profiler.share", egui::Align::Min),
             ] {
                 ui.with_layout(
                     egui::Layout::left_to_right(egui::Align::Center).with_main_align(align),
                     |ui| {
-                        ui.label(RichText::new(label).small().color(theme::TEXT_DIM));
+                        ui.label(RichText::new(t(label)).small().color(theme::TEXT_DIM));
                     },
                 );
             }
@@ -271,17 +279,14 @@ fn graph(ui: &mut egui::Ui, samples: &[FrameSample]) {
 
     // Legend.
     let mut at = rect.left_top() + Vec2::new(8.0, 6.0);
-    for (name, color) in std::iter::once(("Frame", Color32::from_gray(150))).chain(SERIES) {
+    for (key, color) in std::iter::once(("profiler.frame", Color32::from_gray(150))).chain(SERIES) {
         painter.rect_filled(
             Rect::from_min_size(at + Vec2::new(0.0, 3.0), Vec2::splat(7.0)),
             1.0,
             color,
         );
-        let galley = painter.layout_no_wrap(
-            name.into(),
-            egui::FontId::proportional(10.5),
-            theme::TEXT_DIM,
-        );
+        let galley =
+            painter.layout_no_wrap(t(key), egui::FontId::proportional(10.5), theme::TEXT_DIM);
         let width = galley.size().x;
         painter.galley(at + Vec2::new(10.0, 0.0), galley, Color32::WHITE);
         at.x += width + 22.0;
@@ -298,13 +303,16 @@ fn graph(ui: &mut egui::Ui, samples: &[FrameSample]) {
                 rect.y_range(),
                 Stroke::new(1.0_f32, Color32::from_white_alpha(60)),
             );
-            let text = format!(
-                "frame {:.2} ms\nupdate {:.2} · physics {:.2}\nscripts {:.2} · render {:.2}",
-                sample.delta_ms,
-                sample.update_ms,
-                sample.physics_ms,
-                sample.scripts_ms,
-                sample.render_ms
+            let ms = |v: f32| format!("{v:.2}");
+            let text = tf(
+                "profiler.readout",
+                &[
+                    ("frame", &ms(sample.delta_ms)),
+                    ("update", &ms(sample.update_ms)),
+                    ("physics", &ms(sample.physics_ms)),
+                    ("scripts", &ms(sample.scripts_ms)),
+                    ("render", &ms(sample.render_ms)),
+                ],
             );
             response.on_hover_text_at_pointer(RichText::new(text).monospace());
         }

@@ -200,20 +200,20 @@ fn image_of(open: &Open) -> Option<egui::TextureId> {
 impl AssetViewer {
     /// Shows `path` (a project asset of `kind`): raises its window when it is open, else
     /// shows it in the preview window (the last unpinned one), else in a new window.
-    pub fn open(&mut self, project: &Path, path: &str, kind: AssetKind) {
+    /// Returns false when every window is pinned and no more can open (pinned ones stay).
+    pub fn open(&mut self, project: &Path, path: &str, kind: AssetKind) -> bool {
         if let Some(window) = self.windows.iter().find(|w| w.open.path == path) {
             self.focus.push(window.slot);
-            return;
+            return true;
         }
         if let Some(window) = self.windows.iter_mut().rev().find(|w| !w.pinned) {
             self.freed.extend(image_of(&window.open));
             window.open = opened(project, path, kind);
             self.focus.push(window.slot);
-            return;
+            return true;
         }
         if self.windows.len() >= MAX_WINDOWS {
-            let oldest = self.windows.remove(0);
-            self.freed.extend(image_of(&oldest.open));
+            return false;
         }
         let slot = (0..)
             .find(|slot| self.windows.iter().all(|w| w.slot != *slot))
@@ -224,6 +224,7 @@ impl AssetViewer {
             previewer: None,
             pinned: false,
         });
+        true
     }
 
     /// Whether any asset window is open.

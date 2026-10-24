@@ -17,6 +17,7 @@
 // editor before its window opens is shown in a message box otherwise.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod app;
 mod asset_sync;
 mod asset_viewer;
@@ -28,6 +29,7 @@ mod create;
 mod dialogs;
 mod diff_view;
 mod export;
+mod features;
 mod fonts;
 mod git;
 mod git_window;
@@ -78,6 +80,9 @@ pub struct Options {
     pub system_titlebar: bool,
     /// Save a PNG of the window after start-up and exit (documentation, CI).
     pub screenshot: Option<PathBuf>,
+    /// With `--screenshot`: tool windows are drawn inside the main window, so the grab shows
+    /// them (pair with `--show window:<tool>`).
+    pub screenshot_window: Option<String>,
     /// The editor's language for this run (`en`, `th`), over the saved preference.
     pub language: Option<String>,
     /// The asset folder the browser starts in (screenshots).
@@ -221,6 +226,7 @@ fn parse() -> anyhow::Result<Options> {
             }
             "--select" => options.select = Some(value()?),
             "--screenshot" => options.screenshot = Some(value()?.into()),
+            "--screenshot-window" => options.screenshot_window = Some(value()?),
             "--language" => options.language = Some(value()?),
             "--browse" => options.browse = Some(value()?),
             "--view" => options.view = Some(value()?),
@@ -228,7 +234,7 @@ fn parse() -> anyhow::Result<Options> {
                 println!(
                     "usage: ab-editor [--project <asset dir>] [--scene <scene.toml>] \
                      [--scripts <library>] [--select <node path,...>] [--play] [--physics-view] \
-                     [--show <panel|window:<tool>,...>] [--system-titlebar] [--screenshot <file.png>] \
+                     [--show <panel|window:<tool>,...>] [--system-titlebar] [--screenshot <file.png>] [--screenshot-window <tool>] \
                      [--language <en|th|…>] \
                      [--hold-loading]\n\n\
                      Without --project the project manager opens after the system check."

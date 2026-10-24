@@ -1,6 +1,7 @@
 //! Engine and game log, filterable by level and text.
 
 use crate::console::{LogBuffer, LogLine};
+use crate::i18n::t;
 use crate::theme;
 use eframe::egui::{self, Color32, RichText};
 use egui_phosphor::regular as icon;
@@ -54,8 +55,8 @@ impl ConsolePanel {
         let (errors, warnings) = self.counts();
         ui.horizontal(|ui| {
             if ui
-                .button(format!("{}  Clear", icon::TRASH))
-                .on_hover_text("Clear the console")
+                .button(format!("{}  {}", icon::TRASH, t("console.clear")))
+                .on_hover_text(t("console.clear_hint"))
                 .clicked()
             {
                 self.logs.clear();
@@ -65,24 +66,34 @@ impl ConsolePanel {
                 &mut self.errors,
                 RichText::new(format!("{}  {errors}", icon::X_CIRCLE)).color(theme::ERROR),
             )
-            .on_hover_text("Errors");
+            .on_hover_text(t("console.errors"));
             ui.toggle_value(
                 &mut self.warnings,
                 RichText::new(format!("{}  {warnings}", icon::WARNING)).color(theme::WARN),
             )
-            .on_hover_text("Warnings");
-            ui.toggle_value(&mut self.info, format!("{}  Info", icon::INFO));
-            ui.toggle_value(&mut self.debug, format!("{}  Debug", icon::BUG));
+            .on_hover_text(t("console.warnings"));
+            ui.toggle_value(
+                &mut self.info,
+                format!("{}  {}", icon::INFO, t("console.info")),
+            );
+            ui.toggle_value(
+                &mut self.debug,
+                format!("{}  {}", icon::BUG, t("console.debug")),
+            );
             ui.separator();
             ui.toggle_value(
                 &mut self.follow,
-                format!("{}  Follow", icon::ARROW_LINE_DOWN),
+                format!("{}  {}", icon::ARROW_LINE_DOWN, t("console.follow")),
             )
-            .on_hover_text("Keep the newest message in view");
+            .on_hover_text(t("console.follow_hint"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text(format!("{}  Filter", icon::MAGNIFYING_GLASS))
+                        .hint_text(format!(
+                            "{}  {}",
+                            icon::MAGNIFYING_GLASS,
+                            t("console.filter")
+                        ))
                         .desired_width(240.0),
                 );
             });
@@ -130,7 +141,10 @@ impl ConsolePanel {
                             .sense(egui::Sense::click()),
                         );
                         response.on_hover_text(&line.target).context_menu(|ui| {
-                            if ui.button(format!("{}  Copy", icon::COPY)).clicked() {
+                            if ui
+                                .button(format!("{}  {}", icon::COPY, t("command.copy")))
+                                .clicked()
+                            {
                                 ui.ctx().copy_text(line.message.clone());
                                 ui.close();
                             }

@@ -474,10 +474,10 @@ fn parse_decorations(text: &str, remotes: &[String]) -> Vec<RefLabel> {
                 (tag, RefKind::Tag)
             } else if d.ends_with("/HEAD") {
                 return None;
-            } else if remotes
-                .iter()
-                .any(|r| d.strip_prefix(r.as_str()).is_some_and(|rest| rest.starts_with('/')))
-            {
+            } else if remotes.iter().any(|r| {
+                d.strip_prefix(r.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            }) {
                 (d, RefKind::Remote)
             } else {
                 (d, RefKind::Local)
@@ -643,7 +643,10 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// What `hash` is compared with to show its changes: its first parent, or nothing.
 fn base_of(root: &Path, hash: &str) -> String {
-    match git(root, &["rev-parse", "--verify", "--quiet", &format!("{hash}^1")]) {
+    match git(
+        root,
+        &["rev-parse", "--verify", "--quiet", &format!("{hash}^1")],
+    ) {
         Ok(parent) => parent.trim().to_owned(),
         Err(_) => EMPTY_TREE.to_owned(),
     }
@@ -748,7 +751,11 @@ pub fn read_commit(root: &Path, hash: &str) -> Result<CommitDetail, GitError> {
 }
 
 /// The commit graph: up to `limit` commits of every branch and tag, newest first.
-pub fn read_graph(root: &Path, limit: usize, remotes: &[String]) -> Result<Vec<GraphCommit>, GitError> {
+pub fn read_graph(
+    root: &Path,
+    limit: usize,
+    remotes: &[String],
+) -> Result<Vec<GraphCommit>, GitError> {
     if git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
         return Ok(Vec::new());
     }
@@ -792,6 +799,28 @@ pub fn relative_time(time: i64, now: i64) -> String {
 /// Output of a failed git command (its error message).
 pub type GitError = String;
 
+/// Whether git's config sets `core.sshCommand` for `dir` (asked once per folder).
+fn has_ssh_command(dir: &Path) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if let Some(&set) = known.lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
+        return set;
+    }
+    let set = ab_project::process::command("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["config", "--get", "core.sshCommand"])
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty());
+    known
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.to_path_buf(), set);
+    set
+}
+
 /// Runs `git -C dir args…` without any prompt and returns its standard output.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
     let mut command = ab_project::process::command("git");
@@ -809,16 +838,33 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
         .env("GIT_LITERAL_PATHSPECS", "1")
         // Stable, parseable messages.
         .env("LC_ALL", "C");
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+    // Never wait on a passphrase prompt nobody sees; but the user's own SSH setup
+    // (`GIT_SSH`, `core.sshCommand`) wins, as GIT_SSH_COMMAND would override it.
+    if std::env::var_os("GIT_SSH_COMMAND").is_none()
+        && std::env::var_os("GIT_SSH").is_none()
+        && !has_ssh_command(dir)
+    {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
-    let output = command.output().map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            "git is not installed (or not on PATH)".to_owned()
-        } else {
-            format!("cannot run git: {err}")
-        }
-    })?;
+    // The git worker runs one command at a time: one that hangs (an unreachable remote)
+    // must not hold up every refresh and commit behind it.
+    let timeout = match args.first().copied() {
+        Some("fetch") => Duration::from_secs(120),
+        Some("push" | "pull" | "lfs" | "clone") => Duration::from_secs(30 * 60),
+        _ => Duration::from_secs(5 * 60),
+    };
+    let output =
+        ab_project::process::output_with_timeout(&mut command, timeout).map_err(|err| match err
+            .kind()
+        {
+            std::io::ErrorKind::NotFound => "git is not installed (or not on PATH)".to_owned(),
+            std::io::ErrorKind::TimedOut => format!(
+                "git {} gave no answer in {} minutes and was stopped (is the remote reachable?)",
+                args.first().unwrap_or(&""),
+                timeout.as_secs().div_ceil(60)
+            ),
+            _ => format!("cannot run git: {err}"),
+        })?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -879,17 +925,18 @@ pub fn read_status(root: &Path) -> Result<RepoStatus, GitError> {
     let remotes = git(root, &["remote"])?.lines().map(str::to_owned).collect();
     let stashes = parse_stashes(&git(root, &["stash", "list", "--format=%gd%x1f%s"])?);
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
-    let in_progress = if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
-        Some(InProgress::Rebase)
-    } else if git_dir.join("MERGE_HEAD").is_file() {
-        Some(InProgress::Merge)
-    } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
-        Some(InProgress::CherryPick)
-    } else if git_dir.join("REVERT_HEAD").is_file() {
-        Some(InProgress::Revert)
-    } else {
-        None
-    };
+    let in_progress =
+        if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+            Some(InProgress::Rebase)
+        } else if git_dir.join("MERGE_HEAD").is_file() {
+            Some(InProgress::Merge)
+        } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+            Some(InProgress::CherryPick)
+        } else if git_dir.join("REVERT_HEAD").is_file() {
+            Some(InProgress::Revert)
+        } else {
+            None
+        };
     // No log before the first commit.
     let log = if branch.oid.is_some() {
         parse_log(&git(root, &["log", "-n", "50", "--no-color", LOG_FORMAT])?)
@@ -964,7 +1011,16 @@ pub fn commit_diff(root: &Path, hash: &str, path: &str) -> Result<String, GitErr
     let base = base_of(root, hash);
     let text = git(
         root,
-        &["diff", "--no-color", "--no-ext-diff", "-M", &base, hash, "--", path],
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "-M",
+            &base,
+            hash,
+            "--",
+            path,
+        ],
     )?;
     Ok(truncated(&text))
 }
@@ -1049,7 +1105,7 @@ impl GitOp {
             Self::Stage(_) => "Stage",
             Self::Unstage(_) => "Unstage",
             Self::Discard { .. } => "Discard changes",
-            Self::Commit { .. } => "Commit",
+            Self::Commit { .. } => COMMIT_TITLE,
             Self::Switch(_) => "Switch branch",
             Self::CreateBranch(_) => "Create branch",
             Self::Fetch => "Fetch",
@@ -1162,7 +1218,8 @@ pub fn run(root: Option<&Path>, op: &GitOp) -> Result<String, GitError> {
             }
             if message.is_empty() {
                 // Concluding a merge: git's prepared message ("Merge branch …").
-                let merging = git(root, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
+                let merging =
+                    git(root, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
                 if !*amend && !merging {
                     return Err("Write a commit message first".into());
                 }
@@ -1219,11 +1276,16 @@ pub fn run(root: Option<&Path>, op: &GitOp) -> Result<String, GitError> {
         }
         GitOp::Continue(what) => {
             let command = match what {
-                InProgress::Merge => return run(Some(root), &GitOp::Commit {
-                    message: String::new(),
-                    amend: false,
-                    stage: Vec::new(),
-                }),
+                InProgress::Merge => {
+                    return run(
+                        Some(root),
+                        &GitOp::Commit {
+                            message: String::new(),
+                            amend: false,
+                            stage: Vec::new(),
+                        },
+                    )
+                }
                 InProgress::Rebase => "rebase",
                 InProgress::CherryPick => "cherry-pick",
                 InProgress::Revert => "revert",
@@ -1273,7 +1335,10 @@ pub fn run(root: Option<&Path>, op: &GitOp) -> Result<String, GitError> {
             }
         }
         GitOp::StashDrop(index) => {
-            git(root, &["stash", "drop", "--quiet", &format!("stash@{{{index}}}")])?;
+            git(
+                root,
+                &["stash", "drop", "--quiet", &format!("stash@{{{index}}}")],
+            )?;
             Ok("Stash dropped".into())
         }
         GitOp::DeleteBranch { name, force } => {
@@ -1372,7 +1437,12 @@ enum Request {
         staged: bool,
         untracked: bool,
     },
-    Run(GitOp),
+    /// An operation; `chained`: skipped when the operation before it failed (Commit, then
+    /// Push only if the commit was made).
+    Run {
+        op: GitOp,
+        chained: bool,
+    },
     Graph {
         limit: usize,
         key: u64,
@@ -1417,6 +1487,8 @@ pub struct DiffView {
     pub text: Result<String, GitError>,
 }
 
+const COMMIT_TITLE: &str = "Commit";
+
 /// Outcome of a [`GitOp`], for the status line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpResult {
@@ -1457,6 +1529,9 @@ pub struct GitClient {
     last_fetch: Option<Instant>,
     /// A background fetch is running: its success is not reported.
     quiet_fetch: bool,
+    /// Commits answered so far, and whether the last one was made.
+    commits_answered: u64,
+    last_commit_ok: bool,
 }
 
 impl std::fmt::Debug for GitClient {
@@ -1498,6 +1573,8 @@ impl GitClient {
             detail: None,
             last_fetch: None,
             quiet_fetch: false,
+            commits_answered: 0,
+            last_commit_ok: false,
         };
         match spawned {
             Ok(_) => client.refresh(),
@@ -1508,7 +1585,7 @@ impl GitClient {
 
     fn send(&mut self, request: Request) {
         // An operation is answered twice: its result, then the status after it.
-        let replies = if matches!(request, Request::Run(_)) {
+        let replies = if matches!(request, Request::Run { .. }) {
             2
         } else {
             1
@@ -1587,11 +1664,31 @@ impl GitClient {
     }
 
     pub fn run(&mut self, op: GitOp) {
+        self.send_op(op, false);
+    }
+
+    /// Runs `op` after the operation queued before it, only if that one worked.
+    pub fn run_after(&mut self, op: GitOp) {
+        self.send_op(op, true);
+    }
+
+    fn send_op(&mut self, op: GitOp, chained: bool) {
         if op.is_remote() {
             self.remote_op = Some(op.title());
         }
         self.last_refresh = Some(Instant::now());
-        self.send(Request::Run(op));
+        self.send(Request::Run { op, chained });
+    }
+
+    /// Starts a commit; the ticket tells [`GitClient::commit_made`] which answer to wait for.
+    pub fn commit(&mut self, op: GitOp) -> u64 {
+        self.run(op);
+        self.commits_answered
+    }
+
+    /// For a commit started with `ticket`: `None` while it runs, then whether it was made.
+    pub fn commit_made(&self, ticket: u64) -> Option<bool> {
+        (self.commits_answered > ticket).then_some(self.last_commit_ok)
     }
 
     /// Commands are queued or running.
@@ -1632,7 +1729,8 @@ impl GitClient {
                             self.state = state;
                             self.states = self.status().map(|s| s.states()).unwrap_or_default();
                             // The diff may be stale now: drop it if its file changed state.
-                            let work_tree_diff = self.diff.as_ref().is_some_and(|d| d.commit.is_none());
+                            let work_tree_diff =
+                                self.diff.as_ref().is_some_and(|d| d.commit.is_none());
                             if let (true, Some(diff), Some(status)) =
                                 (work_tree_diff, &self.diff, self.status())
                             {
@@ -1664,6 +1762,10 @@ impl GitClient {
                         Reply::Done(result) => {
                             if self.remote_op == Some(result.title) {
                                 self.remote_op = None;
+                            }
+                            if result.title == COMMIT_TITLE {
+                                self.commits_answered += 1;
+                                self.last_commit_ok = result.result.is_ok();
                             }
                             let quiet = std::mem::take(&mut self.quiet_fetch)
                                 && result.title == GitOp::Fetch.title()
@@ -1721,6 +1823,8 @@ fn worker(
         }
     };
     let mut root: Option<PathBuf> = None;
+    // Whether the last operation failed: a chained one after it is skipped.
+    let mut last_failed = false;
     while let Ok(first) = inbox.recv() {
         // Collapse a burst of refreshes into one read; every request is still answered so
         // the client's in-flight count stays right.
@@ -1760,8 +1864,7 @@ fn worker(
                     }
                     Reply::Graph(match &root {
                         Some(root) => git(root, &["remote"]).and_then(|remotes| {
-                            let remotes: Vec<String> =
-                                remotes.lines().map(str::to_owned).collect();
+                            let remotes: Vec<String> = remotes.lines().map(str::to_owned).collect();
                             let commits = read_graph(root, limit, &remotes)?;
                             let rows = layout_graph(&commits);
                             Ok(Graph {
@@ -1790,23 +1893,39 @@ fn worker(
                         text,
                     })
                 }
-                Request::Run(op) => {
+                Request::Run { op, chained } => {
                     if root.is_none() {
                         root = discover(&dir).ok().flatten();
                     }
-                    let staged = hook(Phase::Before, &op).and_then(|extra| match (&op, root.as_deref()) {
-                        (GitOp::Commit { .. }, Some(root)) if !extra.is_empty() => {
-                            let paths: Vec<String> = extra
-                                .iter()
-                                .map(|p| p.to_string_lossy().into_owned())
-                                .collect();
-                            let mut args = vec!["add", "--all", "--"];
-                            args.extend(paths.iter().map(String::as_str));
-                            git(root, &args)
+                    if chained && last_failed {
+                        let skipped = Reply::Done(OpResult {
+                            title: op.title(),
+                            result: Err("not run: the step before it failed".into()),
+                        });
+                        let state = read(&mut root);
+                        if outbox.send(skipped).is_err()
+                            || outbox.send(Reply::State(state)).is_err()
+                        {
+                            return;
                         }
-                        _ => Ok(String::new()),
-                    });
+                        notify();
+                        continue;
+                    }
+                    let staged =
+                        hook(Phase::Before, &op).and_then(|extra| match (&op, root.as_deref()) {
+                            (GitOp::Commit { .. }, Some(root)) if !extra.is_empty() => {
+                                let paths: Vec<String> = extra
+                                    .iter()
+                                    .map(|p| p.to_string_lossy().into_owned())
+                                    .collect();
+                                let mut args = vec!["add", "--all", "--"];
+                                args.extend(paths.iter().map(String::as_str));
+                                git(root, &args)
+                            }
+                            _ => Ok(String::new()),
+                        });
                     let result = staged.and_then(|_| run(root.as_deref(), &op));
+                    last_failed = result.is_err();
                     if result.is_ok() {
                         // Only an error before an operation matters: after, it is reported
                         // by the hook's owner.
@@ -1941,7 +2060,11 @@ mod tests {
     fn a_straight_history_stays_on_one_lane() {
         let rows = layout_graph(&[commit("c", &["b"]), commit("b", &["a"]), commit("a", &[])]);
         assert!(rows.iter().all(|r| r.lane == 0 && r.width == 1));
-        assert_eq!(rows[2].segments.len(), 1, "the root only receives its child's line");
+        assert_eq!(
+            rows[2].segments.len(),
+            1,
+            "the root only receives its child's line"
+        );
     }
 
     #[test]
@@ -1954,7 +2077,10 @@ mod tests {
             commit("a", &[]),
         ]);
         assert_eq!(rows[0].lane, 0);
-        assert_eq!(rows[0].width, 2, "the merge reaches out to its second parent");
+        assert_eq!(
+            rows[0].width, 2,
+            "the merge reaches out to its second parent"
+        );
         assert_eq!(rows[1].lane, 1, "the feature commit on its own lane");
         assert_eq!(rows[2].lane, 0);
         // The feature's line passes main's commit, then both meet at the fork.
@@ -2018,7 +2144,10 @@ mod tests {
     #[test]
     fn parses_commit_file_lists() {
         let names = parse_name_status("M\0a.txt\0R087\0old.png\0new.png\0A\0b.rs\0");
-        assert_eq!(names[1], ("new.png".into(), Some("old.png".into()), FileState::Renamed));
+        assert_eq!(
+            names[1],
+            ("new.png".into(), Some("old.png".into()), FileState::Renamed)
+        );
         assert_eq!(names[2].2, FileState::Added);
         let counts = parse_numstat("3\t1\ta.txt\0-\t-\t\0old.png\0new.png\0");
         assert_eq!(counts["a.txt"], (Some(3), Some(1)));
@@ -2075,14 +2204,19 @@ mod tests {
         run(Some(&dir), &GitOp::Continue(InProgress::Merge)).unwrap();
         let status = read_status(&dir).unwrap();
         assert_eq!(status.in_progress, None);
-        assert_eq!(std::fs::read_to_string(dir.join("level.txt")).unwrap(), "feature\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("level.txt")).unwrap(),
+            "feature\n"
+        );
 
         // The graph: the merge on top with two parents, the branches labelled.
         let graph = read_graph(&dir, 50, &[]).unwrap();
         assert_eq!(graph.len(), 4);
         assert_eq!(graph[0].parents.len(), 2);
         assert_eq!(graph[0].refs[0].kind, RefKind::Head);
-        assert!(graph.iter().any(|c| c.refs.iter().any(|r| r.name == "feature")));
+        assert!(graph
+            .iter()
+            .any(|c| c.refs.iter().any(|r| r.name == "feature")));
         let rows = layout_graph(&graph);
         assert_eq!(rows[0].width, 2);
         let detail = read_commit(&dir, &graph[0].hash).unwrap();
@@ -2093,7 +2227,10 @@ mod tests {
             (Some(1), Some(1))
         );
         let diff = commit_diff(&dir, &graph[0].hash, "level.txt").unwrap();
-        assert!(diff.contains("-main") && diff.contains("+feature"), "{diff}");
+        assert!(
+            diff.contains("-main") && diff.contains("+feature"),
+            "{diff}"
+        );
 
         // Stash round trip and a tag.
         write("work in progress\n");
@@ -2225,7 +2362,11 @@ mod tests {
             &GitOp::Commit {
                 message: "Levels".into(),
                 amend: false,
-                stage: vec![".gitignore".into(), "level[1].txt".into(), "level1.txt".into()],
+                stage: vec![
+                    ".gitignore".into(),
+                    "level[1].txt".into(),
+                    "level1.txt".into(),
+                ],
             },
         )
         .unwrap();
@@ -2242,8 +2383,14 @@ mod tests {
         )
         .unwrap();
         // As a pattern, `level[1].txt` means `level1.txt`: the wrong file was restored.
-        assert_eq!(std::fs::read_to_string(root.join("level[1].txt")).unwrap(), "a\n");
-        assert_eq!(std::fs::read_to_string(root.join("level1.txt")).unwrap(), "my work\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("level[1].txt")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("level1.txt")).unwrap(),
+            "my work\n"
+        );
         assert!(!root.join("new[1].txt").exists());
         assert!(root.join("new1.txt").exists(), "untracked work kept");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2280,6 +2427,19 @@ mod tests {
         wait(&mut client);
         let diff = client.diff.as_ref().unwrap();
         assert!(diff.text.as_ref().unwrap().contains("+/target"));
+
+        // A commit that fails (nothing to commit, no message) keeps what follows from running.
+        let ticket = client.commit(GitOp::Commit {
+            message: String::new(),
+            amend: false,
+            stage: Vec::new(),
+        });
+        client.run_after(GitOp::Fetch);
+        wait(&mut client);
+        assert_eq!(client.commit_made(ticket), Some(false));
+        let skipped = client.results.pop().unwrap();
+        assert_eq!(skipped.title, "Fetch");
+        assert!(skipped.result.unwrap_err().contains("not run"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

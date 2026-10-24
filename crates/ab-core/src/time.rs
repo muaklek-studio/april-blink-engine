@@ -24,6 +24,8 @@ impl Time {
     /// Largest frame delta fed to gameplay. Longer stalls (debugger breaks, window drags) are
     /// clamped so that a single frame never makes objects jump across the level.
     pub const MAX_DELTA: f32 = 0.25;
+    /// The fastest the game may run (`time_scale`).
+    pub const MAX_SCALE: f32 = 100.0;
 
     pub fn new(fixed_delta: f32) -> Self {
         Self {
@@ -43,7 +45,13 @@ impl Time {
         // `clamp` lets NaN through, and one NaN would poison `elapsed` for good.
         let raw_delta = if raw_delta.is_nan() { 0.0 } else { raw_delta };
         self.unscaled_delta = raw_delta.clamp(0.0, Self::MAX_DELTA);
-        self.delta = self.unscaled_delta * self.time_scale.max(0.0);
+        // A NaN or infinite scale (a script's division by zero) plays at normal speed.
+        let scale = if self.time_scale.is_finite() {
+            self.time_scale.clamp(0.0, Self::MAX_SCALE)
+        } else {
+            1.0
+        };
+        self.delta = self.unscaled_delta * scale;
         self.elapsed += self.delta as f64;
         self.delta
     }

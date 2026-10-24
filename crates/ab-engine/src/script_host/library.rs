@@ -9,8 +9,8 @@ use std::ffi::c_void;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// Library files loaded in this process, and their total size: they are never unloaded, so
@@ -238,14 +238,25 @@ fn staging_copy(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// Where loaded copies go. Clears what earlier runs left (on Windows a loaded copy cannot
-/// be deleted, so they would accumulate).
+/// be deleted, so they would accumulate), but not the folders of other processes copying
+/// a library right now (the editor and a game started together): only folders untouched
+/// for a while.
 fn staging_dir() -> PathBuf {
     use std::sync::OnceLock;
+    use std::time::{Duration, SystemTime};
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let root = std::env::temp_dir().join("april-blink-scripts");
+        let stale = |entry: &std::fs::DirEntry| {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| SystemTime::now().duration_since(t).ok())
+                .is_some_and(|age| age > Duration::from_secs(600))
+        };
         if let Ok(entries) = std::fs::read_dir(&root) {
-            for entry in entries.flatten() {
+            for entry in entries.flatten().filter(stale) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }

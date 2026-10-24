@@ -128,11 +128,7 @@ impl<S: Subscriber> Layer<S> for ConsoleLayer {
             message: format!("{}{}", fields.message, fields.rest),
             time: self.start.elapsed().as_secs_f32(),
         };
-        if let Some(file) = LOG_FILE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-        {
+        if let Some(file) = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             let _ = writeln!(
                 file,
                 "{:10.3} {:5} {}: {}",

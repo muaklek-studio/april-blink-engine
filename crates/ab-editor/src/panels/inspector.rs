@@ -12,16 +12,16 @@ use crate::theme;
 use ab_engine::core::{Color, EulerRot, Quat, Transform3D, Vec3};
 use ab_engine::effects::ParticleSettings;
 use ab_engine::physics::{PhysicsBody3D, PhysicsNodes};
+use ab_engine::scene::script_property;
 use ab_engine::scene::NodeHandle;
+use ab_engine::scene::ScriptPropertyDesc;
 use ab_engine::scene_file::{
     relative_path, AudioDesc, BodyDesc, CameraDesc, CharacterDesc, EnvironmentDesc, JointDesc,
     LightDesc, MaterialDesc, MeshDesc, NodeDesc, ParticlesDesc, RagdollDesc, ShapeDesc, TimerDesc,
 };
+use ab_script_api as ffi;
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
-use ab_engine::scene::script_property;
-use ab_engine::scene::ScriptPropertyDesc;
-use ab_script_api as ffi;
 
 #[derive(Default)]
 pub struct InspectorPanel {
@@ -60,12 +60,26 @@ impl InspectorPanel {
                     .color(theme::class_color(&class)),
             );
             ui.vertical(|ui| {
-                ui.add_enabled(
+                // Typed into a buffer and applied once, on Enter or leaving the field: a
+                // rename per keystroke would trim spaces and number names mid-typing.
+                let id = ui.id().with(("inspector_name", node));
+                let mut text = ui
+                    .data(|d| d.get_temp::<String>(id))
+                    .unwrap_or_else(|| old.name.clone());
+                let response = ui.add_enabled(
                     editable && !override_target && node != editor.scene_root,
-                    egui::TextEdit::singleline(&mut desc.name)
+                    egui::TextEdit::singleline(&mut text)
                         .font(egui::TextStyle::Heading)
                         .desired_width(f32::INFINITY),
                 );
+                if response.has_focus() {
+                    ui.data_mut(|d| d.insert_temp(id, text));
+                } else {
+                    ui.data_mut(|d| d.remove::<String>(id));
+                    if response.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        desc.name = text;
+                    }
+                }
                 let mut subtitle = class.clone();
                 if let Some(instance) = &old.instance {
                     subtitle = format!("Instance of {instance}");
@@ -430,7 +444,11 @@ impl InspectorPanel {
                         .hint_text("enemies, pickups")
                         .desired_width(f32::INFINITY),
                 );
-                if response.lost_focus() || (!response.has_focus() && *text != joined) {
+                if !response.has_focus() && !response.lost_focus() {
+                    // Not being typed in: show the node's groups as they are now (after an
+                    // undo too), never write an old text back.
+                    self.groups_text = None;
+                } else if response.lost_focus() {
                     desc.groups = text
                         .split(',')
                         .map(str::trim)
@@ -454,7 +472,10 @@ impl InspectorPanel {
             section(ui, &id, icon::CODE, &script, |ui| {
                 grid(ui, &format!("{id}_grid"), |ui| {
                     for prop in props.iter().filter(|p| !p.hidden()) {
-                        let set = desc.script_properties.get(&script).and_then(|t| t.get(&prop.name));
+                        let set = desc
+                            .script_properties
+                            .get(&script)
+                            .and_then(|t| t.get(&prop.name));
                         let response = ui.label(RichText::new(&prop.name).color(theme::TEXT_DIM));
                         if !prop.doc.is_empty() {
                             response.on_hover_text(&prop.doc);
@@ -484,14 +505,24 @@ fn script_property(
         .or(prop.default.as_ref())
         .and_then(|v| script_property::to_ffi(Some(prop.kind), v));
     let floats = |v: &[f32]| {
-        toml::Value::Array(v.iter().map(|&x| toml::Value::Float(f64::from(x))).collect())
+        toml::Value::Array(
+            v.iter()
+                .map(|&x| toml::Value::Float(f64::from(x)))
+                .collect(),
+        )
     };
     let drags = |ui: &mut egui::Ui, values: &mut [f32]| {
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             for v in values.iter_mut() {
-                changed |= ui.add(egui::DragValue::new(v).speed(0.01)).changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(v)
+                            .custom_parser(crate::panels::parse_finite)
+                            .speed(0.01),
+                    )
+                    .changed();
             }
         });
         changed
@@ -505,15 +536,19 @@ fn script_property(
         }
         ffi::Tag::INT => {
             let mut v = current.and_then(|c| c.as_int()).unwrap_or(0);
-            ui.add(egui::DragValue::new(&mut v))
+            ui.add(egui::DragValue::new(&mut v).custom_parser(crate::panels::parse_finite))
                 .changed()
                 .then_some(toml::Value::Integer(v))
         }
         ffi::Tag::FLOAT => {
             let mut v = current.and_then(|c| c.as_float()).unwrap_or(0.0);
-            ui.add(egui::DragValue::new(&mut v).speed(0.01))
-                .changed()
-                .then_some(toml::Value::Float(v))
+            ui.add(
+                egui::DragValue::new(&mut v)
+                    .custom_parser(crate::panels::parse_finite)
+                    .speed(0.01),
+            )
+            .changed()
+            .then_some(toml::Value::Float(v))
         }
         ffi::Tag::VEC2 => {
             let v = current.and_then(|c| c.as_vec2()).unwrap_or_default();
@@ -663,7 +698,11 @@ fn class_sections(
                     label(ui, "Layer");
                     let mut layer = c.layer.unwrap_or(0);
                     if ui
-                        .add(egui::DragValue::new(&mut layer).range(-128..=128))
+                        .add(
+                            egui::DragValue::new(&mut layer)
+                                .custom_parser(crate::panels::parse_finite)
+                                .range(-128..=128),
+                        )
                         .on_hover_text("Higher layers draw on top")
                         .changed()
                     {
@@ -763,6 +802,7 @@ fn joint_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, j: &mut J
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut limits[0])
+                                    .custom_parser(crate::panels::parse_finite)
                                     .range(-180.0..=180.0)
                                     .suffix("°"),
                             )
@@ -771,6 +811,7 @@ fn joint_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, j: &mut J
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut limits[1])
+                                    .custom_parser(crate::panels::parse_finite)
                                     .range(-180.0..=180.0)
                                     .suffix("°"),
                             )
@@ -1014,7 +1055,12 @@ fn mesh_section(ui: &mut egui::Ui, desc: &mut NodeDesc) {
             match mesh {
                 MeshDesc::Cube { size } => {
                     label(ui, "Size");
-                    ui.add(egui::DragValue::new(size).range(0.01..=1000.0).speed(0.01));
+                    ui.add(
+                        egui::DragValue::new(size)
+                            .custom_parser(crate::panels::parse_finite)
+                            .range(0.01..=1000.0)
+                            .speed(0.01),
+                    );
                     ui.end_row();
                 }
                 MeshDesc::Sphere {
@@ -1025,23 +1071,41 @@ fn mesh_section(ui: &mut egui::Ui, desc: &mut NodeDesc) {
                     label(ui, "Radius");
                     ui.add(
                         egui::DragValue::new(radius)
+                            .custom_parser(crate::panels::parse_finite)
                             .range(0.01..=1000.0)
                             .speed(0.01),
                     );
                     ui.end_row();
                     label(ui, "Segments");
-                    ui.add(egui::DragValue::new(segments).range(3..=128));
+                    ui.add(
+                        egui::DragValue::new(segments)
+                            .custom_parser(crate::panels::parse_finite)
+                            .range(3..=128),
+                    );
                     ui.end_row();
                     label(ui, "Rings");
-                    ui.add(egui::DragValue::new(rings).range(2..=64));
+                    ui.add(
+                        egui::DragValue::new(rings)
+                            .custom_parser(crate::panels::parse_finite)
+                            .range(2..=64),
+                    );
                     ui.end_row();
                 }
                 MeshDesc::Plane { size, subdivisions } => {
                     label(ui, "Size");
-                    ui.add(egui::DragValue::new(size).range(0.01..=1000.0).speed(0.01));
+                    ui.add(
+                        egui::DragValue::new(size)
+                            .custom_parser(crate::panels::parse_finite)
+                            .range(0.01..=1000.0)
+                            .speed(0.01),
+                    );
                     ui.end_row();
                     label(ui, "Subdivisions");
-                    ui.add(egui::DragValue::new(subdivisions).range(1..=256));
+                    ui.add(
+                        egui::DragValue::new(subdivisions)
+                            .custom_parser(crate::panels::parse_finite)
+                            .range(1..=256),
+                    );
                     ui.end_row();
                 }
             }
@@ -1196,14 +1260,16 @@ fn path_section(ui: &mut egui::Ui, editor: &Editor, p: &mut ab_engine::scene_fil
                         .selected_text(shown)
                         .width(ui.available_width() - 4.0)
                         .show_ui(ui, |ui| {
-                            for asset in editor
-                                .assets
-                                .entries
-                                .iter()
-                                .filter(|e| matches!(e.kind, AssetKind::Model | AssetKind::Scene))
+                            for asset in
+                                editor.assets.entries.iter().filter(|e| {
+                                    matches!(e.kind, AssetKind::Model | AssetKind::Scene)
+                                })
                             {
                                 if ui
-                                    .selectable_label(p.piece.as_deref() == Some(&asset.path), &asset.path)
+                                    .selectable_label(
+                                        p.piece.as_deref() == Some(&asset.path),
+                                        &asset.path,
+                                    )
                                     .clicked()
                                 {
                                     p.piece = Some(asset.path.clone());
@@ -1235,9 +1301,17 @@ fn path_section(ui: &mut egui::Ui, editor: &Editor, p: &mut ab_engine::scene_fil
         let mut remove = None;
         for (i, point) in p.points.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{i}")).monospace().color(theme::TEXT_DIM));
+                ui.label(
+                    RichText::new(format!("{i}"))
+                        .monospace()
+                        .color(theme::TEXT_DIM),
+                );
                 vec3(ui, point, 0.05, "");
-                if ui.small_button(icon::X).on_hover_text("Remove this point").clicked() {
+                if ui
+                    .small_button(icon::X)
+                    .on_hover_text("Remove this point")
+                    .clicked()
+                {
                     remove = Some(i);
                 }
             });
@@ -1442,7 +1516,12 @@ fn shape_section(ui: &mut egui::Ui, shape: &mut ShapeDesc) {
                 });
             ui.end_row();
             let drag = |ui: &mut egui::Ui, v: &mut f32| {
-                ui.add(egui::DragValue::new(v).range(0.001..=10_000.0).speed(0.01));
+                ui.add(
+                    egui::DragValue::new(v)
+                        .custom_parser(crate::panels::parse_finite)
+                        .range(0.001..=10_000.0)
+                        .speed(0.01),
+                );
             };
             match shape {
                 ShapeDesc::Box(size) => {
@@ -1520,6 +1599,7 @@ fn timer_section(ui: &mut egui::Ui, t: &mut TimerDesc) {
             label(ui, "Wait time (s)");
             ui.add(
                 egui::DragValue::new(&mut t.wait_time)
+                    .custom_parser(crate::panels::parse_finite)
                     .range(0.0..=3600.0)
                     .speed(0.01),
             );
@@ -1623,6 +1703,7 @@ fn pair(ui: &mut egui::Ui, value: &mut Option<[f32; 2]>, default: [f32; 2], spee
         changed |= ui
             .add(
                 egui::DragValue::new(&mut v[0])
+                    .custom_parser(crate::panels::parse_finite)
                     .range(0.0..=1000.0)
                     .speed(speed)
                     .max_decimals(3),
@@ -1632,6 +1713,7 @@ fn pair(ui: &mut egui::Ui, value: &mut Option<[f32; 2]>, default: [f32; 2], spee
         changed |= ui
             .add(
                 egui::DragValue::new(&mut v[1])
+                    .custom_parser(crate::panels::parse_finite)
                     .range(0.0..=1000.0)
                     .speed(speed)
                     .max_decimals(3),
@@ -1973,6 +2055,7 @@ fn edges(
             changed |= ui
                 .add(
                     egui::DragValue::new(v)
+                        .custom_parser(crate::panels::parse_finite)
                         .range(range.clone())
                         .speed(speed)
                         .max_decimals(3),
@@ -2095,7 +2178,12 @@ fn ui_sections(
                     for axis in 0..2 {
                         let mut v = offsets[axis];
                         if ui
-                            .add(egui::DragValue::new(&mut v).speed(1.0).max_decimals(1))
+                            .add(
+                                egui::DragValue::new(&mut v)
+                                    .custom_parser(crate::panels::parse_finite)
+                                    .speed(1.0)
+                                    .max_decimals(1),
+                            )
                             .changed()
                         {
                             offsets[axis + 2] += v - offsets[axis];
@@ -2115,7 +2203,10 @@ fn ui_sections(
                         let mut v = offsets[axis + 2] - offsets[axis];
                         let response = ui.add(
                             // No range: it would clamp (and so change) a flipped rect.
-                            egui::DragValue::new(&mut v).speed(1.0).max_decimals(1),
+                            egui::DragValue::new(&mut v)
+                                .custom_parser(crate::panels::parse_finite)
+                                .speed(1.0)
+                                .max_decimals(1),
                         );
                         if response.changed() {
                             offsets[axis + 2] = offsets[axis] + v.max(0.0);

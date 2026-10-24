@@ -106,23 +106,28 @@ impl Tab {
 }
 
 /// The default layout's panel groups: the right side, the left side, below the viewport.
-const RIGHT: &[Tab] = &[
-    Tab::Inspector,
-    Tab::Environment,
-    Tab::Effects,
-    Tab::Config,
-    Tab::Debug,
-];
-const LEFT: &[Tab] = &[Tab::Scene, Tab::SourceControl];
-const BOTTOM: &[Tab] = &[
-    Tab::Assets,
-    Tab::Build,
-    Tab::Animation,
-    Tab::Console,
-    Tab::Profiler,
-];
+/// Only the panels used all the time: each feature (animation, effects, the game's config,
+/// building levels, profiling…) has a window of its own (see [`Tab::is_feature`]).
+const RIGHT: &[Tab] = &[Tab::Inspector, Tab::Environment];
+const LEFT: &[Tab] = &[Tab::Scene];
+const BOTTOM: &[Tab] = &[Tab::Assets, Tab::Console];
 
 impl Tab {
+    /// A feature's editor: shown in a window of its own (from the Window or Settings menu,
+    /// or by double-clicking its node), never docked in the main window.
+    fn is_feature(self) -> bool {
+        matches!(
+            self,
+            Tab::Animation
+                | Tab::Effects
+                | Tab::Config
+                | Tab::Build
+                | Tab::Profiler
+                | Tab::Debug
+                | Tab::SourceControl
+        )
+    }
+
     /// The panels it shares a place with in the default layout.
     fn group(self) -> &'static [Tab] {
         [RIGHT, LEFT, BOTTOM]
@@ -195,6 +200,24 @@ impl ToolWindow {
                 Tab::Animation.window_size(),
                 [900.0, 520.0],
             ),
+            ToolWindow::Panel(Tab::Effects) => (
+                icon::SPARKLE,
+                t("window.effects_editor"),
+                [1280.0, 800.0],
+                [760.0, 480.0],
+            ),
+            ToolWindow::Panel(Tab::Config) => (
+                icon::SLIDERS,
+                t("window.game_config"),
+                [620.0, 720.0],
+                [420.0, 320.0],
+            ),
+            ToolWindow::Panel(Tab::Build) => (
+                icon::CUBE,
+                t("window.level_builder"),
+                [960.0, 620.0],
+                [520.0, 360.0],
+            ),
             ToolWindow::Panel(Tab::Assets) => (
                 icon::FOLDERS,
                 t("window.asset_browser"),
@@ -226,7 +249,7 @@ impl ToolWindow {
             title,
             size,
             min_size,
-            dockable: matches!(self, ToolWindow::Panel(_)),
+            dockable: matches!(self, ToolWindow::Panel(tab) if !tab.is_feature()),
             remember: true,
             escape_closes: false,
         }
@@ -298,14 +321,78 @@ impl AnimationWorkspace {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_0))
             .show(ui, |ui| {
-                // The main view sets the camera the game is drawn with: keep it.
-                keeping_camera(editor, |editor| view.show(ui, editor, render_state));
+                // The main view sets the camera the game is drawn with: keep it. The game's
+                // interface would cover what is animated.
+                keeping_camera(editor, |editor| {
+                    crate::ui_designer::with_only_ui(editor, None, |editor| {
+                        view.show(ui, editor, render_state)
+                    })
+                });
+            });
+    }
+}
+
+/// The Effects Editor's window: a view of the effect, framed on it, beside the effect's
+/// layers and settings.
+#[derive(Default)]
+struct EffectsWorkspace {
+    /// A view with its own camera, made on first show.
+    view: Option<crate::viewport::Viewport>,
+    redraw: crate::tool_window::Redraw,
+    /// The node the view was last framed on: a new effect is framed again.
+    framed: Option<ab_engine::scene::NodeHandle>,
+}
+
+impl EffectsWorkspace {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        effects: &mut crate::panels::effects::EffectsPanel,
+        editor: &mut Editor,
+        main: &ViewportArea,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        let view = self
+            .view
+            .get_or_insert_with(|| main.sharing(crate::viewport::ViewKind::Perspective));
+        // The effect the selection belongs to, framed when it changes.
+        let effect = editor
+            .selection
+            .map(|n| crate::features::owner(editor, n).unwrap_or(n));
+        if effect != self.framed {
+            self.framed = effect;
+            view.frame_selection(editor);
+        }
+        // Particles move: drawn every frame while previewed.
+        let active = crate::tool_window::in_use(ui.ctx()) || editor.preview_effects;
+        view.redraw = self.redraw.due(active, editor.revision());
+        crate::tool_window::side(
+            ui,
+            "effects-settings",
+            false,
+            400.0,
+            Tab::Effects.icon(),
+            &t("window.effects_editor"),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| effects.show(ui, editor));
+            },
+        );
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::BG_0))
+            .show(ui, |ui| {
+                keeping_camera(editor, |editor| {
+                    crate::ui_designer::with_only_ui(editor, None, |editor| {
+                        view.show(ui, editor, render_state)
+                    })
+                });
             });
     }
 }
 
 /// Runs `draw` (another view of the scene) and puts back the camera the main view chose.
-fn keeping_camera(editor: &mut Editor, draw: impl FnOnce(&mut Editor)) {
+pub(crate) fn keeping_camera(editor: &mut Editor, draw: impl FnOnce(&mut Editor)) {
     use ab_engine::rendering::CameraOverride;
     let saved = editor
         .tree_mut()
@@ -329,7 +416,9 @@ enum Pending {
 }
 
 enum Dialog {
-    Open { filter: String },
+    Open {
+        filter: String,
+    },
     /// `then`: what Save in the Unsaved Changes dialog was for, done once saved.
     SaveAs {
         path: String,
@@ -363,7 +452,7 @@ pub fn instance_asset(editor: &mut Editor, path: &str, at: Option<Vec3>) {
     let name: String = stem
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
+            if crate::panels::is_name_char(c) || c == '_' || c == '-' {
                 c
             } else {
                 '_'
@@ -403,6 +492,8 @@ pub struct EditorApp {
     git: Option<GitClient>,
     dialog: Option<Dialog>,
     last_frame: Instant,
+    /// When the open scene's file was last looked at for changes made outside the editor.
+    disk_checked: Instant,
     title: String,
     allow_close: bool,
     /// The editor draws its own title bar (no `--system-titlebar`).
@@ -422,6 +513,9 @@ pub struct EditorApp {
     saved_settings: EditorSettings,
     /// Where the settings are kept (`None`: not kept, for screenshots).
     settings_store: Option<ab_engine::save::SaveStore>,
+    /// `--language` for this run, and the saved language it stands in for: the override is
+    /// never written to the settings.
+    language_override: Option<(String, String)>,
     /// Edit → Preferences.
     preferences: crate::preferences::PreferencesWindow,
     /// Controllers, opened on first use (`Some(None)`: none can be read here).
@@ -430,6 +524,9 @@ pub struct EditorApp {
     windows: Vec<ToolWindow>,
     ui_designer: crate::ui_designer::UiDesigner,
     animation_workspace: AnimationWorkspace,
+    effects_workspace: EffectsWorkspace,
+    /// Help → About (the machine is read the first time it opens).
+    about: crate::about::About,
     git_window: crate::git_window::GitWindow,
     /// Where each tool window opens: taken from the settings when it opens, then fixed.
     placements: std::collections::BTreeMap<String, crate::tool_window::Placement>,
@@ -565,9 +662,10 @@ impl EditorApp {
             .as_ref()
             .map(EditorSettings::load)
             .unwrap_or_default();
-        if let Some(language) = &options.language {
-            settings.language = language.clone();
-        }
+        let language_override = options.language.as_ref().map(|language| {
+            let saved = std::mem::replace(&mut settings.language, language.clone());
+            (language.clone(), saved)
+        });
         viewport.options.snap = settings.snap;
         viewport.options.highlight_selection = settings.highlight_selection;
         viewport.options.highlight_hover = settings.highlight_hover;
@@ -635,7 +733,15 @@ impl EditorApp {
             .show
             .iter()
             .any(|name| name == "unsaved")
-            .then_some(Dialog::Unsaved(Pending::New));
+            .then_some(Dialog::Unsaved(Pending::New))
+            // `--show about`: Help → About (screenshots of it).
+            .or_else(|| {
+                options
+                    .show
+                    .iter()
+                    .any(|name| name == "about")
+                    .then_some(Dialog::About)
+            });
         Self {
             editor,
             viewport,
@@ -657,6 +763,7 @@ impl EditorApp {
             git: None,
             dialog,
             last_frame: Instant::now(),
+            disk_checked: Instant::now(),
             title: String::new(),
             allow_close: false,
             custom_frame: !options.system_titlebar,
@@ -667,11 +774,14 @@ impl EditorApp {
             saved_settings: settings.clone(),
             settings,
             settings_store,
+            language_override,
             preferences: Default::default(),
             gamepads: None,
             windows,
             ui_designer: Default::default(),
             animation_workspace: Default::default(),
+            effects_workspace: Default::default(),
+            about: crate::about::About::new(render_state.map(|s| s.adapter.get_info())),
             git_window: Default::default(),
             placements,
             moved: Default::default(),
@@ -715,7 +825,10 @@ impl EditorApp {
     /// Takes where the tool windows are now; keeps it once they have stayed put a second.
     fn track_placements(&mut self, rects: Vec<(String, crate::tool_window::Placement)>) {
         for (key, rect) in rects {
-            let kept = self.moved.get(&key).or_else(|| self.settings.window_rects.get(&key));
+            let kept = self
+                .moved
+                .get(&key)
+                .or_else(|| self.settings.window_rects.get(&key));
             if kept != Some(&rect) {
                 self.moved.insert(key, rect);
                 self.moved_at = Some(Instant::now());
@@ -741,13 +854,50 @@ impl EditorApp {
 
     /// Puts a panel's window back into the main window, with the panels it was with.
     fn dock_window(&mut self, window: ToolWindow) {
+        if matches!(window, ToolWindow::Panel(tab) if tab.is_feature()) {
+            // A feature stays in its own window.
+            return;
+        }
         self.close_window(window);
         if let ToolWindow::Panel(tab) = window {
             self.dock_tab(tab);
         }
     }
 
+    /// Opens what the scene tree (or Create) asked for: a UI node in the UI Editor, an
+    /// AnimationPlayer in the Animation Editor, an effect in the Effects Editor.
+    fn open_requested(&mut self, ctx: &egui::Context) {
+        use crate::features::Feature;
+        let Some(node) = self.editor.open_request.take() else {
+            return;
+        };
+        match Feature::of(&self.editor, node) {
+            Some(Feature::Ui) => {
+                self.ui_designer.edit(&mut self.editor, node);
+                self.open_window(ctx, ToolWindow::UiDesigner);
+            }
+            Some(Feature::Animation) => {
+                self.editor.select(Some(node));
+                self.open_window(ctx, ToolWindow::Panel(Tab::Animation));
+            }
+            Some(Feature::Effect) => {
+                self.editor.select(Some(node));
+                self.open_window(ctx, ToolWindow::Panel(Tab::Effects));
+            }
+            None => {}
+        }
+    }
+
     fn dock_tab(&mut self, tab: Tab) {
+        if tab.is_feature() {
+            // Features open in their own window.
+            let window = ToolWindow::Panel(tab);
+            if !self.windows.contains(&window) {
+                self.place(window.key());
+                self.windows.push(window);
+            }
+            return;
+        }
         if let Some(found) = self.dock.find_tab(&tab) {
             // Found just now, so the index is valid.
             _ = self.dock.set_active_tab(found);
@@ -830,6 +980,17 @@ impl EditorApp {
                         workspace.show(ui, animation, editor, viewport, render_state);
                     })
                 }
+                ToolWindow::Panel(Tab::Effects) => {
+                    let (workspace, effects, editor, viewport) = (
+                        &mut self.effects_workspace,
+                        &mut self.effects,
+                        &mut self.editor,
+                        &self.viewport,
+                    );
+                    host.show(ctx, &spec, |ui| {
+                        workspace.show(ui, effects, editor, viewport, render_state);
+                    })
+                }
                 ToolWindow::Panel(mut tab) => {
                     let mut tabs = self.tabs(render_state);
                     host.show(ctx, &spec, |ui| {
@@ -864,7 +1025,7 @@ impl EditorApp {
                     self.reveal_panel(ctx, Tab::Assets);
                 }
                 ViewerAction::AddToScene(path) if !self.editor.is_playing() => {
-                    let at = self.viewport.camera.pivot;
+                    let at = self.viewport.placement();
                     instance_asset(&mut self.editor, &path, Some(at));
                 }
                 ViewerAction::OpenScene(path) => self.guard(Pending::Open(path)),
@@ -906,7 +1067,15 @@ impl EditorApp {
             if self.settings.engine_root == self.saved_settings.engine_root {
                 self.settings.engine_root = EditorSettings::load(store).engine_root;
             }
-            self.settings.save(store);
+            match &self.language_override {
+                // Still the run's `--language`: keep the saved choice on disk.
+                Some((run, saved)) if self.settings.language == *run => {
+                    let mut kept = self.settings.clone();
+                    kept.language = saved.clone();
+                    kept.save(store);
+                }
+                _ => self.settings.save(store),
+            }
         }
         self.saved_settings = self.settings.clone();
     }
@@ -919,6 +1088,29 @@ impl EditorApp {
     /// Forget unsaved changes (closing for a screenshot).
     pub fn discard_changes(&mut self) {
         self.editor.modified = false;
+        self.animation.discard_changes();
+        self.discard_config();
+    }
+
+    /// Forgets Game Config edits not saved (the file's values come back).
+    fn discard_config(&mut self) {
+        if self.editor.config_modified {
+            let _ = self.editor.load_config();
+            self.editor.config_modified = false;
+        }
+    }
+
+    /// Whether anything would be lost by leaving the scene: its own changes, clip files
+    /// keyed in the Animation panel, or Game Config values.
+    fn has_unsaved(&self) -> bool {
+        self.editor.modified || self.animation.has_unsaved() || self.editor.config_modified
+    }
+
+    /// Saves clip files and Game Config values with changes; whether they all were.
+    fn save_side_files(&mut self) -> bool {
+        let clips = self.animation.save_all(&mut self.editor);
+        let config = !self.editor.config_modified || self.config.save_to_file(&mut self.editor);
+        clips && config
     }
 
     /// Stops the game (back to the edited scene), so what follows sees the scene and its
@@ -934,7 +1126,7 @@ impl EditorApp {
     fn guard(&mut self, pending: Pending) {
         // While playing, `modified` is about the edited scene: stop first, then ask.
         self.stop_playing();
-        if self.editor.modified {
+        if self.has_unsaved() {
             self.dialog = Some(Dialog::Unsaved(pending));
         } else {
             self.run(pending);
@@ -949,7 +1141,7 @@ impl EditorApp {
             Pending::New => self.editor.new_scene(),
             Pending::Open(path) => {
                 self.editor.open_scene(&path);
-                self.viewport.frame_selection(&self.editor);
+                self.viewport.frame_selection_everywhere(&self.editor);
             }
             Pending::Quit => self.allow_close = true,
             Pending::CloseProject => self.close_project = true,
@@ -958,10 +1150,12 @@ impl EditorApp {
 
     fn save_or_ask(&mut self) {
         if self.editor.is_playing() {
+            self.editor.fail("Stop the game before saving");
             return;
         }
         // An animation preview poses nodes: save where they really are.
         self.animation.end_preview(&mut self.editor);
+        self.save_side_files();
         if self.editor.scene_path.is_some() {
             self.editor.save();
         } else {
@@ -1017,6 +1211,11 @@ impl EditorApp {
     /// Runs `command`. `text`: the system clipboard's text, for a paste.
     fn execute(&mut self, ctx: &egui::Context, command: Command, text: Option<String>) {
         let editing = !self.editor.is_playing();
+        // With a key selected in the Animation panel, Delete removes the key, not the nodes.
+        if command == Command::Delete && editing && self.animation.takes_delete() {
+            self.animation.delete_selected_key();
+            return;
+        }
         // While building, R turns the piece and Esc puts the tool away.
         if let Some(piece) = &mut self.editor.build {
             match command {
@@ -1078,7 +1277,7 @@ impl EditorApp {
                 self.editor.set_selection(all, None);
             }
             Command::SelectNone if self.editor.mode == Mode::Edit => self.editor.select(None),
-            Command::FrameSelection => self.viewport.frame_selection(&self.editor),
+            Command::FrameSelection => self.viewport.frame_selection_everywhere(&self.editor),
             Command::Play => self.toggle_play(),
             Command::Stop => {
                 self.editor.stop();
@@ -1139,15 +1338,24 @@ impl EditorApp {
             commands::menu_item(ui, Command::NewScene, editing);
             commands::menu_item(ui, Command::OpenScene, editing);
             ui.menu_button(
-                format!("{}  Open Recent Scene", icon::CLOCK_COUNTER_CLOCKWISE),
+                format!(
+                    "{}  {}",
+                    icon::CLOCK_COUNTER_CLOCKWISE,
+                    t("menu.open_recent")
+                ),
                 |ui| {
+                    // Opened or saved lately (and still there), newest first.
+                    let project = self.editor.project();
                     let scenes: Vec<String> = self
-                        .editor
-                        .assets
-                        .of_kind(AssetKind::Scene)
-                        .map(|a| a.path.clone())
-                        .take(12)
+                        .settings
+                        .recent_scenes(project)
+                        .iter()
+                        .filter(|s| project.join(s).is_file())
+                        .cloned()
                         .collect();
+                    if scenes.is_empty() {
+                        ui.label(RichText::new(t("menu.no_recent")).color(theme::TEXT_DIM));
+                    }
                     for scene in scenes {
                         if ui.button(&scene).clicked() {
                             self.guard(Pending::Open(scene));
@@ -1173,16 +1381,30 @@ impl EditorApp {
         });
         ui.menu_button(t("menu.edit"), |ui| {
             ui.set_min_width(230.0);
+            // The scene root and the inside of instanced models cannot be cut, duplicated,
+            // deleted or renamed: those commands are off when that is all there is.
             let selection = self.editor.selection.is_some() && editing;
+            let root = self.editor.scene_root;
+            let changeable = selection
+                && self
+                    .editor
+                    .selected
+                    .iter()
+                    .any(|&n| n != root && self.editor.is_editable(n));
+            let renamable = selection
+                && self
+                    .editor
+                    .selection
+                    .is_some_and(|n| n != root && self.editor.is_editable(n));
             commands::menu_item(ui, Command::Undo, editing && self.editor.history.can_undo());
             commands::menu_item(ui, Command::Redo, editing && self.editor.history.can_redo());
             ui.separator();
-            commands::menu_item(ui, Command::Cut, selection);
-            commands::menu_item(ui, Command::Copy, selection);
+            commands::menu_item(ui, Command::Cut, changeable);
+            commands::menu_item(ui, Command::Copy, changeable);
             commands::menu_item(ui, Command::Paste, self.editor.can_paste(None));
-            commands::menu_item(ui, Command::Duplicate, selection);
-            commands::menu_item(ui, Command::Delete, selection);
-            commands::menu_item(ui, Command::Rename, selection);
+            commands::menu_item(ui, Command::Duplicate, changeable);
+            commands::menu_item(ui, Command::Delete, changeable);
+            commands::menu_item(ui, Command::Rename, renamable);
             ui.separator();
             commands::menu_item(ui, Command::SelectAll, editing);
             commands::menu_item(ui, Command::SelectNone, !self.editor.selected.is_empty());
@@ -1197,18 +1419,16 @@ impl EditorApp {
                 format!("{} (H)", t("menu.highlight_selection")),
             );
             ui.checkbox(&mut options.highlight_hover, t("menu.highlight_hover"));
-            ui.separator();
-            commands::menu_item(ui, Command::Preferences, true);
         });
         ui.add_enabled_ui(editing, |ui| {
             ui.menu_button(t("menu.create"), |ui| {
-                let at = self.viewport.camera.pivot;
+                let at = self.viewport.placement();
                 crate::create::menu(ui, &mut self.editor, at);
             });
         });
         ui.menu_button(t("menu.view"), |ui| {
             ui.set_min_width(220.0);
-            for tab in Tab::ALL {
+            for tab in Tab::ALL.into_iter().filter(|t| !t.is_feature()) {
                 let windowed = self.windows.contains(&ToolWindow::Panel(tab));
                 let mut checked = windowed || self.dock.find_tab(&tab).is_some();
                 if ui.checkbox(&mut checked, tab.title()).clicked() {
@@ -1257,6 +1477,7 @@ impl EditorApp {
             }
         });
         self.window_menu(ui);
+        self.settings_menu(ui);
         ui.menu_button(t("menu.play"), |ui| {
             ui.set_min_width(220.0);
             let playing = self.editor.is_playing();
@@ -1288,6 +1509,28 @@ impl EditorApp {
         });
     }
 
+    /// Settings: the game's config and the editor's preferences.
+    fn settings_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(t("menu.settings"), |ui| {
+            ui.set_min_width(230.0);
+            let ctx = ui.ctx().clone();
+            let config = ToolWindow::Panel(Tab::Config);
+            if ui
+                .add(
+                    egui::Button::new(format!("{}  {}", icon::SLIDERS, t("window.game_config")))
+                        .selected(self.windows.contains(&config)),
+                )
+                .on_hover_text(t("menu.game_config_hint"))
+                .clicked()
+            {
+                self.open_window(&ctx, config);
+                ui.close();
+            }
+            ui.separator();
+            commands::menu_item(ui, Command::Preferences, true);
+        });
+    }
+
     /// Window: the tools in windows of their own.
     fn window_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button(t("window.menu"), |ui| {
@@ -1295,7 +1538,10 @@ impl EditorApp {
             let ctx = ui.ctx().clone();
             for (window, command) in [
                 (ToolWindow::UiDesigner, Command::OpenUiDesigner),
-                (ToolWindow::Panel(Tab::Animation), Command::OpenAnimationEditor),
+                (
+                    ToolWindow::Panel(Tab::Animation),
+                    Command::OpenAnimationEditor,
+                ),
                 (ToolWindow::Panel(Tab::Assets), Command::OpenAssetBrowser),
                 (ToolWindow::Git, Command::OpenGit),
             ] {
@@ -1309,10 +1555,29 @@ impl EditorApp {
                     ui.close();
                 }
             }
+            // The other features' editors.
+            for (tab, key) in [
+                (Tab::Effects, "window.effects_editor"),
+                (Tab::Build, "window.level_builder"),
+                (Tab::Profiler, "tab.profiler"),
+                (Tab::Debug, "tab.debug"),
+            ] {
+                let window = ToolWindow::Panel(tab);
+                let open = self.windows.contains(&window);
+                let text = format!("{}  {}", tab.icon(), t(key));
+                if ui.add(egui::Button::new(text).selected(open)).clicked() {
+                    self.open_window(&ctx, window);
+                    ui.close();
+                }
+            }
+            ui.separator();
             ui.menu_button(
                 format!("{}  {}", icon::ARROW_SQUARE_OUT, t("window.pop_out_panel")),
                 |ui| {
-                    for tab in Tab::ALL.into_iter().filter(|t| *t != Tab::Viewport) {
+                    for tab in Tab::ALL
+                        .into_iter()
+                        .filter(|t| *t != Tab::Viewport && !t.is_feature())
+                    {
                         let open = self.windows.contains(&ToolWindow::Panel(tab));
                         if ui
                             .add(egui::Button::new(tab.title()).selected(open))
@@ -1577,18 +1842,16 @@ impl EditorApp {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default()
                     ),
-                    Some(_) => format!("{} scripts failed to load", icon::SCROLL),
-                    None => format!("{} no game scripts", icon::SCROLL),
+                    Some(_) => format!("{} {}", icon::SCROLL, t("status.scripts_failed")),
+                    None => format!("{} {}", icon::SCROLL, t("status.no_scripts")),
                 };
                 ui.label(RichText::new(scripts).color(theme::TEXT_DIM))
-                    .on_hover_text(
-                        "Start with --scripts <game library> to run game scripts in Play mode",
-                    );
+                    .on_hover_text(t("status.scripts_hint"));
                 ui.label(
                     RichText::new(format!(
-                        "{} {} nodes",
+                        "{} {}",
                         icon::TREE_STRUCTURE,
-                        self.editor.tree().node_count()
+                        tf("status.nodes", &[("count", &self.editor.tree().node_count())])
                     ))
                     .color(theme::TEXT_DIM),
                 );
@@ -1615,6 +1878,8 @@ impl EditorApp {
         };
         let mut keep = true;
         let mut then: Option<Pending> = None;
+        // Picked in the Open dialog: the current scene may still have unsaved changes.
+        let mut open: Option<Pending> = None;
         let modal = egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
             if !matches!(dialog, Dialog::Unsaved(_)) {
                 crate::dialogs::set_dialog_width(ui, 440.0);
@@ -1625,7 +1890,11 @@ impl EditorApp {
                     ui.add_space(4.0);
                     let edit = ui.add(
                         egui::TextEdit::singleline(filter)
-                            .hint_text(format!("{}  {}", icon::MAGNIFYING_GLASS, t("dialog.search_scenes")))
+                            .hint_text(format!(
+                                "{}  {}",
+                                icon::MAGNIFYING_GLASS,
+                                t("dialog.search_scenes")
+                            ))
                             .desired_width(f32::INFINITY),
                     );
                     edit.request_focus();
@@ -1638,23 +1907,30 @@ impl EditorApp {
                         .map(|a| a.path.clone())
                         .filter(|p| p.to_lowercase().contains(&needle))
                         .collect();
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        if scenes.is_empty() {
-                            crate::panels::empty_hint(ui, icon::FILM_SLATE, &t("dialog.no_scenes"));
-                        }
-                        for scene in &scenes {
-                            let button = egui::Button::new(format!("{}  {scene}", icon::FILM_SLATE))
-                                .min_size(egui::vec2(ui.available_width(), 26.0))
-                                .frame(false);
-                            if ui.add(button).clicked() {
-                                then = Some(Pending::Open(scene.clone()));
-                                keep = false;
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            if scenes.is_empty() {
+                                crate::panels::empty_hint(
+                                    ui,
+                                    icon::FILM_SLATE,
+                                    &t("dialog.no_scenes"),
+                                );
                             }
-                        }
-                    });
+                            for scene in &scenes {
+                                let button =
+                                    egui::Button::new(format!("{}  {scene}", icon::FILM_SLATE))
+                                        .min_size(egui::vec2(ui.available_width(), 26.0))
+                                        .frame(false);
+                                if ui.add(button).clicked() {
+                                    open = Some(Pending::Open(scene.clone()));
+                                    keep = false;
+                                }
+                            }
+                        });
                     if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         if let Some(first) = scenes.first() {
-                            then = Some(Pending::Open(first.clone()));
+                            open = Some(Pending::Open(first.clone()));
                             keep = false;
                         }
                     }
@@ -1666,21 +1942,44 @@ impl EditorApp {
                     });
                 }
                 Dialog::SaveAs { path, then: after } => {
-                    ui.heading(format!("{}  {}", icon::FLOPPY_DISK_BACK, t("dialog.save_as_title")));
+                    ui.heading(format!(
+                        "{}  {}",
+                        icon::FLOPPY_DISK_BACK,
+                        t("dialog.save_as_title")
+                    ));
                     ui.label(
-                        RichText::new(tf("dialog.path_inside", &[("folder", &self.editor.project().display())]))
-                            .color(theme::TEXT_DIM),
+                        RichText::new(tf(
+                            "dialog.path_inside",
+                            &[("folder", &self.editor.project().display())],
+                        ))
+                        .color(theme::TEXT_DIM),
                     );
-                    let edit = ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
+                    let edit =
+                        ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
                     edit.request_focus();
                     let (valid, exists) = save_as_check(self.editor.project(), path);
                     if exists {
-                        ui.label(RichText::new(format!("{}  {}", icon::WARNING, t("dialog.replace_warning"))).color(theme::WARN));
+                        ui.label(
+                            RichText::new(format!(
+                                "{}  {}",
+                                icon::WARNING,
+                                t("dialog.replace_warning")
+                            ))
+                            .color(theme::WARN),
+                        );
                     }
                     ui.separator();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let save = ui.add_enabled(valid, egui::Button::new(RichText::new(t("dialog.save")).strong()).fill(theme::ACCENT_DIM));
-                        if save.clicked() || (valid && edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
+                        let save = ui.add_enabled(
+                            valid,
+                            egui::Button::new(RichText::new(t("dialog.save")).strong())
+                                .fill(theme::ACCENT_DIM),
+                        );
+                        if save.clicked()
+                            || (valid
+                                && edit.lost_focus()
+                                && ui.input(|i| i.key_pressed(Key::Enter)))
+                        {
                             then = self.finish_save_as(path, after.take());
                             keep = false;
                         }
@@ -1699,11 +1998,17 @@ impl EditorApp {
                     });
                     match crate::dialogs::unsaved_changes(ui, scene, &action) {
                         Some(UnsavedChoice::Save) => {
-                            if self.editor.scene_path.is_some() {
-                                self.animation.end_preview(&mut self.editor);
+                            self.animation.end_preview(&mut self.editor);
+                            let side_saved = self.save_side_files();
+                            if !self.editor.modified {
+                                // Only clip files or config values had changes.
+                                if side_saved {
+                                    then = Some(pending.clone());
+                                }
+                            } else if self.editor.scene_path.is_some() {
                                 self.editor.save();
                                 // A failed save keeps the changes (and says why).
-                                if !self.editor.modified {
+                                if !self.has_unsaved() {
                                     then = Some(pending.clone());
                                 }
                             } else {
@@ -1716,6 +2021,8 @@ impl EditorApp {
                             keep = false;
                         }
                         Some(UnsavedChoice::DontSave) => {
+                            self.animation.discard_changes();
+                            self.discard_config();
                             then = Some(pending.clone());
                             keep = false;
                         }
@@ -1724,12 +2031,19 @@ impl EditorApp {
                     }
                 }
                 Dialog::Shortcuts => {
-                    ui.heading(format!("{}  {}", icon::KEYBOARD, t("dialog.shortcuts_title")));
+                    ui.heading(format!(
+                        "{}  {}",
+                        icon::KEYBOARD,
+                        t("dialog.shortcuts_title")
+                    ));
                     // The keys come from the command table, so this list cannot go stale.
                     let mut rows: Vec<(String, String)> = Vec::new();
                     for binding in commands::BINDINGS {
                         let keys = ui.ctx().format_shortcut(&binding.shortcut);
-                        match rows.iter_mut().find(|(_, what)| *what == binding.command.label()) {
+                        match rows
+                            .iter_mut()
+                            .find(|(_, what)| *what == binding.command.label())
+                        {
                             Some((existing, _)) => *existing = format!("{existing}, {keys}"),
                             None => rows.push((keys, binding.command.label().to_owned())),
                         }
@@ -1752,39 +2066,38 @@ impl EditorApp {
                         "viewer_close",
                         "ui_nudge",
                     ] {
-                        rows.push((t(&format!("shortcuts.{name}_keys")), t(&format!("shortcuts.{name}"))));
+                        rows.push((
+                            t(&format!("shortcuts.{name}_keys")),
+                            t(&format!("shortcuts.{name}")),
+                        ));
                     }
-                    egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.6).show(ui, |ui| {
-                        egui::Grid::new("shortcuts").num_columns(2).spacing([24.0, 6.0]).striped(true).show(ui, |ui| {
-                            for (keys, what) in &rows {
-                                ui.label(RichText::new(keys).monospace().color(theme::ACCENT));
-                                ui.label(what);
-                                ui.end_row();
-                            }
+                    egui::ScrollArea::vertical()
+                        .max_height(ui.ctx().content_rect().height() * 0.6)
+                        .show(ui, |ui| {
+                            egui::Grid::new("shortcuts")
+                                .num_columns(2)
+                                .spacing([24.0, 6.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for (keys, what) in &rows {
+                                        ui.label(
+                                            RichText::new(keys).monospace().color(theme::ACCENT),
+                                        );
+                                        ui.label(what);
+                                        ui.end_row();
+                                    }
+                                });
                         });
-                    });
                     ui.separator();
                     if ui.button(t("dialog.close")).clicked() {
                         keep = false;
                     }
                 }
                 Dialog::About => {
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(icon::LIGHTNING).size(40.0).color(theme::ACCENT));
-                        ui.heading("April Blink Editor");
-                        ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_DIM));
-                        ui.add_space(6.0);
-                        ui.add(egui::Label::new(crate::loading::TAGLINE).wrap());
-                        ui.add_space(6.0);
-                        ui.label("Scene editing, play-in-editor, effects and assets.");
-                        ui.add(egui::Label::new(RichText::new("Game scripts are Rust: the editor builds them with cargo (https://rustup.rs) and hot-reloads them while you work.").color(theme::TEXT_DIM)).wrap());
-                        ui.label(RichText::new(format!("Rust {} or newer · {} license", env!("CARGO_PKG_RUST_VERSION"), env!("CARGO_PKG_LICENSE"))).color(theme::TEXT_DIM));
-                        ui.label(RichText::new(env!("CARGO_PKG_REPOSITORY")).size(11.5).color(theme::TEXT_DIM));
-                        ui.add_space(6.0);
-                        if ui.button(t("dialog.close")).clicked() {
-                            keep = false;
-                        }
-                    });
+                    ui.set_width(460.0);
+                    if self.about.show(ui) {
+                        keep = false;
+                    }
                 }
             }
         });
@@ -1797,6 +2110,9 @@ impl EditorApp {
         if let Some(pending) = then {
             self.run(pending);
         }
+        if let Some(pending) = open {
+            self.guard(pending);
+        }
     }
 }
 
@@ -1805,7 +2121,12 @@ impl EditorApp {
 fn save_as_check(project: &std::path::Path, path: &str) -> (bool, bool) {
     let path = path.trim().replace('\\', "/");
     let target = ab_engine::scene_file::with_scene_extension(&path);
-    let valid = !path.is_empty()
+    // The file needs a name: not a folder (`scenes/`) nor a hidden file the asset list skips.
+    let named = path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| !name.is_empty() && !name.starts_with('.'));
+    let valid = named
         && !path.split('/').any(|part| part == "..")
         && !path.starts_with('/')
         && !std::path::Path::new(&path).is_absolute()
@@ -1869,7 +2190,7 @@ impl TabViewer for Tabs<'_> {
                 let focus = self.viewport.camera.pivot;
                 self.scene_tree.show(ui, self.editor, focus);
                 if std::mem::take(&mut self.scene_tree.frame_request) {
-                    self.viewport.frame_selection(self.editor);
+                    self.viewport.frame_selection_everywhere(self.editor);
                 }
             }
             Tab::Viewport => self.viewport.show(ui, self.editor, self.render_state),
@@ -1979,6 +2300,7 @@ impl EditorApp {
             }
         }
         self.poll_git(ctx);
+        self.open_requested(ctx);
         if self.export.poll() {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
@@ -1995,15 +2317,18 @@ impl EditorApp {
         let delta = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.editor.tick(delta);
+        // Not while a dialog is open: the unsaved-changes prompt is about the scene as it is.
+        if self.dialog.is_none() && self.disk_checked.elapsed() >= Duration::from_secs(1) {
+            self.disk_checked = now;
+            self.editor.check_scene_on_disk();
+        }
 
         let title = self.editor.title();
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
         }
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.allow_close
-            && self.editor.modified
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.has_unsaved()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             // Saving from the dialog must write the edited scene, not the game's state.
@@ -2013,6 +2338,8 @@ impl EditorApp {
         if self.allow_close {
             self.allow_close = false;
             self.editor.modified = false;
+            self.animation.discard_changes();
+            self.editor.config_modified = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if let Some(path) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new(OPEN_REQUEST))) {
@@ -2164,6 +2491,12 @@ impl EditorApp {
         // One undo step per drag or text edit.
         let idle =
             ctx.input(|i| !i.pointer.any_down()) && !ctx.egui_wants_keyboard_input() && !host.busy;
+        if let Some(scene) = &self.editor.scene_path {
+            if self.settings.recent_scenes(self.editor.project()).first() != Some(scene) {
+                let project = self.editor.project().to_path_buf();
+                self.settings.add_recent_scene(&project, scene);
+            }
+        }
         if idle {
             self.editor.end_gesture();
             // Not while a step is being dragged: once, when it is let go.
@@ -2209,7 +2542,10 @@ mod tests {
             "asked first"
         );
         assert!(!app.editor.is_playing(), "back to the edited scene");
-        assert!(app.editor.node_at("Unsaved").is_some(), "the edit is still there");
+        assert!(
+            app.editor.node_at("Unsaved").is_some(),
+            "the edit is still there"
+        );
         assert_eq!(app.editor.scene_path, None);
     }
 
@@ -2233,7 +2569,9 @@ mod tests {
         );
         // A save that fails (a folder is in the way) keeps the changes: nothing runs.
         std::fs::create_dir_all(project.join("scenes/taken.abscene")).unwrap();
-        assert!(app.finish_save_as("scenes/taken", Some(Pending::Quit)).is_none());
+        assert!(app
+            .finish_save_as("scenes/taken", Some(Pending::Quit))
+            .is_none());
         assert!(app.editor.modified);
         // Saved: then quit.
         let then = app.finish_save_as("scenes/level", Some(Pending::Quit));
@@ -2250,7 +2588,10 @@ mod tests {
             std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         // `slice/level` is saved as `slice/level.abscene`, which exists.
         assert_eq!(save_as_check(&project, "slice/level"), (true, true));
-        assert_eq!(save_as_check(&project, "slice\\level.abscene"), (true, true));
+        assert_eq!(
+            save_as_check(&project, "slice\\level.abscene"),
+            (true, true)
+        );
         assert_eq!(save_as_check(&project, "scenes/brand_new"), (true, false));
         // Outside the project: refused.
         assert!(!save_as_check(&project, "../outside").0);

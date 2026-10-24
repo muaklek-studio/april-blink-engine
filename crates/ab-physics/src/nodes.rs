@@ -162,8 +162,11 @@ impl PhysicsNodes for SceneTree {
             if length < settings.min_bone_length {
                 continue;
             }
+            // Either order works (a reversed range must not panic in `clamp`).
+            let [a, b] = settings.radius_range;
             let radius = (length * settings.radius)
-                .clamp(settings.radius_range[0], settings.radius_range[1])
+                .max(a.min(b))
+                .min(a.max(b))
                 .min(length * 0.5);
             let volume = std::f32::consts::PI * radius * radius * (length + radius * 4.0 / 3.0);
             capsules.push((i, radius, length, volume));

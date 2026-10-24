@@ -501,7 +501,10 @@ fn configure(
         .loop_region(looping.then(|| Region::from(..)))
 }
 
+/// A NaN position (a body that blew up, `play_at(NaN)`) would make the track's gain NaN and
+/// poison the mix: non-finite vectors become zero.
 fn mint_vec(v: Vec3) -> mint::Vector3<f32> {
+    let v = if v.is_finite() { v } else { Vec3::ZERO };
     mint::Vector3 {
         x: v.x,
         y: v.y,

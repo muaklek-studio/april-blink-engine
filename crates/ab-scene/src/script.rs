@@ -227,15 +227,17 @@ impl<T: NodeScript> NodeScript for Guarded<T> {
             return false;
         }
         let script = &mut self.script;
-        catch_unwind(AssertUnwindSafe(|| script.set_exported_property(name, value)))
-            .unwrap_or_else(|_| {
-                error!(
-                    script = std::any::type_name::<T>(),
-                    property = name,
-                    "set_exported_property panicked; the property keeps its value"
-                );
-                false
-            })
+        catch_unwind(AssertUnwindSafe(|| {
+            script.set_exported_property(name, value)
+        }))
+        .unwrap_or_else(|_| {
+            error!(
+                script = std::any::type_name::<T>(),
+                property = name,
+                "set_exported_property panicked; the property keeps its value"
+            );
+            false
+        })
     }
 }
 

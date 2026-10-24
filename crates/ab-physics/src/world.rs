@@ -459,15 +459,26 @@ impl PhysicsWorld {
                 body.reset_torques(false);
             }
         }
-        for (handle, pending) in self.motions.drain(..) {
+        // A NaN from a script (`normalize()` of a zero vector) would poison the body's pose:
+        // non-finite motion is dropped.
+        let finite = |v: Vec3| v.is_finite().then_some(v);
+        for (handle, mut pending) in self.motions.drain(..) {
             let Some(body) = self.bodies.get_mut(handle) else {
                 continue;
             };
-            if let Some(velocity) = pending.linear_velocity {
+            if let Some(velocity) = pending.linear_velocity.and_then(finite) {
                 body.set_linvel(velocity, true);
             }
-            if let Some(velocity) = pending.angular_velocity {
+            if let Some(velocity) = pending.angular_velocity.and_then(finite) {
                 body.set_angvel(velocity, true);
+            }
+            for v in [
+                &mut pending.impulse,
+                &mut pending.torque_impulse,
+                &mut pending.force,
+                &mut pending.torque,
+            ] {
+                *v = finite(*v).unwrap_or(Vec3::ZERO);
             }
             if pending.impulse != Vec3::ZERO {
                 body.apply_impulse(pending.impulse, true);
@@ -476,7 +487,9 @@ impl PhysicsWorld {
                 body.apply_torque_impulse(pending.torque_impulse, true);
             }
             for (impulse, at) in pending.point_impulses {
-                body.apply_impulse_at_point(impulse, at, true);
+                if impulse.is_finite() && at.is_finite() {
+                    body.apply_impulse_at_point(impulse, at, true);
+                }
             }
             if pending.force != Vec3::ZERO || pending.torque != Vec3::ZERO {
                 body.add_force(pending.force, true);

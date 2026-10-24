@@ -300,7 +300,11 @@ fn a_timer_stopped_in_ready_stays_stopped() {
     for _ in 0..5 {
         tree.process(0.1);
     }
-    assert_eq!(*fired.borrow(), 0, "autostart must not undo the script's stop()");
+    assert_eq!(
+        *fired.borrow(),
+        0,
+        "autostart must not undo the script's stop()"
+    );
     assert!(tree.component::<Timer>(timer).unwrap().is_stopped());
 }
 

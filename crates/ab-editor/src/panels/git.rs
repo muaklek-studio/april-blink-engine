@@ -17,6 +17,8 @@ const REFRESH_EVERY: Duration = Duration::from_secs(3);
 pub struct GitPanel {
     message: String,
     amend: bool,
+    /// A commit is running: the message is cleared once it is made, kept if it fails.
+    committing: Option<u64>,
     /// Name typed for a new branch (the field is open while `Some`).
     new_branch: Option<String>,
     /// List only changes inside the project folder (when the repository is bigger).
@@ -58,6 +60,13 @@ enum Action {
 impl GitPanel {
     pub fn show(&mut self, ui: &mut egui::Ui, git: &mut GitClient, project: &Path) {
         git.refresh_every(REFRESH_EVERY);
+        if let Some(made) = self.committing.and_then(|ticket| git.commit_made(ticket)) {
+            self.committing = None;
+            if made {
+                self.message.clear();
+                self.amend = false;
+            }
+        }
         let root = project_root(project);
         let mut action = None;
         let status = match &git.state {
@@ -214,10 +223,10 @@ impl GitPanel {
             Some(Action::Refresh) => git.refresh(),
             Some(Action::Op(op)) => {
                 if matches!(op, GitOp::Commit { .. }) {
-                    self.message.clear();
-                    self.amend = false;
+                    self.committing = Some(git.commit(op));
+                } else {
+                    git.run(op);
                 }
-                git.run(op);
             }
             Some(Action::Diff {
                 path,

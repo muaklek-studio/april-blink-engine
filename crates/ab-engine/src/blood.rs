@@ -27,6 +27,9 @@ use ab_rendering::{
 };
 use ab_scene::{NodeHandle, SceneError, SceneTree};
 
+/// Splats one hit throws, at most (each is a raycast).
+const MAX_SPLATS_PER_HIT: u32 = 256;
+
 /// How a [`BloodNodes::spawn_blood`] looks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BloodOptions {
@@ -141,7 +144,8 @@ fn place_splats(
             return;
         };
         let query = QueryOptions::new().with_mask(options.collision_mask);
-        for _ in 0..options.splats {
+        // One raycast per splat: a script's huge count must not freeze the frame.
+        for _ in 0..options.splats.min(MAX_SPLATS_PER_HIT) {
             // Thrown along the hit, falling: most land ahead and below, some right under.
             let jitter = Vec3::new(
                 rng.range_f32(-1.0, 1.0),

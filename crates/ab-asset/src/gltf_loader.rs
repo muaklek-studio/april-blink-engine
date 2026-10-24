@@ -91,6 +91,8 @@ struct Loader<'a> {
     render: &'a mut RenderAssets,
     textures: HashMap<(usize, ColorSpace), TextureHandle>,
     default_material: Option<MaterialHandle>,
+    /// Joints of the largest skin: a vertex naming a joint past it is damaged data.
+    max_joints: usize,
 }
 
 pub(crate) fn load(
@@ -113,6 +115,11 @@ pub(crate) fn load(
         render,
         textures: HashMap::new(),
         default_material: None,
+        max_joints: document
+            .skins()
+            .map(|s| s.joints().count())
+            .max()
+            .unwrap_or(0),
     };
 
     loader.decode_textures(document)?;
@@ -482,7 +489,15 @@ impl Loader<'_> {
             let skin: Vec<SkinWeights> = joints
                 .into_u16()
                 .zip(weights.into_f32())
-                .map(|(joints, mut weights)| {
+                .map(|(mut joints, mut weights)| {
+                    // A joint index past every skin (65535 in a damaged file) would size
+                    // each instance's joint palette by it: that influence is dropped.
+                    for (joint, weight) in joints.iter_mut().zip(weights.iter_mut()) {
+                        if usize::from(*joint) >= self.max_joints || !weight.is_finite() {
+                            *joint = 0;
+                            *weight = 0.0;
+                        }
+                    }
                     let sum: f32 = weights.iter().sum();
                     if sum > 0.0 {
                         weights.iter_mut().for_each(|w| *w /= sum);

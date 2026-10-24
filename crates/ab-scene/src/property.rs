@@ -48,9 +48,8 @@ impl ScriptPropertyDesc {
 /// A string value must point to valid UTF-8 (or be invalid as a whole: it then reads as
 /// `None`).
 pub unsafe fn to_toml(value: &ffi::Value) -> Option<TomlValue> {
-    let floats = |v: &[f32]| {
-        TomlValue::Array(v.iter().map(|&x| TomlValue::Float(f64::from(x))).collect())
-    };
+    let floats =
+        |v: &[f32]| TomlValue::Array(v.iter().map(|&x| TomlValue::Float(f64::from(x))).collect());
     Some(match value.tag {
         ffi::Tag::BOOL => TomlValue::Boolean(value.as_bool()?),
         ffi::Tag::INT => TomlValue::Integer(value.as_int()?),
@@ -139,10 +138,12 @@ pub fn to_ffi(kind: Option<ffi::Tag>, value: &TomlValue) -> Option<ffi::Value> {
         ffi::Tag::COLOR => ffi::Value::color(match value {
             TomlValue::String(hex) => parse_color_hex(hex)?,
             _ => {
-                let v = numbers(4).or_else(|| numbers(3).map(|mut v| {
-                    v.push(1.0);
-                    v
-                }))?;
+                let v = numbers(4).or_else(|| {
+                    numbers(3).map(|mut v| {
+                        v.push(1.0);
+                        v
+                    })
+                })?;
                 ffi::Color {
                     r: v[0],
                     g: v[1],
@@ -218,13 +219,19 @@ mod tests {
         assert!(to_ffi(Some(ffi::Tag::INT), &TomlValue::Float(2.5)).is_none());
         // Mixed integers and floats in a vector.
         let mixed = TomlValue::Array(vec![TomlValue::Integer(1), TomlValue::Float(2.5)]);
-        let v = to_ffi(Some(ffi::Tag::VEC2), &mixed).unwrap().as_vec2().unwrap();
+        let v = to_ffi(Some(ffi::Tag::VEC2), &mixed)
+            .unwrap()
+            .as_vec2()
+            .unwrap();
         assert_eq!((v.x, v.y), (1.0, 2.5));
         // A color is a color, not a string or a quaternion.
         let red = to_ffi(Some(ffi::Tag::COLOR), &TomlValue::String("#ff0000".into())).unwrap();
         assert_eq!(red.tag, ffi::Tag::COLOR);
         let four = TomlValue::Array(vec![TomlValue::Float(1.0); 4]);
-        assert_eq!(to_ffi(Some(ffi::Tag::COLOR), &four).unwrap().tag, ffi::Tag::COLOR);
+        assert_eq!(
+            to_ffi(Some(ffi::Tag::COLOR), &four).unwrap().tag,
+            ffi::Tag::COLOR
+        );
         // Wrong types are refused instead of reaching the script.
         assert!(to_ffi(Some(ffi::Tag::BOOL), &TomlValue::Integer(1)).is_none());
         assert!(to_ffi(Some(ffi::Tag::VEC3), &mixed).is_none());

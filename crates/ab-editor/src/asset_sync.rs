@@ -35,6 +35,40 @@ fn run(project: &Project) -> Outcome {
     asset_store::sync(project).map_err(|e| format!("{e:#}"))
 }
 
+/// The first sync of a project being opened, run while the project manager waits for its
+/// scripts to build (a fresh clone unpacks its assets there, not with the window frozen).
+static PRESYNC: Mutex<Option<(std::path::PathBuf, Task<Outcome>)>> = Mutex::new(None);
+
+/// Starts the first sync of `project` in the background (see [`AssetSync::start`]).
+pub fn presync(project: &Project) {
+    let copy = project.clone();
+    let task = jobs::spawn_background("ab-asset-presync", move || run(&copy));
+    *PRESYNC.lock().unwrap_or_else(|e| e.into_inner()) = Some((project.root.clone(), task));
+}
+
+/// Whether the first sync started for the project at `root` is done (true without one).
+pub fn presync_finished(root: &std::path::Path) -> bool {
+    match &mut *PRESYNC.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some((at, task)) if at == root => task.is_finished(),
+        _ => true,
+    }
+}
+
+/// The outcome of the first sync started for `root`, waiting for it if needed.
+fn take_presync(root: &std::path::Path) -> Option<Outcome> {
+    let mut slot = PRESYNC.lock().unwrap_or_else(|e| e.into_inner());
+    match slot.take() {
+        Some((at, task)) if at == root => {
+            drop(slot);
+            Some(task.wait())
+        }
+        other => {
+            *slot = other;
+            None
+        }
+    }
+}
+
 impl AssetSync {
     /// Brings `project` in step now (before its scenes load), and keeps it so.
     pub fn start(project: Project, editor: &mut Editor) -> Self {
@@ -47,7 +81,8 @@ impl AssetSync {
             }
         }
         let started = Instant::now();
-        let outcome = run(&project);
+        // Started by the project manager already, most of the time.
+        let outcome = take_presync(&project.root).unwrap_or_else(|| run(&project));
         tracing::info!(elapsed = ?started.elapsed(), "assets synced");
         let mut sync = Self {
             project,
@@ -87,7 +122,10 @@ impl AssetSync {
             }
             let outcome = run(&project);
             let synced = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
-            results.lock().unwrap_or_else(|e| e.into_inner()).push(outcome);
+            results
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(outcome);
             if phase == Phase::After {
                 return Ok(Vec::new());
             }
@@ -97,10 +135,14 @@ impl AssetSync {
             }
             asset_store::prepare_commit(&project).map_err(|err| format!("{err:#}"))?;
             // Committed with the scenes that use them; the git files with the packs.
-            Ok([project.pack_dir(), project.root.join(".gitignore"), project.root.join(".gitattributes")]
-                .into_iter()
-                .filter(|path| path.exists())
-                .collect())
+            Ok([
+                project.pack_dir(),
+                project.root.join(".gitignore"),
+                project.root.join(".gitattributes"),
+            ]
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect())
         })
     }
 
@@ -121,7 +163,9 @@ impl AssetSync {
         }
         if self.last.elapsed() >= EVERY {
             let project = self.project.clone();
-            self.task = Some(jobs::spawn_background("ab-asset-sync", move || run(&project)));
+            self.task = Some(jobs::spawn_background("ab-asset-sync", move || {
+                run(&project)
+            }));
         }
     }
 
@@ -150,10 +194,7 @@ impl AssetSync {
             let conflicts = report.conflicts.join(", ");
             tracing::warn!(
                 "packed assets changed here and in git: kept yours, theirs are in {}: {conflicts}",
-                self.project
-                    .data_dir()
-                    .join("conflicts")
-                    .display()
+                self.project.data_dir().join("conflicts").display()
             );
             editor.fail(format!(
                 "Asset conflict (kept yours; theirs in .ablink/conflicts): {conflicts}"

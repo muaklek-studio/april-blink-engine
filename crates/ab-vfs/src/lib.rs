@@ -27,6 +27,8 @@ mod pack;
 mod path;
 mod source;
 
+/// The packs' checksum (FNV-1a 64), to compare files with what a pack holds.
+pub use ab_core::utils::hash::fnv1a64;
 pub use chunks::{
     chunk_of, is_chunked, ChunkInfo, ChunkStats, ChunkedSource, Manifest, CHUNK_DIR, MANIFEST_FILE,
 };
@@ -35,8 +37,6 @@ pub use pack::{
     PROJECT_DIR,
 };
 pub use path::normalize;
-/// The packs' checksum (FNV-1a 64), to compare files with what a pack holds.
-pub use ab_core::utils::hash::fnv1a64;
 pub use source::{DirSource, FileSource, PackSource, Vfs};
 
 /// Errors of the file system and packs.

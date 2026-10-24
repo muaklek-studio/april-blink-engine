@@ -4,6 +4,7 @@
 
 use super::ROW_SELECTED;
 use crate::git::{FileState, GitClient};
+use crate::i18n::{t, tf};
 use crate::project::{AssetEntry, AssetKind};
 use crate::scripts::{self, ScriptDrag, ScriptFile};
 use crate::state::Editor;
@@ -77,7 +78,7 @@ impl AssetsPanel {
         };
         if let Some(path) = view {
             let kind = AssetKind::of(std::path::Path::new(path));
-            panel.viewer.open(project, path, kind);
+            let _ = panel.viewer.open(project, path, kind);
         }
         panel
     }
@@ -118,7 +119,7 @@ impl AssetsPanel {
         ui.horizontal(|ui| {
             if ui
                 .button(icon::ARROW_CLOCKWISE)
-                .on_hover_text("Rescan the project")
+                .on_hover_text(t("assets.rescan_hint"))
                 .clicked()
             {
                 editor.assets.request_rescan();
@@ -128,7 +129,7 @@ impl AssetsPanel {
             }
             if ui
                 .add_enabled(!self.folder.is_empty(), egui::Button::new(icon::ARROW_UP))
-                .on_hover_text("Parent folder")
+                .on_hover_text(t("assets.parent"))
                 .clicked()
             {
                 self.folder = if self.folder == SCRIPTS {
@@ -152,7 +153,7 @@ impl AssetsPanel {
             }
             if self.folder == SCRIPTS {
                 ui.label(RichText::new(icon::CARET_RIGHT).color(theme::TEXT_DIM));
-                let _ = ui.selectable_label(true, "Scripts");
+                let _ = ui.selectable_label(true, t("assets.scripts"));
             } else {
                 let mut prefix = String::new();
                 let parts: Vec<String> = self
@@ -175,7 +176,11 @@ impl AssetsPanel {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text(format!("{}  Search all files", icon::MAGNIFYING_GLASS))
+                        .hint_text(format!(
+                            "{}  {}",
+                            icon::MAGNIFYING_GLASS,
+                            t("assets.search")
+                        ))
                         .desired_width(220.0),
                 );
             });
@@ -241,13 +246,15 @@ impl AssetsPanel {
             } else {
                 self.folder.clone()
             };
-            ui.label(RichText::new(format!("{}  {here}", icon::FOLDER_OPEN)).color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(format!("{}  {here}", icon::FOLDER_OPEN)).color(theme::TEXT_DIM),
+            );
             ui.separator();
-            ui.menu_button(format!("{}  Create", icon::PLUS), |ui| {
+            ui.menu_button(format!("{}  {}", icon::PLUS, t("menu.create")), |ui| {
                 self.create_items(ui, editor);
             });
             if ui
-                .button(format!("{}  Rescan", icon::ARROW_CLOCKWISE))
+                .button(format!("{}  {}", icon::ARROW_CLOCKWISE, t("assets.rescan")))
                 .clicked()
             {
                 editor.assets.request_rescan();
@@ -255,7 +262,7 @@ impl AssetsPanel {
             }
             if !self.folder.is_empty()
                 && ui
-                    .button(format!("{}  Parent folder", icon::ARROW_UP))
+                    .button(format!("{}  {}", icon::ARROW_UP, t("assets.parent")))
                     .clicked()
             {
                 self.folder = if in_scripts {
@@ -273,14 +280,22 @@ impl AssetsPanel {
             };
             if let Some(dir) = dir {
                 if ui
-                    .button(format!("{}  Show in file manager", icon::ARROW_SQUARE_OUT))
+                    .button(format!(
+                        "{}  {}",
+                        icon::ARROW_SQUARE_OUT,
+                        t("assets.reveal")
+                    ))
                     .clicked()
                 {
                     action = Some(Action::SystemOpen(dir.clone()));
                     ui.close();
                 }
                 if ui
-                    .button(format!("{}  Copy folder path", icon::CLIPBOARD_TEXT))
+                    .button(format!(
+                        "{}  {}",
+                        icon::CLIPBOARD_TEXT,
+                        t("assets.copy_folder_path")
+                    ))
                     .clicked()
                 {
                     ui.ctx().copy_text(dir.display().to_string());
@@ -293,13 +308,9 @@ impl AssetsPanel {
             .show(ui, |ui| {
                 if entries.is_empty() && script_files.is_empty() && !show_scripts_folder {
                     if in_scripts {
-                        super::empty_hint(
-                            ui,
-                            icon::FILE_RS,
-                            "No scripts yet: Create → Script makes one",
-                        );
+                        super::empty_hint(ui, icon::FILE_RS, &t("assets.no_scripts"));
                     } else {
-                        super::empty_hint(ui, icon::FOLDER_OPEN, "Nothing here");
+                        super::empty_hint(ui, icon::FOLDER_OPEN, &t("assets.empty"));
                     }
                     return;
                 }
@@ -329,7 +340,11 @@ impl AssetsPanel {
             });
 
         match action {
-            Some(Action::View(path, kind)) => self.viewer.open(editor.project(), &path, kind),
+            Some(Action::View(path, kind)) => {
+                if !self.viewer.open(editor.project(), &path, kind) {
+                    editor.fail(t("assets.viewers_pinned"));
+                }
+            }
             Some(Action::Enter(folder)) => {
                 self.folder = folder;
                 self.filter.clear();
@@ -349,7 +364,7 @@ impl AssetsPanel {
     }
 
     fn create_menu(&mut self, ui: &mut egui::Ui, editor: &Editor) {
-        ui.menu_button(format!("{}  Create", icon::PLUS), |ui| {
+        ui.menu_button(format!("{}  {}", icon::PLUS, t("menu.create")), |ui| {
             self.create_items(ui, editor);
         });
     }
@@ -362,9 +377,9 @@ impl AssetsPanel {
             let script = ui
                 .add_enabled(
                     can_script,
-                    egui::Button::new(format!("{}  Script…", icon::FILE_RS)),
+                    egui::Button::new(format!("{}  {}", icon::FILE_RS, t("assets.script_item"))),
                 )
-                .on_disabled_hover_text("This project has no game crate (src/lib.rs) for scripts");
+                .on_disabled_hover_text(t("assets.no_crate_hint"));
             if script.clicked() {
                 self.create = Some(Create {
                     kind: CreateKind::Script,
@@ -378,7 +393,11 @@ impl AssetsPanel {
             }
             let folder = ui.add_enabled(
                 self.folder != SCRIPTS,
-                egui::Button::new(format!("{}  Folder…", icon::FOLDER_PLUS)),
+                egui::Button::new(format!(
+                    "{}  {}",
+                    icon::FOLDER_PLUS,
+                    t("assets.folder_item")
+                )),
             );
             if folder.clicked() {
                 self.create = Some(Create {
@@ -393,7 +412,11 @@ impl AssetsPanel {
             }
             let material = ui.add_enabled(
                 self.folder != SCRIPTS,
-                egui::Button::new(format!("{}  Material…", icon::DROP_HALF)),
+                egui::Button::new(format!(
+                    "{}  {}",
+                    icon::DROP_HALF,
+                    t("assets.material_item")
+                )),
             );
             if material.clicked() {
                 self.create = Some(Create {
@@ -418,9 +441,9 @@ impl AssetsPanel {
         let modal = egui::Modal::new(egui::Id::new("asset_create")).show(ctx, |ui| {
             ui.set_width(420.0);
             let (glyph, title) = match create.kind {
-                CreateKind::Script => (icon::FILE_RS, "New Script"),
-                CreateKind::Folder => (icon::FOLDER_PLUS, "New Folder"),
-                CreateKind::Material => (icon::DROP_HALF, "New Material"),
+                CreateKind::Script => (icon::FILE_RS, t("assets.new_script")),
+                CreateKind::Folder => (icon::FOLDER_PLUS, t("assets.new_folder")),
+                CreateKind::Material => (icon::DROP_HALF, t("assets.new_material")),
             };
             ui.heading(format!("{glyph}  {title}"));
             ui.add_space(4.0);
@@ -431,20 +454,28 @@ impl AssetsPanel {
             }
             let preview = match create.kind {
                 CreateKind::Script => scripts::type_name(&create.name).map(|name| {
-                    format!(
-                        "Script {name} in src/scripts/{}.rs",
-                        scripts::module_name(&name)
+                    tf(
+                        "assets.script_preview",
+                        &[
+                            ("name", &name),
+                            (
+                                "path",
+                                &format!("src/scripts/{}.rs", scripts::module_name(&name)),
+                            ),
+                        ],
                     )
                 }),
-                CreateKind::Folder => folder_name(&create.name)
-                    .map(|name| format!("Folder {}", join(&self.folder, &name))),
+                CreateKind::Folder => folder_name(&create.name).map(|name| {
+                    tf(
+                        "assets.folder_preview",
+                        &[("path", &join(&self.folder, &name))],
+                    )
+                }),
                 CreateKind::Material => folder_name(&create.name).map(|name| {
-                    format!(
-                        "Material {}",
-                        join(
-                            &self.folder,
-                            &format!("{name}.{}", ab_engine::scene_file::MATERIAL_EXTENSION)
-                        )
+                    let file = format!("{name}.{}", ab_engine::scene_file::MATERIAL_EXTENSION);
+                    tf(
+                        "assets.material_preview",
+                        &[("path", &join(&self.folder, &file))],
                     )
                 }),
             };
@@ -461,20 +492,21 @@ impl AssetsPanel {
             }
             if create.kind == CreateKind::Script {
                 template_picker(ui, create);
-                ui.checkbox(&mut create.open_after, "Open it in the code editor");
+                ui.checkbox(&mut create.open_after, t("assets.open_after"));
             }
             ui.separator();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let valid = preview.is_ok();
                 let button = ui.add_enabled(
                     valid,
-                    egui::Button::new(RichText::new("Create").strong()).fill(theme::ACCENT_DIM),
+                    egui::Button::new(RichText::new(t("menu.create")).strong())
+                        .fill(theme::ACCENT_DIM),
                 );
                 let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if valid && (button.clicked() || enter) {
                     done = Some((create.kind, create.name.clone(), create.template));
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t("dialog.cancel")).clicked() {
                     close = true;
                 }
             });
@@ -513,7 +545,10 @@ impl AssetsPanel {
             CreateKind::Script => {
                 let template = template.and_then(|i| SCRIPT_TEMPLATES.get(i));
                 let taken = editor.registered_script_names();
-                let scripts = editor.scripts.as_mut().ok_or("no game crate")?;
+                let scripts = editor
+                    .scripts
+                    .as_mut()
+                    .ok_or_else(|| t("assets.no_crate"))?;
                 let (name, path) = scripts
                     .create_from(name, &taken, template)
                     .map_err(|e| format!("{e:#}"))?;
@@ -526,13 +561,21 @@ impl AssetsPanel {
                         .map_err(|e| format!("{e:#}"))?,
                     None => Vec::new(),
                 };
-                let attach = template.map_or("a node".to_owned(), |t| t.attach_to.to_owned());
+                let attach =
+                    template.map_or_else(|| t("assets.a_node"), |t| t.attach_to.to_owned());
                 if added.is_empty() {
-                    editor.info(format!("Created script {name}: drag it onto {attach}"));
+                    editor.info(tf(
+                        "assets.script_created",
+                        &[("name", &name), ("node", &attach)],
+                    ));
                 } else {
-                    editor.info(format!(
-                        "Created script {name} (drag it onto {attach}); input actions added: {}",
-                        added.join(", ")
+                    editor.info(tf(
+                        "assets.script_created_actions",
+                        &[
+                            ("name", &name),
+                            ("node", &attach),
+                            ("actions", &added.join(", ")),
+                        ],
                     ));
                 }
                 if open_after {
@@ -551,7 +594,7 @@ impl AssetsPanel {
                 let relative = join(&self.folder, &file);
                 let path = editor.project().join(&relative);
                 if path.exists() {
-                    return Err(format!("{relative} already exists."));
+                    return Err(tf("assets.exists", &[("path", &relative)]));
                 }
                 let material = ab_engine::scene_file::MaterialDesc {
                     color: Some(ab_engine::scene_file::ColorDesc::Hex("#c8ccd4".into())),
@@ -559,12 +602,12 @@ impl AssetsPanel {
                     metallic: Some(0.0),
                     ..Default::default()
                 };
-                editor.write_project_file(&path, material.to_toml()).map_err(|e| e.to_string())?;
+                editor
+                    .write_project_file(&path, material.to_toml())
+                    .map_err(|e| e.to_string())?;
                 editor.assets.request_rescan();
                 self.selected = Some(relative.clone());
-                editor.info(format!(
-                    "Created {relative}: pick it as a mesh's Material file in the Inspector"
-                ));
+                editor.info(tf("assets.material_created", &[("path", &relative)]));
                 Ok(())
             }
             CreateKind::Folder => {
@@ -572,7 +615,7 @@ impl AssetsPanel {
                 let relative = join(&self.folder, &name);
                 let path = editor.project().join(&relative);
                 if path.exists() {
-                    return Err(format!("{relative} already exists."));
+                    return Err(tf("assets.exists", &[("path", &relative)]));
                 }
                 std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
                 editor.assets.request_rescan();
@@ -593,28 +636,28 @@ impl AssetsPanel {
             .unwrap_or_default();
         let modal = egui::Modal::new(egui::Id::new("script_delete")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.heading(format!("{}  Delete Script", icon::TRASH));
-            ui.label(format!(
-                "Delete src/scripts/{file}? Nodes that use its scripts keep the name but do \
-                 nothing until it exists again."
+            ui.heading(format!("{}  {}", icon::TRASH, t("assets.delete_script")));
+            ui.label(tf(
+                "assets.delete_body",
+                &[("path", &format!("src/scripts/{file}"))],
             ));
             ui.separator();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(egui::Button::new(
-                        RichText::new("Delete").color(theme::ERROR),
+                        RichText::new(t("command.delete")).color(theme::ERROR),
                     ))
                     .clicked()
                 {
                     let result = editor.scripts.as_mut().map(|s| s.delete(&path));
                     match result {
-                        Some(Ok(())) => editor.info(format!("Deleted {file}")),
+                        Some(Ok(())) => editor.info(tf("assets.deleted", &[("file", &file)])),
                         Some(Err(err)) => editor.fail(format!("{err:#}")),
                         None => {}
                     }
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t("dialog.cancel")).clicked() {
                     close = true;
                 }
             });
@@ -639,22 +682,27 @@ impl AssetsPanel {
         };
         ui.painter().rect_filled(rect, 6.0, fill);
         tile_icon(ui, rect, icon::FOLDER_NOTCH_OPEN, SCRIPT_COLOR);
-        tile_label(ui, rect, &format!("Scripts ({count})"));
-        let response = response.on_hover_text(format!(
-            "The game's scripts ({count}), in src/scripts. Double-click to open."
-        ));
+        tile_label(ui, rect, &tf("assets.scripts_count", &[("count", &count)]));
+        let response = response.on_hover_text(tf("assets.scripts_hint", &[("count", &count)]));
         let mut action = None;
         if response.double_clicked() {
             action = Some(Action::Enter(SCRIPTS.into()));
         }
         response.context_menu(|ui| {
-            if ui.button(format!("{}  Open", icon::FOLDER_OPEN)).clicked() {
+            if ui
+                .button(format!("{}  {}", icon::FOLDER_OPEN, t("assets.open")))
+                .clicked()
+            {
                 action = Some(Action::Enter(SCRIPTS.into()));
                 ui.close();
             }
             if let Some(scripts) = &editor.scripts {
                 if ui
-                    .button(format!("{}  Show in file manager", icon::ARROW_SQUARE_OUT))
+                    .button(format!(
+                        "{}  {}",
+                        icon::ARROW_SQUARE_OUT,
+                        t("assets.reveal")
+                    ))
                     .clicked()
                 {
                     action = Some(Action::SystemOpen(scripts.dir()));
@@ -709,15 +757,17 @@ impl AssetsPanel {
         }
         let types: Vec<&str> = file.types.iter().map(|(t, _)| t.as_str()).collect();
         let hover = if has_script {
-            format!(
-                "{} — src/scripts/{}\nDrag onto a node to attach it. Double-click to edit.",
-                types.join(", "),
-                file.file_name()
+            tf(
+                "assets.script_hint",
+                &[
+                    ("types", &types.join(", ")),
+                    ("path", &format!("src/scripts/{}", file.file_name())),
+                ],
             )
         } else {
-            format!(
-                "src/scripts/{}: no `impl NodeScript for …` in this file",
-                file.file_name()
+            tf(
+                "assets.no_script_type",
+                &[("path", &format!("src/scripts/{}", file.file_name()))],
             )
         };
         let response = response.on_hover_text(hover);
@@ -733,17 +783,25 @@ impl AssetsPanel {
             action = Some(Action::OpenScript(file.path.clone(), line));
         }
         response.context_menu(|ui| {
-            let editor_name =
-                scripts::code_editor().map_or("the default app".to_owned(), |e| e.name.to_owned());
+            let editor_name = scripts::code_editor()
+                .map_or_else(|| t("assets.default_app"), |e| e.name.to_owned());
             if ui
-                .button(format!("{}  Open in {editor_name}", icon::CODE))
+                .button(format!(
+                    "{}  {}",
+                    icon::CODE,
+                    tf("assets.open_in", &[("app", &editor_name)])
+                ))
                 .clicked()
             {
                 action = Some(Action::OpenScript(file.path.clone(), line));
                 ui.close();
             }
             if ui
-                .button(format!("{}  Show in file manager", icon::ARROW_SQUARE_OUT))
+                .button(format!(
+                    "{}  {}",
+                    icon::ARROW_SQUARE_OUT,
+                    t("assets.reveal")
+                ))
                 .clicked()
             {
                 action = Some(Action::SystemOpen(
@@ -753,7 +811,11 @@ impl AssetsPanel {
             }
             if let Some(name) = file.main_type() {
                 if ui
-                    .button(format!("{}  Copy script name", icon::CLIPBOARD_TEXT))
+                    .button(format!(
+                        "{}  {}",
+                        icon::CLIPBOARD_TEXT,
+                        t("assets.copy_script_name")
+                    ))
                     .clicked()
                 {
                     ui.ctx().copy_text(name.to_owned());
@@ -762,7 +824,10 @@ impl AssetsPanel {
             }
             ui.separator();
             if ui
-                .button(RichText::new(format!("{}  Delete…", icon::TRASH)).color(theme::ERROR))
+                .button(
+                    RichText::new(format!("{}  {}", icon::TRASH, t("assets.delete_item")))
+                        .color(theme::ERROR),
+                )
                 .clicked()
             {
                 self.delete = Some(file.path.clone());
@@ -871,28 +936,34 @@ impl AssetsPanel {
         response.context_menu(|ui| {
             if entry.kind == AssetKind::Scene
                 && ui
-                    .button(format!("{}  Open scene", icon::FOLDER_OPEN))
+                    .button(format!("{}  {}", icon::FOLDER_OPEN, t("viewer.open_scene")))
                     .clicked()
             {
                 action = Some(Action::Open(entry.path.clone()));
                 ui.close();
             }
             if crate::asset_viewer::can_view(entry.kind)
-                && ui.button(format!("{}  View", icon::EYE)).clicked()
+                && ui
+                    .button(format!("{}  {}", icon::EYE, t("assets.view")))
+                    .clicked()
             {
                 action = Some(Action::View(entry.path.clone(), entry.kind));
                 ui.close();
             }
             if draggable
                 && ui
-                    .button(format!("{}  Add to scene", icon::PLUS_CIRCLE))
+                    .button(format!(
+                        "{}  {}",
+                        icon::PLUS_CIRCLE,
+                        t("viewer.add_to_scene")
+                    ))
                     .clicked()
             {
                 action = Some(Action::Instance(entry.path.clone()));
                 ui.close();
             }
             if ui
-                .button(format!("{}  Copy path", icon::CLIPBOARD_TEXT))
+                .button(format!("{}  {}", icon::CLIPBOARD_TEXT, t("menu.copy_path")))
                 .clicked()
             {
                 ui.ctx().copy_text(entry.path.clone());
@@ -952,13 +1023,17 @@ pub fn open_script(editor: &mut Editor, path: &std::path::Path, line: usize) {
         .map(|s| s.crate_root.clone())
         .unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
     match scripts::open_script(path, line, &folder) {
-        Ok(with) => editor.info(format!(
-            "Opened {} in {with}",
-            path.file_name().unwrap_or_default().to_string_lossy()
+        Ok(with) => editor.info(tf(
+            "assets.opened",
+            &[
+                (
+                    "file",
+                    &path.file_name().unwrap_or_default().to_string_lossy(),
+                ),
+                ("app", &with),
+            ],
         )),
-        Err(err) => editor.fail(format!(
-            "{err:#} (set AB_CODE_EDITOR to your code editor's command)"
-        )),
+        Err(err) => editor.fail(tf("assets.open_failed", &[("error", &format!("{err:#}"))])),
     }
 }
 
@@ -966,10 +1041,10 @@ pub fn open_script(editor: &mut Editor, path: &std::path::Path, line: usize) {
 fn folder_name(input: &str) -> Result<String, String> {
     let name = input.trim();
     if name.is_empty() {
-        return Err("Type a folder name.".into());
+        return Err(t("assets.name_empty"));
     }
     if name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) || name.starts_with('.') {
-        return Err("A folder name cannot contain / \\ : * ? \" < > | or start with a dot.".into());
+        return Err(t("assets.name_invalid"));
     }
     Ok(name.to_owned())
 }
@@ -1004,12 +1079,13 @@ fn kind_color(kind: AssetKind) -> egui::Color32 {
 fn template_picker(ui: &mut egui::Ui, create: &mut Create) {
     ui.add_space(4.0);
     let chosen = create.template.and_then(|i| SCRIPT_TEMPLATES.get(i));
+    let empty = t("assets.empty_script");
     egui::ComboBox::from_id_salt("script_template")
-        .selected_text(chosen.map_or("Empty script", |t| t.title))
+        .selected_text(chosen.map_or(empty.as_str(), |t| t.title))
         .width(ui.available_width())
         .height(420.0)
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut create.template, None, "Empty script");
+            ui.selectable_value(&mut create.template, None, empty.as_str());
             let mut category = "";
             for (i, template) in SCRIPT_TEMPLATES.iter().enumerate() {
                 if template.category != category {
@@ -1033,16 +1109,16 @@ fn template_picker(ui: &mut egui::Ui, create: &mut Create) {
         }
         ui.label(RichText::new(template.description).small());
         ui.label(
-            RichText::new(format!("Attach it to {}.", template.attach_to))
+            RichText::new(tf("assets.attach_to", &[("node", &template.attach_to)]))
                 .small()
                 .color(theme::TEXT_DIM),
         );
         let actions: Vec<&str> = template.actions().map(|(name, _)| *name).collect();
         if !actions.is_empty() {
             ui.label(
-                RichText::new(format!(
-                    "Input actions (added to input.toml if missing): {}",
-                    actions.join(", ")
+                RichText::new(tf(
+                    "assets.template_actions",
+                    &[("actions", &actions.join(", "))],
                 ))
                 .small()
                 .color(theme::TEXT_DIM),
@@ -1054,9 +1130,17 @@ fn template_picker(ui: &mut egui::Ui, create: &mut Create) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn frame(ctx: &egui::Context, panel: &mut AssetsPanel, editor: &mut Editor, events: Vec<egui::Event>) {
+    fn frame(
+        ctx: &egui::Context,
+        panel: &mut AssetsPanel,
+        editor: &mut Editor,
+        events: Vec<egui::Event>,
+    ) {
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 500.0),
+            )),
             events,
             ..Default::default()
         };
@@ -1066,7 +1150,8 @@ mod tests {
 
     #[test]
     fn right_click_on_empty_space_opens_the_folder_menu() {
-        let project = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
+        let project =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
@@ -1080,7 +1165,12 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        for events in [vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![]] {
+        for events in [
+            vec![egui::Event::PointerMoved(at)],
+            vec![button(true)],
+            vec![button(false)],
+            vec![],
+        ] {
             frame(&ctx, &mut panel, &mut editor, events);
         }
         assert!(egui::Popup::is_any_open(&ctx), "the folder's menu is open");

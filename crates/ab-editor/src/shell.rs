@@ -168,6 +168,10 @@ fn resize(ctx: &egui::Context, size: Vec2, min: Vec2) {
 impl eframe::App for Shell {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        // `--screenshot-window`: tool windows drawn inside the main one, so its grab has them.
+        if self.screenshot.is_some() && self.options.screenshot_window.is_some() {
+            ctx.set_embed_viewports(true);
+        }
         self.screenshot(ctx);
         match &mut self.screen {
             Screen::Loading(loading) => match loading.update(ui, self.render_state.as_ref()) {
@@ -208,7 +212,10 @@ impl eframe::App for Shell {
                         ..self.options.clone()
                     };
                     let assets = project.assets.clone();
-                    let watch = project.package.is_some().then(|| ScriptWatch::new(project));
+                    let watch = project
+                        .package
+                        .is_some()
+                        .then(|| ScriptWatch::new(*project));
                     self.show_editor(ctx, assets, &options, watch);
                 }
             }

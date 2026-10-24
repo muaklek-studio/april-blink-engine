@@ -40,6 +40,8 @@ pub struct UiView {
     origin: Pos2,
     /// Points per UI unit.
     scale: f32,
+    /// Only the controls inside this UI node are edited (the UI Editor's), or all.
+    scope: Option<NodeHandle>,
 }
 
 impl UiView {
@@ -50,7 +52,14 @@ impl UiView {
         (scale > 0.0).then_some(Self {
             origin: rect.min,
             scale,
+            scope: None,
         })
+    }
+
+    /// Edits only the controls inside `root` (outlines, picking, dragging).
+    pub fn scoped(mut self, root: Option<NodeHandle>) -> Self {
+        self.scope = root;
+        self
     }
 
     pub fn screen(&self, r: &ab_engine::ui::Rect) -> Rect {
@@ -175,7 +184,13 @@ pub fn edit(
     editor: &mut Editor,
     snapping: bool,
 ) -> bool {
-    let controls = controls(editor);
+    let mut controls = controls(editor);
+    if let Some(root) = view.scope {
+        let tree = editor.tree();
+        controls.retain(|p| {
+            std::iter::successors(Some(p.node), |&n| tree.parent(n)).any(|n| n == root)
+        });
+    }
     let pointer = response.hover_pos();
     let active = editor.selection;
     let selected = |node: NodeHandle| editor.is_selected(node);
@@ -351,6 +366,7 @@ mod tests {
         let view = UiView {
             origin: Pos2::ZERO,
             scale: 0.5,
+            scope: None,
         };
         let placed = controls(&editor);
         let name =

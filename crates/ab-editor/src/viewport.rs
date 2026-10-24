@@ -105,7 +105,8 @@ pub struct ViewOptions {
     pub free_camera_in_play: bool,
     /// While editing: brighter ambient light and no fog, so dark levels stay workable.
     pub editor_lighting: bool,
-    /// While editing: select, move and resize UI controls in the view.
+    /// While editing: select, move and resize UI controls in the view (off by default: the
+    /// UI Editor is where interfaces are made).
     pub ui: bool,
 }
 
@@ -122,7 +123,7 @@ impl Default for ViewOptions {
             stats: true,
             free_camera_in_play: false,
             editor_lighting: true,
-            ui: true,
+            ui: false,
         }
     }
 }
@@ -871,7 +872,10 @@ impl Viewport {
             .polyline()
             .filter_map(|p| projector.project(global.transform_point3(p)))
             .collect();
-        painter.add(egui::Shape::line(curve, Stroke::new(2.0_f32, theme::ACCENT)));
+        painter.add(egui::Shape::line(
+            curve,
+            Stroke::new(2.0_f32, theme::ACCENT),
+        ));
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let pressed_at = ui.input(|i| i.pointer.press_origin());
         let screen: Vec<Option<Pos2>> = path
@@ -894,8 +898,21 @@ impl Viewport {
             let Some(at) = at else { continue };
             let active = self.path_drag.as_ref().is_some_and(|d| d.1 == i) || hovered == Some(i);
             let rect = Rect::from_center_size(*at, Vec2::splat(if active { 11.0 } else { 9.0 }));
-            painter.rect_filled(rect, 2.0, if active { Color32::WHITE } else { theme::ACCENT });
-            painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, theme::BG_0), egui::StrokeKind::Outside);
+            painter.rect_filled(
+                rect,
+                2.0,
+                if active {
+                    Color32::WHITE
+                } else {
+                    theme::ACCENT
+                },
+            );
+            painter.rect_stroke(
+                rect,
+                2.0,
+                Stroke::new(1.0_f32, theme::BG_0),
+                egui::StrokeKind::Outside,
+            );
         }
 
         let apply = |editor: &mut Editor, points: Vec<[f32; 3]>, before: Vec<[f32; 3]>| {
@@ -945,8 +962,13 @@ impl Viewport {
                     let world = global.transform_point3(Vec3::from(local));
                     let (origin, dir) = projector.ray(pos);
                     let vertical = ui.input(|i| i.modifiers.shift);
-                    // Level moves on the point's height; Shift moves it up and down.
-                    let normal = if vertical {
+                    // Level moves on the point's height; Shift moves it up and down. Front
+                    // and side views look along the ground: the point moves in the plane
+                    // facing the view (a level plane is edge-on there).
+                    let facing = projector.ortho.is_some() && dir.y.abs() < 0.5;
+                    let normal = if facing {
+                        -dir
+                    } else if vertical {
                         let toward = projector.eye - world;
                         Vec3::new(toward.x, 0.0, toward.z).normalize_or(Vec3::Z)
                     } else {
@@ -992,13 +1014,12 @@ impl Viewport {
                     .transform_point3(ground_point(projector, pos));
                 let before = path.desc.points.clone();
                 let mut points = before.clone();
-                let near_curve = path
-                    .spline
-                    .nearest_segment(at)
-                    .filter(|&(segment, t)| {
-                        let p = global.transform_point3(path.spline.segment_point(segment, t));
-                        projector.project(p).is_some_and(|s| (s - pos).length() < 16.0)
-                    });
+                let near_curve = path.spline.nearest_segment(at).filter(|&(segment, t)| {
+                    let p = global.transform_point3(path.spline.segment_point(segment, t));
+                    projector
+                        .project(p)
+                        .is_some_and(|s| (s - pos).length() < 16.0)
+                });
                 match near_curve {
                     Some((segment, _)) => points.insert(segment + 1, at.to_array()),
                     None => points.push(at.to_array()),
@@ -1527,8 +1548,8 @@ impl Viewport {
         // A drag starts once the pointer has moved a few pixels: what it grabbed is what
         // was under the pointer where the button went down (the centre handle is smaller
         // than that move).
-        let starting =
-            response.drag_started_by(egui::PointerButton::Primary) && !ui.input(|i| i.modifiers.alt);
+        let starting = response.drag_started_by(egui::PointerButton::Primary)
+            && !ui.input(|i| i.modifiers.alt);
         let pointer = if starting {
             ui.input(|i| i.pointer.press_origin())
         } else {
@@ -2865,6 +2886,7 @@ pub fn snap_settings(ui: &mut egui::Ui, snap: &mut SnapSettings) {
         ui.label(t("snap.move"));
         ui.add(
             egui::DragValue::new(&mut snap.translate)
+                .custom_parser(crate::panels::parse_finite)
                 .range(0.001..=1000.0)
                 .speed(0.01)
                 .suffix(" m"),
@@ -2873,6 +2895,7 @@ pub fn snap_settings(ui: &mut egui::Ui, snap: &mut SnapSettings) {
         ui.label(t("snap.rotate"));
         ui.add(
             egui::DragValue::new(&mut snap.rotate)
+                .custom_parser(crate::panels::parse_finite)
                 .range(0.1..=180.0)
                 .speed(0.5)
                 .suffix("°"),
@@ -2881,6 +2904,7 @@ pub fn snap_settings(ui: &mut egui::Ui, snap: &mut SnapSettings) {
         ui.label(t("snap.scale"));
         ui.add(
             egui::DragValue::new(&mut snap.scale)
+                .custom_parser(crate::panels::parse_finite)
                 .range(0.001..=100.0)
                 .speed(0.005),
         );
@@ -3330,15 +3354,36 @@ mod tests {
         frame(&ctx, &mut viewport, &mut editor, Vec::new());
         let points = |editor: &Editor| {
             let node = editor.selection.unwrap();
-            editor.tree().component::<Path3D>(node).unwrap().desc.points.clone()
+            editor
+                .tree()
+                .component::<Path3D>(node)
+                .unwrap()
+                .desc
+                .points
+                .clone()
         };
         let before = points(&editor);
         assert_eq!(before.len(), 3);
         // Where the middle point is on screen (the view of `frame`: 1200 × 800).
-        let view = CameraView::new(&viewport.camera.global(), 60f32.to_radians(), 1.5, 0.05, 2000.0);
-        let projector = Projector::new(&view, Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)));
+        let view = CameraView::new(
+            &viewport.camera.global(),
+            60f32.to_radians(),
+            1.5,
+            0.05,
+            2000.0,
+        );
+        let projector = Projector::new(
+            &view,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)),
+        );
         let middle = projector
-            .project(editor.tree().global_transform(path).unwrap().transform_point3(Vec3::from(before[1])))
+            .project(
+                editor
+                    .tree()
+                    .global_transform(path)
+                    .unwrap()
+                    .transform_point3(Vec3::from(before[1])),
+            )
             .unwrap();
         let primary = |pos, pressed| egui::Event::PointerButton {
             pos,
@@ -3346,11 +3391,26 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(middle)]);
-        frame(&ctx, &mut viewport, &mut editor, vec![primary(middle, true)]);
+        frame(
+            &ctx,
+            &mut viewport,
+            &mut editor,
+            vec![egui::Event::PointerMoved(middle)],
+        );
+        frame(
+            &ctx,
+            &mut viewport,
+            &mut editor,
+            vec![primary(middle, true)],
+        );
         for step in 1..=8 {
             let pos = middle + Vec2::new(step as f32 * 6.0, 0.0);
-            frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(pos)]);
+            frame(
+                &ctx,
+                &mut viewport,
+                &mut editor,
+                vec![egui::Event::PointerMoved(pos)],
+            );
         }
         let end = middle + Vec2::new(48.0, 0.0);
         frame(&ctx, &mut viewport, &mut editor, vec![primary(end, false)]);
@@ -3363,7 +3423,13 @@ mod tests {
 
         // Right-click a point: gone.
         let first = projector
-            .project(editor.tree().global_transform(editor.selection.unwrap()).unwrap().transform_point3(Vec3::from(before[0])))
+            .project(
+                editor
+                    .tree()
+                    .global_transform(editor.selection.unwrap())
+                    .unwrap()
+                    .transform_point3(Vec3::from(before[0])),
+            )
             .unwrap();
         let secondary = |pressed| egui::Event::PointerButton {
             pos: first,
@@ -3371,7 +3437,12 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        for events in [vec![egui::Event::PointerMoved(first)], vec![secondary(true)], vec![secondary(false)], vec![]] {
+        for events in [
+            vec![egui::Event::PointerMoved(first)],
+            vec![secondary(true)],
+            vec![secondary(false)],
+            vec![],
+        ] {
             frame(&ctx, &mut viewport, &mut editor, events);
         }
         assert_eq!(points(&editor).len(), 2);
@@ -3439,11 +3510,21 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(start)]);
+        frame(
+            &ctx,
+            &mut viewport,
+            &mut editor,
+            vec![egui::Event::PointerMoved(start)],
+        );
         frame(&ctx, &mut viewport, &mut editor, vec![primary(start, true)]);
         for step in 1..=10 {
             let pos = start + Vec2::new(step as f32 * 3.0, 0.0);
-            frame(&ctx, &mut viewport, &mut editor, vec![egui::Event::PointerMoved(pos)]);
+            frame(
+                &ctx,
+                &mut viewport,
+                &mut editor,
+                vec![egui::Event::PointerMoved(pos)],
+            );
         }
         let end = start + Vec2::new(30.0, 0.0);
         frame(&ctx, &mut viewport, &mut editor, vec![primary(end, false)]);

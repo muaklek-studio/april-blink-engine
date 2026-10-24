@@ -533,6 +533,15 @@ impl SceneTree {
             return desired.to_owned();
         }
         let base = desired.trim_end_matches(|c: char| c.is_ascii_digit());
+        // The siblings' names once: a thousand "Bullet"s would otherwise scan every sibling
+        // for every number tried.
+        let names: std::collections::HashSet<String> = self
+            .children(parent)
+            .into_iter()
+            .filter(|&c| Some(c) != ignore)
+            .filter_map(|c| self.name(c).map(|n| n.to_string()))
+            .filter(|n| n.starts_with(base))
+            .collect();
         // `u128` so a suffix of `u64::MAX` still has a successor.
         let mut n: u128 = desired[base.len()..]
             .parse::<u64>()
@@ -540,7 +549,7 @@ impl SceneTree {
             .max(2);
         loop {
             let candidate = format!("{base}{n}");
-            if !taken(&candidate) {
+            if !names.contains(&candidate) {
                 return candidate;
             }
             n += 1;
@@ -873,6 +882,19 @@ impl SceneTree {
         self.free_queue.clear();
     }
 
+    /// Frees `node` (and its children) right away, unlike [`SceneTree::queue_free`]; other
+    /// nodes waiting in the free queue stay there until the end of the frame. For nodes a
+    /// tool or loader made and must take back now (a scene that failed half-way, a
+    /// generator's previous output).
+    pub fn free_immediately(&mut self, node: NodeHandle) {
+        if node == self.root() || !self.is_valid(node) {
+            return;
+        }
+        self.free_now(node);
+        let world = &self.world;
+        self.signals.retain_alive(|e| world.is_alive(e));
+    }
+
     fn free_now(&mut self, node: NodeHandle) {
         if !self.is_valid(node) {
             return;
@@ -925,7 +947,16 @@ impl SceneTree {
                     SceneError::InvalidNode(node)
                 }
             })?;
-        f(&mut t.local);
+        let mut local = t.local;
+        f(&mut local);
+        // One NaN (a zero vector normalised, a parent scaled to zero) would stay in the node
+        // and its physics body for good: refused, the transform is left as it was.
+        let finite =
+            local.translation.is_finite() && local.rotation.is_finite() && local.scale.is_finite();
+        if !finite {
+            return Err(SceneError::NonFiniteTransform(node));
+        }
+        t.local = local;
         t.dirty = true;
         Ok(())
     }

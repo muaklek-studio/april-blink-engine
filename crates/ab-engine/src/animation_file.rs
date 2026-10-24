@@ -491,7 +491,11 @@ mod curve_tests {
             target: ".".into(),
             property: TrackProperty::Position,
             interpolation,
-            keys: vec![(0.0, [0.0; 3]), (1.0, [10.0, 0.0, 0.0]), (2.0, [10.0, 5.0, 0.0])],
+            keys: vec![
+                (0.0, [0.0; 3]),
+                (1.0, [10.0, 0.0, 0.0]),
+                (2.0, [10.0, 5.0, 0.0]),
+            ],
         }
     }
 
@@ -507,11 +511,15 @@ mod curve_tests {
             .build();
             for i in 0..=40 {
                 let time = i as f32 * 0.05;
-                let ab_animation::Sample::Translation(played) = clip.channels[0].sample(time) else {
+                let ab_animation::Sample::Translation(played) = clip.channels[0].sample(time)
+                else {
                     panic!("a position track");
                 };
                 let drawn = Vec3::from(t.sample(time).unwrap());
-                assert!(played.distance(drawn) < 1e-3, "{mode:?} at {time}: {played} vs {drawn}");
+                assert!(
+                    played.distance(drawn) < 1e-3,
+                    "{mode:?} at {time}: {played} vs {drawn}"
+                );
             }
         }
     }

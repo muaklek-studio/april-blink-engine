@@ -109,15 +109,15 @@ fn window_buttons(ui: &mut Ui) {
     }
     let maximized = is_maximized(&ctx);
     let (kind, tip) = if maximized {
-        (WindowButton::Restore, "Restore")
+        (WindowButton::Restore, crate::i18n::t("chrome.restore"))
     } else {
-        (WindowButton::Maximize, "Maximize")
+        (WindowButton::Maximize, crate::i18n::t("chrome.maximize"))
     };
     if window_button(ui, kind).on_hover_text(tip).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
     if window_button(ui, WindowButton::Minimize)
-        .on_hover_text("Minimize")
+        .on_hover_text(crate::i18n::t("chrome.minimize"))
         .clicked()
     {
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));

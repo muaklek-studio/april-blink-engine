@@ -7,6 +7,7 @@
 //! children are `Particles3D`s).
 
 use super::{grid, label, section};
+use crate::i18n::{t as tr, tf};
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::core::{Color, Vec3};
@@ -33,12 +34,7 @@ pub struct EffectsPanel {
 impl EffectsPanel {
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         let Some((root, layers)) = effect_of(editor) else {
-            super::empty_hint(
-                ui,
-                icon::SPARKLE,
-                "Select a Particles3D, or an effect (a node with Particles3D layers). \
-                 Create → Effect makes one.",
-            );
+            super::empty_hint(ui, icon::SPARKLE, &tr("effects.empty"));
             return;
         };
         if self.layer.is_none_or(|l| !layers.contains(&l)) {
@@ -81,15 +77,19 @@ impl EffectsPanel {
                 .unwrap_or_default();
             ui.label(RichText::new(name).strong());
             ui.label(
-                RichText::new(format!("{alive} particles"))
+                RichText::new(tf("effects.alive", &[("count", &alive)]))
                     .small()
                     .color(theme::TEXT_DIM),
             );
         });
         ui.horizontal(|ui| {
             if ui
-                .button(format!("{}  Restart", icon::ARROW_COUNTER_CLOCKWISE))
-                .on_hover_text("Clear the particles and start again (one-shots burst again)")
+                .button(format!(
+                    "{}  {}",
+                    icon::ARROW_COUNTER_CLOCKWISE,
+                    tr("effects.restart")
+                ))
+                .on_hover_text(tr("effects.restart_hint"))
                 .clicked()
             {
                 for &layer in layers {
@@ -102,9 +102,9 @@ impl EffectsPanel {
             }
             let playing = editor.preview_effects;
             let (glyph, tip) = if playing {
-                (icon::PAUSE, "Freeze the preview")
+                (icon::PAUSE, tr("effects.freeze"))
             } else {
-                (icon::PLAY, "Play the preview")
+                (icon::PLAY, tr("effects.play"))
             };
             if ui.button(glyph).on_hover_text(tip).clicked() {
                 editor.preview_effects = !playing;
@@ -121,63 +121,81 @@ impl EffectsPanel {
         layers: &[NodeHandle],
     ) {
         let is_effect = !layers.contains(&root);
-        section(ui, "effect_layers", icon::STACK, "Layers", |ui| {
-            for &layer in layers {
-                let name = editor
-                    .tree()
-                    .name(layer)
-                    .map(|n| n.to_owned())
-                    .unwrap_or_default();
-                let selected = self.layer == Some(layer);
-                let swatch = editor
-                    .tree()
-                    .component::<ParticleEmitter>(layer)
-                    .map(|e| e.settings.color.sample(0.2));
+        section(
+            ui,
+            "effect_layers",
+            icon::STACK,
+            &tr("effects.layers"),
+            |ui| {
+                for &layer in layers {
+                    let name = editor
+                        .tree()
+                        .name(layer)
+                        .map(|n| n.to_owned())
+                        .unwrap_or_default();
+                    let selected = self.layer == Some(layer);
+                    let swatch = editor
+                        .tree()
+                        .component::<ParticleEmitter>(layer)
+                        .map(|e| e.settings.color.sample(0.2));
+                    ui.horizontal(|ui| {
+                        if let Some(color) = swatch {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+                            ui.painter().rect_filled(rect, 2.0, color32(color));
+                        }
+                        if ui.selectable_label(selected, name).clicked() {
+                            self.layer = Some(layer);
+                            self.stop = None;
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
-                    if let Some(color) = swatch {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
-                        ui.painter().rect_filled(rect, 2.0, color32(color));
-                    }
-                    if ui.selectable_label(selected, name).clicked() {
-                        self.layer = Some(layer);
-                        self.stop = None;
-                    }
-                });
-            }
-            ui.horizontal(|ui| {
-                let editable = editor.is_editable(root) && !editor.is_playing();
-                ui.add_enabled_ui(editable, |ui| {
-                    ui.menu_button(format!("{}  Add layer", icon::PLUS), |ui| {
-                        for preset in ParticleSettings::PRESETS {
-                            if ui.button(preset.replace('_', " ")).clicked() {
-                                add_layer(editor, root, is_effect, preset);
-                                ui.close();
+                    let editable = editor.is_editable(root) && !editor.is_playing();
+                    ui.add_enabled_ui(editable, |ui| {
+                        ui.menu_button(
+                            format!("{}  {}", icon::PLUS, tr("effects.add_layer")),
+                            |ui| {
+                                for preset in ParticleSettings::PRESETS {
+                                    if ui.button(preset.replace('_', " ")).clicked() {
+                                        add_layer(editor, root, is_effect, preset);
+                                        ui.close();
+                                    }
+                                }
+                            },
+                        );
+                        if let Some(layer) = self.layer.filter(|_| is_effect) {
+                            if ui
+                                .button(format!("{}  {}", icon::COPY, tr("command.duplicate")))
+                                .clicked()
+                            {
+                                editor.duplicate(layer);
+                            }
+                            if layers.len() > 1
+                                && ui
+                                    .button(format!(
+                                        "{}  {}",
+                                        icon::TRASH,
+                                        tr("effects.remove_layer")
+                                    ))
+                                    .clicked()
+                            {
+                                editor.delete(layer);
+                                editor.select(Some(root));
+                                self.layer = None;
                             }
                         }
                     });
-                    if let Some(layer) = self.layer.filter(|_| is_effect) {
-                        if ui.button(format!("{}  Duplicate", icon::COPY)).clicked() {
-                            editor.duplicate(layer);
-                        }
-                        if layers.len() > 1
-                            && ui.button(format!("{}  Remove", icon::TRASH)).clicked()
-                        {
-                            editor.delete(layer);
-                            editor.select(Some(root));
-                            self.layer = None;
-                        }
-                    }
                 });
-            });
-            if !is_effect {
-                ui.label(
-                    RichText::new("Adding a layer turns this emitter into an effect with layers.")
-                        .small()
-                        .color(theme::TEXT_DIM),
-                );
-            }
-        });
+                if !is_effect {
+                    ui.label(
+                        RichText::new(tr("effects.becomes_effect"))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+            },
+        );
     }
 
     fn settings(&mut self, ui: &mut egui::Ui, editor: &mut Editor, layer: NodeHandle) {
@@ -200,23 +218,29 @@ impl EffectsPanel {
         let mut flags = Flags::of(&desc);
         let mut preset = desc.preset.clone();
         ui.add_enabled_ui(editable, |ui| {
-            section(ui, "effect_preset", icon::SPARKLE, "Start from", |ui| {
-                egui::ComboBox::from_id_salt("effect_preset")
-                    .selected_text(preset.as_deref().unwrap_or("Plain"))
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for name in ParticleSettings::PRESETS {
-                            if ui
-                                .selectable_label(preset.as_deref() == Some(name), name)
-                                .clicked()
-                            {
-                                preset = Some(name.to_owned());
-                                settings = ParticleSettings::preset(name).unwrap_or_default();
-                                self.stop = None;
+            section(
+                ui,
+                "effect_preset",
+                icon::SPARKLE,
+                &tr("effects.preset"),
+                |ui| {
+                    egui::ComboBox::from_id_salt("effect_preset")
+                        .selected_text(preset.clone().unwrap_or_else(|| tr("effects.plain")))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for name in ParticleSettings::PRESETS {
+                                if ui
+                                    .selectable_label(preset.as_deref() == Some(name), name)
+                                    .clicked()
+                                {
+                                    preset = Some(name.to_owned());
+                                    settings = ParticleSettings::preset(name).unwrap_or_default();
+                                    self.stop = None;
+                                }
                             }
-                        }
-                    });
-            });
+                        });
+                },
+            );
             emission(ui, &mut settings, &mut flags);
             shape(ui, &mut settings);
             motion(ui, &mut settings);
@@ -243,62 +267,72 @@ impl EffectsPanel {
     }
 
     fn look(&mut self, ui: &mut egui::Ui, s: &mut ParticleSettings) {
-        section(ui, "effect_look", icon::PALETTE, "Look", |ui| {
-            ui.label(
-                RichText::new("Color over life")
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            gradient(ui, &mut s.color, &mut self.stop);
-            grid(ui, "effect_look_grid", |ui| {
-                label(ui, "Size start → end");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut s.size[0])
-                            .speed(0.005)
-                            .range(0.0..=50.0),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut s.size[1])
-                            .speed(0.005)
-                            .range(0.0..=50.0),
-                    );
+        section(
+            ui,
+            "effect_look",
+            icon::PALETTE,
+            &tr("effects.look"),
+            |ui| {
+                ui.label(
+                    RichText::new(tr("effects.color_over_life"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                gradient(ui, &mut s.color, &mut self.stop);
+                grid(ui, "effect_look_grid", |ui| {
+                    label(ui, &tr("effects.size"));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.size[0])
+                                .custom_parser(crate::panels::parse_finite)
+                                .speed(0.005)
+                                .range(0.0..=50.0),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut s.size[1])
+                                .custom_parser(crate::panels::parse_finite)
+                                .speed(0.005)
+                                .range(0.0..=50.0),
+                        );
+                    });
+                    ui.end_row();
+                    label(ui, &tr("effects.size_variety"));
+                    ui.add(egui::Slider::new(&mut s.size_random, 0.0..=1.0));
+                    ui.end_row();
+                    label(ui, &tr("effects.glow"));
+                    ui.add(egui::Slider::new(&mut s.emission, 0.0..=20.0).logarithmic(true));
+                    ui.end_row();
+                    label(ui, &tr("effects.hardness"));
+                    ui.add(egui::Slider::new(&mut s.hardness, 0.0..=1.0))
+                        .on_hover_text(tr("effects.hardness_hint"));
+                    ui.end_row();
+                    label(ui, &tr("effects.stretch"));
+                    ui.add(egui::Slider::new(&mut s.stretch, 0.0..=0.5))
+                        .on_hover_text(tr("effects.stretch_hint"));
+                    ui.end_row();
+                    label(ui, &tr("effects.spin"));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.spin[0])
+                                .custom_parser(crate::panels::parse_finite)
+                                .speed(0.05)
+                                .suffix(" rad/s"),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut s.spin[1])
+                                .custom_parser(crate::panels::parse_finite)
+                                .speed(0.05)
+                                .suffix(" rad/s"),
+                        );
+                    });
+                    ui.end_row();
+                    label(ui, &tr("effects.additive"));
+                    ui.checkbox(&mut s.additive, "")
+                        .on_hover_text(tr("effects.additive_hint"));
+                    ui.end_row();
                 });
-                ui.end_row();
-                label(ui, "Size variety");
-                ui.add(egui::Slider::new(&mut s.size_random, 0.0..=1.0));
-                ui.end_row();
-                label(ui, "Glow");
-                ui.add(egui::Slider::new(&mut s.emission, 0.0..=20.0).logarithmic(true));
-                ui.end_row();
-                label(ui, "Hardness");
-                ui.add(egui::Slider::new(&mut s.hardness, 0.0..=1.0))
-                    .on_hover_text("0 soft like smoke, 1 a hard dot");
-                ui.end_row();
-                label(ui, "Stretch");
-                ui.add(egui::Slider::new(&mut s.stretch, 0.0..=0.5))
-                    .on_hover_text("Long along the motion: sparks, rain");
-                ui.end_row();
-                label(ui, "Spin min → max");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut s.spin[0])
-                            .speed(0.05)
-                            .suffix(" rad/s"),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut s.spin[1])
-                            .speed(0.05)
-                            .suffix(" rad/s"),
-                    );
-                });
-                ui.end_row();
-                label(ui, "Adds light");
-                ui.checkbox(&mut s.additive, "")
-                    .on_hover_text("Fire, sparks, magic glow; smoke and dust cover instead");
-                ui.end_row();
-            });
-        });
+            },
+        );
     }
 
     fn save(&mut self, ui: &mut egui::Ui, editor: &mut Editor, root: NodeHandle) {
@@ -306,7 +340,7 @@ impl EffectsPanel {
             ui,
             "effect_save",
             icon::FLOPPY_DISK,
-            "Save as effect",
+            &tr("effects.save_title"),
             |ui| {
                 if self.save_name.is_empty() {
                     self.save_name = editor
@@ -324,7 +358,7 @@ impl EffectsPanel {
                     .save_name
                     .chars()
                     .map(|c| {
-                        if c.is_alphanumeric() || c == '-' {
+                        if super::is_name_char(c) || c == '-' {
                             c
                         } else {
                             '_'
@@ -336,21 +370,25 @@ impl EffectsPanel {
                 let mut write = None;
                 if confirming {
                     ui.label(
-                        RichText::new(format!("{}  {relative} already exists.", icon::WARNING))
-                            .color(theme::WARN),
+                        RichText::new(format!(
+                            "{}  {}",
+                            icon::WARNING,
+                            tf("effects.exists", &[("path", &relative)])
+                        ))
+                        .color(theme::WARN),
                     );
                     ui.horizontal(|ui| {
-                        if ui.button("Replace").clicked() {
+                        if ui.button(tr("effects.replace")).clicked() {
                             write = Some(true);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr("dialog.cancel")).clicked() {
                             self.replace = None;
                         }
                     });
                 } else if ui
                     .add_enabled(
                         !name.is_empty(),
-                        egui::Button::new(format!("{}  Save", icon::FLOPPY_DISK)),
+                        egui::Button::new(format!("{}  {}", icon::FLOPPY_DISK, tr("command.save"))),
                     )
                     .clicked()
                 {
@@ -361,17 +399,19 @@ impl EffectsPanel {
                     match save_effect(editor, root, &relative, overwrite) {
                         Ok(true) => {
                             editor.assets.request_rescan();
-                            editor.info(format!(
-                                "Saved {relative}: drag it into a scene, or spawn it from a script"
-                            ));
+                            editor.info(tf("effects.saved", &[("path", &relative)]));
                         }
                         Ok(false) => self.replace = Some(relative.clone()),
-                        Err(err) => editor.fail(format!("cannot save {relative}: {err}")),
+                        Err(err) => editor.fail(tf(
+                            "effects.save_failed",
+                            &[("path", &relative), ("error", &err)],
+                        )),
                     }
                 }
                 ui.label(
                     RichText::new(format!(
-                        "From a script: tree.spawn_effect_scene(parent, position, \"{relative}\")"
+                        "{} tree.spawn_effect_scene(parent, position, \"{relative}\")",
+                        tr("effects.from_script")
                     ))
                     .small()
                     .monospace()
@@ -463,34 +503,40 @@ impl Flags {
 }
 
 fn emission(ui: &mut egui::Ui, s: &mut ParticleSettings, flags: &mut Flags) {
-    section(ui, "effect_emission", icon::FLOW_ARROW, "Emission", |ui| {
-        grid(ui, "effect_emission_grid", |ui| {
-            label(ui, "Amount");
-            ui.add(
-                egui::Slider::new(&mut s.amount, 1..=ab_engine::effects::MAX_PARTICLES)
-                    .logarithmic(true),
-            )
-            .on_hover_text("Alive at once, or emitted at once for a one-shot");
-            ui.end_row();
-            label(ui, "Lifetime (s)");
-            ui.add(egui::Slider::new(&mut s.lifetime, 0.02..=30.0).logarithmic(true));
-            ui.end_row();
-            label(ui, "Lifetime variety");
-            ui.add(egui::Slider::new(&mut s.lifetime_random, 0.0..=1.0));
-            ui.end_row();
-            label(ui, "One shot");
-            ui.checkbox(&mut flags.one_shot, "")
-                .on_hover_text("Emit everything at once (impacts, explosions)");
-            ui.end_row();
-            label(ui, "Emitting");
-            ui.checkbox(&mut flags.emitting, "");
-            ui.end_row();
-            label(ui, "Follow the emitter");
-            ui.checkbox(&mut flags.local, "")
-                .on_hover_text("Particles move with the node (trails attached to it)");
-            ui.end_row();
-        });
-    });
+    section(
+        ui,
+        "effect_emission",
+        icon::FLOW_ARROW,
+        &tr("effects.emission"),
+        |ui| {
+            grid(ui, "effect_emission_grid", |ui| {
+                label(ui, &tr("effects.amount"));
+                ui.add(
+                    egui::Slider::new(&mut s.amount, 1..=ab_engine::effects::MAX_PARTICLES)
+                        .logarithmic(true),
+                )
+                .on_hover_text(tr("effects.amount_hint"));
+                ui.end_row();
+                label(ui, &tr("effects.lifetime"));
+                ui.add(egui::Slider::new(&mut s.lifetime, 0.02..=30.0).logarithmic(true));
+                ui.end_row();
+                label(ui, &tr("effects.lifetime_variety"));
+                ui.add(egui::Slider::new(&mut s.lifetime_random, 0.0..=1.0));
+                ui.end_row();
+                label(ui, &tr("effects.one_shot"));
+                ui.checkbox(&mut flags.one_shot, "")
+                    .on_hover_text(tr("effects.one_shot_hint"));
+                ui.end_row();
+                label(ui, &tr("effects.emitting"));
+                ui.checkbox(&mut flags.emitting, "");
+                ui.end_row();
+                label(ui, &tr("effects.local"));
+                ui.checkbox(&mut flags.local, "")
+                    .on_hover_text(tr("effects.local_hint"));
+                ui.end_row();
+            });
+        },
+    );
 }
 
 fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
@@ -498,11 +544,16 @@ fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
         ui,
         "effect_shape",
         icon::SHAPES,
-        "Shape and direction",
+        &tr("effects.shape"),
         |ui| {
             grid(ui, "effect_shape_grid", |ui| {
-                label(ui, "Born in");
-                let kinds = ["Point", "Sphere", "Box", "Ring"];
+                label(ui, &tr("effects.born_in"));
+                let kinds = [
+                    tr("effects.point"),
+                    tr("effects.sphere"),
+                    tr("effects.box"),
+                    tr("effects.ring"),
+                ];
                 let mut kind = match s.shape {
                     EmissionShape::Point => 0,
                     EmissionShape::Sphere { .. } => 1,
@@ -511,10 +562,10 @@ fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
                 };
                 let before = kind;
                 egui::ComboBox::from_id_salt("effect_shape_kind")
-                    .selected_text(kinds[kind])
+                    .selected_text(&kinds[kind])
                     .show_ui(ui, |ui| {
                         for (i, name) in kinds.iter().enumerate() {
-                            ui.selectable_value(&mut kind, i, *name);
+                            ui.selectable_value(&mut kind, i, name);
                         }
                     });
                 if kind != before {
@@ -530,9 +581,10 @@ fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
                 ui.end_row();
                 match &mut s.shape {
                     EmissionShape::Sphere { radius } | EmissionShape::Ring { radius } => {
-                        label(ui, "Radius");
+                        label(ui, &tr("effects.radius"));
                         ui.add(
                             egui::DragValue::new(radius)
+                                .custom_parser(crate::panels::parse_finite)
                                 .speed(0.01)
                                 .range(0.0..=100.0)
                                 .suffix(" m"),
@@ -540,7 +592,7 @@ fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
                         ui.end_row();
                     }
                     EmissionShape::Box { size } => {
-                        label(ui, "Size");
+                        label(ui, &tr("effects.box_size"));
                         let mut v = size.to_array();
                         if super::vec3(ui, &mut v, 0.01, " m") {
                             *size = Vec3::from(v).max(Vec3::ZERO);
@@ -549,15 +601,15 @@ fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
                     }
                     EmissionShape::Point => {}
                 }
-                label(ui, "Direction");
+                label(ui, &tr("effects.direction"));
                 let mut d = s.direction.to_array();
                 if super::vec3(ui, &mut d, 0.01, "") {
                     s.direction = Vec3::from(d);
                 }
                 ui.end_row();
-                label(ui, "Spread");
+                label(ui, &tr("effects.spread"));
                 ui.add(egui::Slider::new(&mut s.spread, 0.0..=180.0).suffix("°"))
-                    .on_hover_text("Cone around the direction; 180 sends them every way");
+                    .on_hover_text(tr("effects.spread_hint"));
                 ui.end_row();
             });
         },
@@ -565,46 +617,58 @@ fn shape(ui: &mut egui::Ui, s: &mut ParticleSettings) {
 }
 
 fn motion(ui: &mut egui::Ui, s: &mut ParticleSettings) {
-    section(ui, "effect_motion", icon::WIND, "Motion", |ui| {
-        grid(ui, "effect_motion_grid", |ui| {
-            label(ui, "Speed min → max");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::DragValue::new(&mut s.speed[0])
-                        .speed(0.02)
-                        .suffix(" m/s"),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut s.speed[1])
-                        .speed(0.02)
-                        .suffix(" m/s"),
-                );
-            });
-            ui.end_row();
-            label(ui, "Gravity");
-            let mut g = s.gravity.to_array();
-            if super::vec3(ui, &mut g, 0.05, "") {
-                s.gravity = Vec3::from(g);
-            }
-            ui.end_row();
-            label(ui, "");
-            ui.horizontal(|ui| {
-                for (name, value) in [("Falls", -9.81), ("Floats", 0.0), ("Rises", 1.0)] {
-                    if ui.small_button(name).clicked() {
-                        s.gravity = Vec3::new(0.0, value, 0.0);
-                    }
+    section(
+        ui,
+        "effect_motion",
+        icon::WIND,
+        &tr("effects.motion"),
+        |ui| {
+            grid(ui, "effect_motion_grid", |ui| {
+                label(ui, &tr("effects.speed"));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut s.speed[0])
+                            .custom_parser(crate::panels::parse_finite)
+                            .speed(0.02)
+                            .suffix(" m/s"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut s.speed[1])
+                            .custom_parser(crate::panels::parse_finite)
+                            .speed(0.02)
+                            .suffix(" m/s"),
+                    );
+                });
+                ui.end_row();
+                label(ui, &tr("effects.gravity"));
+                let mut g = s.gravity.to_array();
+                if super::vec3(ui, &mut g, 0.05, "") {
+                    s.gravity = Vec3::from(g);
                 }
+                ui.end_row();
+                label(ui, "");
+                ui.horizontal(|ui| {
+                    for (key, value) in [
+                        ("effects.falls", -9.81),
+                        ("effects.floats", 0.0),
+                        ("effects.rises", 1.0),
+                    ] {
+                        if ui.small_button(tr(key)).clicked() {
+                            s.gravity = Vec3::new(0.0, value, 0.0);
+                        }
+                    }
+                });
+                ui.end_row();
+                label(ui, &tr("effects.drag"));
+                ui.add(egui::Slider::new(&mut s.damping, 0.0..=10.0));
+                ui.end_row();
+                label(ui, &tr("effects.turbulence"));
+                ui.add(egui::Slider::new(&mut s.turbulence, 0.0..=5.0))
+                    .on_hover_text(tr("effects.turbulence_hint"));
+                ui.end_row();
             });
-            ui.end_row();
-            label(ui, "Air drag");
-            ui.add(egui::Slider::new(&mut s.damping, 0.0..=10.0));
-            ui.end_row();
-            label(ui, "Turbulence");
-            ui.add(egui::Slider::new(&mut s.turbulence, 0.0..=5.0))
-                .on_hover_text("Random swirling");
-            ui.end_row();
-        });
-    });
+        },
+    );
 }
 
 /// A colour-over-life editor: the ramp drawn over a checkerboard (for transparency), its
@@ -680,8 +744,11 @@ fn gradient(ui: &mut egui::Ui, ramp: &mut ColorRamp, selected: &mut Option<usize
             *selected = Some(i);
         }
         if handle.dragged() {
+            // The selected stop is the one dragged: once it passes a neighbour the stops
+            // re-sort, and this handle's index is the neighbour's.
+            let dragged = selected.filter(|&s| s < ramp.0.len()).unwrap_or(i);
             let dx = handle.drag_delta().x / handles.width();
-            moved = Some((i, (t + dx).clamp(0.0, 1.0)));
+            moved = Some((dragged, (ramp.0[dragged].0 + dx).clamp(0.0, 1.0)));
         }
         let is_selected = *selected == Some(i);
         let tip = egui::pos2(x, handles.top());
@@ -713,7 +780,13 @@ fn gradient(ui: &mut egui::Ui, ramp: &mut ColorRamp, selected: &mut Option<usize
     if let Some(i) = selected.filter(|&i| i < ramp.0.len()) {
         ui.horizontal(|ui| {
             let (t, color) = ramp.0[i];
-            ui.label(RichText::new(format!("{:.0}% of life", t * 100.0)).small());
+            ui.label(
+                RichText::new(tf(
+                    "effects.stop_at",
+                    &[("percent", &format!("{:.0}", t * 100.0))],
+                ))
+                .small(),
+            );
             let mut rgba = super::to_rgba(color);
             if egui::color_picker::color_edit_button_rgba(
                 ui,
@@ -728,7 +801,7 @@ fn gradient(ui: &mut egui::Ui, ramp: &mut ColorRamp, selected: &mut Option<usize
             if ramp.0.len() > 2
                 && ui
                     .small_button(icon::TRASH)
-                    .on_hover_text("Remove this stop")
+                    .on_hover_text(tr("effects.remove_stop"))
                     .clicked()
             {
                 ramp.0.remove(i);
@@ -737,7 +810,7 @@ fn gradient(ui: &mut egui::Ui, ramp: &mut ColorRamp, selected: &mut Option<usize
         });
     } else {
         ui.label(
-            RichText::new("Click the bar to add a stop, a handle to edit or drag it.")
+            RichText::new(tr("effects.gradient_hint"))
                 .small()
                 .color(theme::TEXT_DIM),
         );
@@ -818,9 +891,15 @@ mod tests {
         );
         let root = editor.selection.unwrap();
         assert!(!save_effect(&editor, root, "effects/fire.abscene", false).unwrap());
-        assert_eq!(std::fs::read_to_string(dir.join("effects/fire.abscene")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("effects/fire.abscene")).unwrap(),
+            "mine"
+        );
         assert!(save_effect(&editor, root, "effects/fire.abscene", true).unwrap());
-        assert_ne!(std::fs::read_to_string(dir.join("effects/fire.abscene")).unwrap(), "mine");
+        assert_ne!(
+            std::fs::read_to_string(dir.join("effects/fire.abscene")).unwrap(),
+            "mine"
+        );
         assert!(save_effect(&editor, root, "effects/new.abscene", false).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }

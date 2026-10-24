@@ -18,6 +18,14 @@ pub fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::R
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
+    // The rename itself reaches the disk once the folder is synced (Unix; a power cut could
+    // otherwise bring the old file back).
+    #[cfg(unix)]
+    if result.is_ok() {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        }
+    }
     result
 }
 
@@ -38,7 +46,7 @@ pub fn write_with_backup(
     atomic_write(path, contents)
 }
 
-/// `dir/.name.tmp`: same folder (so the rename stays on one file system), hidden from
+/// `dir/.name.<pid>.tmp`: same folder (so the rename stays on one file system), hidden from
 /// asset scans.
 fn temp_path(path: &Path) -> io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
@@ -47,9 +55,10 @@ fn temp_path(path: &Path) -> io::Result<PathBuf> {
             format!("{} is not a file path", path.display()),
         )
     })?;
+    // One temporary per process: two writers to the same file never share it.
     let mut temp = std::ffi::OsString::from(".");
     temp.push(name);
-    temp.push(".tmp");
+    temp.push(format!(".{}.tmp", std::process::id()));
     Ok(path.with_file_name(temp))
 }
 
@@ -85,7 +94,7 @@ mod tests {
         let file = dir.join("scene.toml");
         std::fs::write(&file, "old").unwrap();
         // The temporary file cannot be created where a folder already has its name.
-        std::fs::create_dir(dir.join(".scene.toml.tmp")).unwrap();
+        std::fs::create_dir(temp_path(&file).unwrap()).unwrap();
         assert!(atomic_write(&file, "new").is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
         assert!(atomic_write(Path::new("/"), "x").is_err());

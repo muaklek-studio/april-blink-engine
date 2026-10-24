@@ -12,6 +12,8 @@ use egui_phosphor::regular as icon;
 pub struct BuildPanel {
     /// The folder pieces are taken from ("" = every folder).
     folder: String,
+    /// The folder was chosen (by the user, or once at the start): "" stays "every folder".
+    folder_chosen: bool,
     thumbnails: Option<crate::thumbnails::Thumbnails>,
     row_axis: usize,
     row_count: usize,
@@ -22,6 +24,7 @@ impl Default for BuildPanel {
     fn default() -> Self {
         Self {
             folder: String::new(),
+            folder_chosen: false,
             thumbnails: None,
             row_axis: 0,
             row_count: 3,
@@ -72,8 +75,10 @@ impl BuildPanel {
             .collect();
         folders.sort();
         folders.dedup();
-        // Start in a folder of pieces when the project has one.
-        if self.folder.is_empty() {
+        // Start in a folder of pieces when the project has one (once: "All folders" can be
+        // picked afterwards).
+        if !self.folder_chosen && !folders.is_empty() {
+            self.folder_chosen = true;
             if let Some(f) = folders
                 .iter()
                 .find(|f| f.contains("piece") || f.contains("prefab"))
@@ -104,6 +109,7 @@ impl BuildPanel {
             ui.label(RichText::new(t("build.grid")).color(theme::TEXT_DIM));
             ui.add(
                 egui::DragValue::new(grid)
+                    .custom_parser(crate::panels::parse_finite)
                     .range(0.01..=100.0)
                     .speed(0.05)
                     .suffix(" m"),
@@ -282,11 +288,13 @@ impl BuildPanel {
                 });
             ui.add(
                 egui::DragValue::new(&mut self.row_count)
+                    .custom_parser(crate::panels::parse_finite)
                     .range(1..=100)
                     .prefix("× "),
             );
             ui.add(
                 egui::DragValue::new(&mut self.row_gap)
+                    .custom_parser(crate::panels::parse_finite)
                     .range(-10.0..=100.0)
                     .speed(0.05)
                     .prefix(format!("{} ", t("build.gap")))

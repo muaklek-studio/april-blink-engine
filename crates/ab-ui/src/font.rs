@@ -443,6 +443,10 @@ fn bake_glyph(
     let (x_min, y_min) = (f64::from(bbox.x_min), f64::from(bbox.y_min));
     let width = ((f64::from(bbox.x_max) - x_min) * scale + 2.0 * pad).ceil() as u32;
     let height = ((f64::from(bbox.y_max) - y_min) * scale + 2.0 * pad).ceil() as u32;
+    // A damaged font (tiny units per em, huge box) would ask for gigabytes: skip the glyph.
+    if width > MAX_ATLAS_SIZE || height > MAX_ATLAS_SIZE {
+        return None;
+    }
 
     // Font units (y up) → texels with the bounding box's corner at (pad, pad).
     let mut shape = outline.shape;

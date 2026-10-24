@@ -779,3 +779,47 @@ fn scripts_added_by_a_replaced_script_wait_for_the_next_pass() {
     tree.process(0.016);
     assert_eq!(take(&log), ["X:process", "Y:process"]);
 }
+
+#[test]
+fn non_finite_transforms_are_refused() {
+    let mut tree = SceneTree::new();
+    let parent = tree.create_node3d("Parent");
+    let child = tree.create_node3d("Child");
+    tree.add_child(tree.root(), parent).unwrap();
+    tree.add_child(parent, child).unwrap();
+    tree.set_position(child, Vec3::ONE).unwrap();
+
+    let nan = Vec3::splat(f32::NAN);
+    assert_eq!(
+        tree.set_position(child, nan),
+        Err(SceneError::NonFiniteTransform(child))
+    );
+    assert!(tree.set_scale(child, Vec3::INFINITY).is_err());
+    assert!(tree.rotate(child, Vec3::Y, f32::NAN).is_err());
+    // A parent shrunk to nothing cannot place its child globally.
+    tree.set_scale(parent, Vec3::ZERO).unwrap();
+    assert!(tree.set_global_position(child, Vec3::X).is_err());
+    assert_eq!(tree.position(child), Some(Vec3::ONE), "left as it was");
+}
+
+#[test]
+fn freeing_one_node_now_leaves_the_queue_for_the_end_of_the_frame() {
+    let mut tree = SceneTree::new();
+    let queued = tree.create_node("Queued");
+    let built = tree.create_node("Built");
+    tree.add_child(tree.root(), queued).unwrap();
+    tree.queue_free(queued).unwrap();
+    // A loader taking back what it built half-way.
+    tree.free_immediately(built);
+    assert!(!tree.is_valid(built));
+    assert!(
+        tree.is_valid(queued),
+        "still freed at the end of the frame, not now"
+    );
+    tree.flush_deletions();
+    assert!(!tree.is_valid(queued));
+    // The root is never freed.
+    let root = tree.root();
+    tree.free_immediately(root);
+    assert!(tree.is_valid(root));
+}

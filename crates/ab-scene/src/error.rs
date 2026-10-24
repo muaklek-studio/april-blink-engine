@@ -23,6 +23,8 @@ pub enum SceneError {
     RootNode,
     #[error("{0} is not a Node3D (it has no transform)")]
     NotNode3D(NodeHandle),
+    #[error("{0}: a NaN or infinite position, rotation or scale was refused")]
+    NonFiniteTransform(NodeHandle),
     #[error("no script is registered as `{0}`")]
     UnknownScript(String),
 }

@@ -2,7 +2,7 @@
 
 use super::Builder;
 use crate::save::SaveStore;
-use crate::scene_file::{instantiate_scene, load_scene, SceneFile};
+use crate::scene_file::{instantiate_scene, load_scene, load_scene_piece, SceneFile};
 use crate::script_host::call::{intern, signal_arg, Call, CallError};
 use crate::{EngineControl, RenderStats};
 use ab_core::{Affine3A, Time, Transform3D};
@@ -350,7 +350,12 @@ fn time_input_engine(b: &mut Builder) {
         Ok(())
     });
     b.add("time.set_scale", |c| {
-        let scale = c.f32(0)?.max(0.0);
+        let scale = c.f32(0)?;
+        let scale = if scale.is_finite() {
+            scale.clamp(0.0, Time::MAX_SCALE)
+        } else {
+            1.0
+        };
         if let Some(mut time) = c.tree.world().resource_mut::<Time>() {
             time.time_scale = scale;
         }
@@ -462,7 +467,8 @@ fn scenes_and_files(b: &mut Builder) {
     });
     b.add("scene.instantiate", |c| {
         let (path, parent) = (c.str(0)?, c.node(1)?);
-        let node = load_scene(c.tree, path).map_err(scene_error)?;
+        // A piece of the level: the level's sky and fog stay.
+        let node = load_scene_piece(c.tree, path).map_err(scene_error)?;
         if let Err(err) = c.tree.add_child(parent, node) {
             let _ = c.tree.queue_free(node);
             return Err(err.into());
@@ -473,7 +479,7 @@ fn scenes_and_files(b: &mut Builder) {
     // An effect scene (assets/effects/...) at a position, freed when it has played.
     b.add("effects.spawn_scene", |c| {
         let (parent, position, path) = (c.node(0)?, c.vec3(1)?, c.str(2)?);
-        let node = load_scene(c.tree, path).map_err(scene_error)?;
+        let node = load_scene_piece(c.tree, path).map_err(scene_error)?;
         if let Err(err) = c.tree.add_child(parent, node) {
             let _ = c.tree.queue_free(node);
             return Err(err.into());

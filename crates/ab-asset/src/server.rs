@@ -18,6 +18,9 @@ use tracing::info;
 pub struct AssetServer {
     source: Box<dyn AssetSource>,
     scenes: HashMap<String, Arc<GltfScene>>,
+    /// glTF files that failed to load, and why: not decoded again on every spawn (each try
+    /// would upload its textures again) until the file changes ([`AssetServer::evict`]).
+    failed_scenes: HashMap<String, String>,
     textures: HashMap<(String, ColorSpace), TextureHandle>,
     audio: HashMap<String, AudioStream>,
     /// `RenderAssets::id` the cached textures and scenes were registered in, and
@@ -34,6 +37,7 @@ impl AssetServer {
             scenes: HashMap::new(),
             textures: HashMap::new(),
             audio: HashMap::new(),
+            failed_scenes: HashMap::new(),
             render_id: None,
             library_id: None,
         }
@@ -44,6 +48,7 @@ impl AssetServer {
         if self.render_id.replace(render.id()) != Some(render.id()) {
             self.textures.clear();
             self.scenes.clear();
+            self.failed_scenes.clear();
         }
     }
 
@@ -77,6 +82,7 @@ impl AssetServer {
     pub fn evict(&mut self, path: &str) {
         if let Ok(path) = Self::normalize(path) {
             self.scenes.remove(&path);
+            self.failed_scenes.remove(&path);
             self.textures.retain(|(p, _), _| *p != path);
             self.audio.remove(&path);
         }
@@ -123,14 +129,19 @@ impl AssetServer {
         if let Some(scene) = self.scenes.get(&path) {
             return Ok(scene.clone());
         }
+        if let Some(reason) = self.failed_scenes.get(&path) {
+            return Err(AssetError::invalid(&path, reason.clone()));
+        }
+        // A file that cannot be read yet may appear later: only bad content is remembered.
         let bytes = self.read(&path)?;
-        let scene = Arc::new(gltf_loader::load(
-            &path,
-            &bytes,
-            self.source.as_ref(),
-            render,
-            animations,
-        )?);
+        let loaded = gltf_loader::load(&path, &bytes, self.source.as_ref(), render, animations);
+        let scene = match loaded {
+            Ok(scene) => Arc::new(scene),
+            Err(err) => {
+                self.failed_scenes.insert(path.clone(), err.to_string());
+                return Err(err);
+            }
+        };
         info!(
             path,
             nodes = scene.nodes.len(),

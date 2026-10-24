@@ -42,18 +42,23 @@ foundation for making games, with a small codebase that one person can read and 
 - **Editor**: scene editing, play in editor, assets, inspector, console, profiler, source
   control and one-click export; right-click menus, cut/copy/paste of objects, configurable
   snapping and shortcuts from one command table (F1 lists them), four views (perspective,
-  top, front, side), English and Thai with a font and scale of your choice (Edit →
-  Preferences), a Game Config panel, thumbnails and a viewer for images, models, scenes
-  and materials, and a Build panel to put levels together from pieces on a grid (stack,
-  turn, align, distribute, rows). The engine sources are found again when the
-  checkout moves, or located once from the loading screen.
+  top, front, side), English and Thai with a font and scale of your choice (Settings →
+  Preferences), thumbnails and a viewer for images, models, scenes and materials. The
+  main window keeps the panels used all the time (scene, inspector, environment, assets,
+  console); each feature has a window of its own: double-click a UI node for the UI
+  Editor (one interface at a time), an AnimationPlayer for the Animation Editor, an
+  effect for the Effects Editor; Settings → Game Config; Window → Level Builder (levels
+  from pieces on a grid: stack, turn, align, distribute, rows), Profiler, Debug and
+  source control. The engine sources are found again when the checkout moves, or
+  located once from the loading screen.
 - **Scripting**: Rust scripts built against the `ab-script` SDK and loaded through a stable
   C ABI, so the editor and games never need rebuilding with them; rebuilt and hot reloaded
   while the game or the editor runs.
 - **Shipping**: a prebuilt player plus the game's script library and an `assets/` folder of
   chunks named by hash (one `.abp` pack per top-level asset folder, plus an index), so a
-  patch ships only the chunks that changed; or one pack inside the executable. For Linux
-  and Windows; the editor itself ships as a standalone download.
+  patch ships only the chunks that changed; or one pack inside the executable. For Linux,
+  Windows and macOS (a signed `.app` bundle, exported on a Mac); the editor itself ships as
+  a standalone download.
 
 ## Requirements
 
@@ -62,6 +67,9 @@ foundation for making games, with a small codebase that one person can read and 
 - Linux: `libwayland-dev libxkbcommon-dev libudev-dev libasound2-dev` (Debian/Ubuntu names).
 - Windows builds from Linux (optional): `cargo install --locked cargo-xwin`, plus `clang` and
   `lld`.
+- macOS: the Xcode command line tools (`xcode-select --install`).
+
+CI (`.github/workflows/ci.yml`) runs `cargo xtask ci` on Linux, Windows and macOS.
 
 ## Workspace
 

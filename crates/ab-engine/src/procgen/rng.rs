@@ -99,7 +99,10 @@ mod tests {
         let xs: Vec<u64> = (0..8).map(|_| a.next_u64()).collect();
         let ys: Vec<u64> = (0..8).map(|_| b.next_u64()).collect();
         assert_eq!(xs, ys);
-        assert_ne!(Rng::new(7).fork("trees").next_u64(), Rng::new(7).fork("rocks").next_u64());
+        assert_ne!(
+            Rng::new(7).fork("trees").next_u64(),
+            Rng::new(7).fork("rocks").next_u64()
+        );
         assert_ne!(Rng::new(1).next_u64(), Rng::new(2).next_u64());
         // Fixed across machines and releases.
         assert_eq!(Rng::new(42).next_u64(), Rng::new(42).next_u64());

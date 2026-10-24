@@ -10,6 +10,7 @@
 //! were when the preview stops, the player changes, or the game is played.
 
 use super::section;
+use crate::i18n::{t as tr, tf};
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::animation::{apply_pose, AnimationLibrary, AnimationPlayer};
@@ -56,6 +57,13 @@ pub struct AnimationPanel {
     curves: bool,
     /// Which components the curves show (x, y, z).
     curve_axes: [bool; 3],
+    /// When the panel was last shown: Delete acts on its selected key only while it is.
+    shown_at: Option<std::time::Instant>,
+    /// Delete was pressed for the selected key (the editor's shortcuts take the key event).
+    delete_key: bool,
+    /// The selected key as last seen, and the node selection then: selecting another node
+    /// drops the key selection, so Delete goes back to deleting nodes.
+    key_seen: (Option<(usize, usize)>, Option<NodeHandle>),
 }
 
 impl Default for AnimationPanel {
@@ -78,6 +86,9 @@ impl Default for AnimationPanel {
             new_clip: None,
             curves: false,
             curve_axes: [true; 3],
+            shown_at: None,
+            delete_key: false,
+            key_seen: (None, None),
         }
     }
 }
@@ -118,6 +129,13 @@ impl AnimationPanel {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+        self.shown_at = Some(std::time::Instant::now());
+        if self.selected_key != self.key_seen.0 {
+            self.key_seen = (self.selected_key, editor.selection);
+        } else if self.selected_key.is_some() && editor.selection != self.key_seen.1 {
+            self.selected_key = None;
+            self.key_seen = (None, None);
+        }
         if editor.is_playing() {
             // The game plays the animations; previews end.
             self.end_preview(editor);
@@ -154,15 +172,23 @@ impl AnimationPanel {
         let editable = self.file_index().is_some() && desc_of(editor, player).is_some();
         if editable {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.curves, false, format!("{}  Timeline", icon::ROWS));
-                ui.selectable_value(&mut self.curves, true, format!("{}  Curves", icon::WAVE_SINE));
+                ui.selectable_value(
+                    &mut self.curves,
+                    false,
+                    format!("{}  {}", icon::ROWS, tr("animation.timeline")),
+                );
+                ui.selectable_value(
+                    &mut self.curves,
+                    true,
+                    format!("{}  {}", icon::WAVE_SINE, tr("animation.curves")),
+                );
                 if self.curves {
                     ui.separator();
                     for (i, name) in ["X", "Y", "Z"].into_iter().enumerate() {
                         ui.checkbox(&mut self.curve_axes[i], name);
                     }
                     ui.label(
-                        RichText::new("Drag a key: up/down changes its value, sideways its time")
+                        RichText::new(tr("animation.curve_hint"))
                             .small()
                             .color(theme::TEXT_DIM),
                     );
@@ -188,7 +214,7 @@ impl AnimationPanel {
         };
         let track_index = self.selected_key.map_or(0, |(t, _)| t);
         let Some(track) = self.files[i].1.tracks.get(track_index).cloned() else {
-            super::empty_hint(ui, icon::WAVE_SINE, "Record a key first (Key in the toolbar)");
+            super::empty_hint(ui, icon::WAVE_SINE, &tr("animation.key_first"));
             return;
         };
         let duration = self.duration(editor, player).max(0.1);
@@ -252,7 +278,9 @@ impl AnimationPanel {
             let points: Vec<Pos2> = (0..=samples)
                 .filter_map(|s| {
                     let time = duration * s as f32 / samples as f32;
-                    track.sample(time).map(|v| Pos2::new(x_of(time), y_of(v[c])))
+                    track
+                        .sample(time)
+                        .map(|v| Pos2::new(x_of(time), y_of(v[c])))
                 })
                 .collect();
             painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, colors[c])));
@@ -266,18 +294,35 @@ impl AnimationPanel {
         painter.text(
             plot.left_bottom() + Vec2::new(0.0, 4.0),
             egui::Align2::LEFT_TOP,
-            format!("{} · {} ({})", track.target, track.property.name(), track.interpolation.name()),
+            format!(
+                "{} · {} ({})",
+                track.target,
+                track.property.name(),
+                track.interpolation.name()
+            ),
             egui::FontId::proportional(10.5),
             theme::TEXT_DIM,
         );
         // Keys, per component.
-        let mut edit: Option<(usize, usize, f32, f32)> = None;
+        // (key, component, new time or `None` to keep it, value).
+        let mut edit: Option<(usize, usize, Option<f32>, f32)> = None;
         for (k, &(time, value)) in track.keys.iter().enumerate() {
             for c in (0..3).filter(|&c| self.curve_axes[c]) {
                 let center = Pos2::new(x_of(time), y_of(value[c]));
                 let selected = self.selected_key == Some((track_index, k));
                 painter.circle_filled(center, if selected { 5.0 } else { 4.0 }, colors[c]);
-                painter.circle_stroke(center, 5.0, Stroke::new(1.0_f32, if selected { Color32::WHITE } else { theme::BG_0 }));
+                painter.circle_stroke(
+                    center,
+                    5.0,
+                    Stroke::new(
+                        1.0_f32,
+                        if selected {
+                            Color32::WHITE
+                        } else {
+                            theme::BG_0
+                        },
+                    ),
+                );
                 let hit = ui.interact(
                     Rect::from_center_size(center, Vec2::splat(12.0)),
                     ui.id().with(("curve_key", track_index, k, c)),
@@ -291,8 +336,14 @@ impl AnimationPanel {
                     if let Some(p) = hit.interact_pointer_pos() {
                         // Hold Shift: value only.
                         let keep_time = ui.input(|i| i.modifiers.shift);
-                        let t = if keep_time { time } else { t_of(p.x) };
-                        edit = Some((k, c, t, v_of(p.y)));
+                        let t = (!keep_time).then(|| t_of(p.x));
+                        // The key being dragged is the selected one: once it passes a
+                        // neighbour the keys re-sort, and this widget's index is the other's.
+                        let dragged = self
+                            .selected_key
+                            .filter(|s| s.0 == track_index)
+                            .map_or(k, |s| s.1);
+                        edit = Some((dragged, c, t, v_of(p.y)));
                     }
                 }
                 hit.on_hover_text(format!("{:.2}s: {:.3}", time, value[c]));
@@ -301,7 +352,7 @@ impl AnimationPanel {
         if let Some((k, c, time, value)) = edit {
             let t = &mut self.files[i].1.tracks[track_index];
             if k < t.keys.len() {
-                let time = (time * 100.0).round() / 100.0;
+                let time = time.map_or(t.keys[k].0, |time| (time * 100.0).round() / 100.0);
                 t.keys[k].0 = time;
                 t.keys[k].1[c] = (value * 1000.0).round() / 1000.0;
                 let moved = t.keys[k];
@@ -324,13 +375,7 @@ impl AnimationPanel {
                     .size(28.0)
                     .color(theme::TEXT_DIM),
             );
-            ui.label(
-                RichText::new(
-                    "Select an AnimationPlayer, or a model with animations. \
-                     Create → Node → AnimationPlayer animates the nodes beside it.",
-                )
-                .color(theme::TEXT_DIM),
-            );
+            ui.label(RichText::new(tr("animation.no_player")).color(theme::TEXT_DIM));
             if !all.is_empty() {
                 ui.add_space(4.0);
                 for (node, label) in all {
@@ -345,11 +390,13 @@ impl AnimationPanel {
         });
     }
 
-    /// Reads the player's clip files (once per player).
-    fn load_files(&mut self, editor: &Editor, player: NodeHandle) {
+    /// Reads the player's clip files (once per player). Unsaved changes to the previous
+    /// player's clips are saved first, never dropped.
+    fn load_files(&mut self, editor: &mut Editor, player: NodeHandle) {
         if self.files_for == Some(player) {
             return;
         }
+        self.save_all(editor);
         self.files_for = Some(player);
         self.files.clear();
         self.dirty.clear();
@@ -399,7 +446,7 @@ impl AnimationPanel {
                 .unwrap_or_default();
             ui.label(RichText::new(format!("{}  {label}", icon::FILM_STRIP)).strong());
             egui::ComboBox::from_id_salt("anim_clip")
-                .selected_text(self.clip.clone().unwrap_or_else(|| "No clip".into()))
+                .selected_text(self.clip.clone().unwrap_or_else(|| tr("animation.no_clip")))
                 .show_ui(ui, |ui| {
                     for clip in &clips {
                         if ui
@@ -412,22 +459,32 @@ impl AnimationPanel {
                         }
                     }
                 });
-            if editable_player && ui.button(format!("{}  New clip", icon::PLUS)).clicked() {
-                self.new_clip = Some(format!("Clip{}", clips.len() + 1));
+            if editable_player
+                && ui
+                    .button(format!("{}  {}", icon::PLUS, tr("animation.new_clip")))
+                    .clicked()
+            {
+                // The first free name: other players' clip files count too.
+                let project = editor.project();
+                let free = (clips.len() + 1..)
+                    .map(|n| format!("Clip{n}"))
+                    .find(|name| !project.join(clip_path(name)).exists())
+                    .unwrap_or_default();
+                self.new_clip = Some(free);
             }
             ui.separator();
             if ui
                 .button(icon::SKIP_BACK)
-                .on_hover_text("To the start")
+                .on_hover_text(tr("animation.to_start"))
                 .clicked()
             {
                 self.time = 0.0;
                 self.pose(editor, player);
             }
             let (glyph, tip) = if self.playing {
-                (icon::PAUSE, "Pause")
+                (icon::PAUSE, tr("command.pause"))
             } else {
-                (icon::PLAY, "Play the clip")
+                (icon::PLAY, tr("animation.play_clip"))
             };
             if ui
                 .add_enabled(!editor.is_playing(), egui::Button::new(glyph))
@@ -441,7 +498,7 @@ impl AnimationPanel {
             }
             if ui
                 .add_enabled(self.preview.is_some(), egui::Button::new(icon::STOP))
-                .on_hover_text("Stop: the nodes return to their places")
+                .on_hover_text(tr("animation.stop_hint"))
                 .clicked()
             {
                 self.end_preview(editor);
@@ -450,10 +507,11 @@ impl AnimationPanel {
             if let Some(i) = self.file_index().filter(|_| editable_player) {
                 ui.separator();
                 let mut length = duration;
-                ui.label("Length");
+                ui.label(tr("animation.length"));
                 if ui
                     .add(
                         egui::DragValue::new(&mut length)
+                            .custom_parser(crate::panels::parse_finite)
                             .speed(0.02)
                             .range(0.1..=600.0)
                             .suffix(" s"),
@@ -464,9 +522,9 @@ impl AnimationPanel {
                     self.changed(editor, player, i);
                 }
                 ui.separator();
-                ui.toggle_value(&mut self.key_position, "Position");
-                ui.toggle_value(&mut self.key_rotation, "Rotation");
-                ui.toggle_value(&mut self.key_scale, "Scale");
+                ui.toggle_value(&mut self.key_position, tr("animation.position"));
+                ui.toggle_value(&mut self.key_rotation, tr("animation.rotation"));
+                ui.toggle_value(&mut self.key_scale, tr("animation.scale"));
                 let can_key = editor
                     .selection
                     .is_some_and(|n| key_path(editor, player, n).is_some());
@@ -474,14 +532,13 @@ impl AnimationPanel {
                     .add_enabled(
                         can_key,
                         egui::Button::new(
-                            RichText::new(format!("{}  Key", icon::DIAMOND)).strong(),
+                            RichText::new(format!("{}  {}", icon::DIAMOND, tr("animation.key")))
+                                .strong(),
                         )
                         .fill(theme::ACCENT_DIM),
                     )
-                    .on_hover_text("Record the selected node's transform at the playhead")
-                    .on_disabled_hover_text(
-                        "Select a node beside the AnimationPlayer (or below them) to key it",
-                    )
+                    .on_hover_text(tr("animation.key_hint"))
+                    .on_disabled_hover_text(tr("animation.key_disabled"))
                     .clicked()
                 {
                     self.key_selected(editor, player, i);
@@ -490,7 +547,7 @@ impl AnimationPanel {
                 if ui
                     .add_enabled(
                         dirty,
-                        egui::Button::new(format!("{}  Save", icon::FLOPPY_DISK)),
+                        egui::Button::new(format!("{}  {}", icon::FLOPPY_DISK, tr("command.save"))),
                     )
                     .clicked()
                 {
@@ -498,7 +555,7 @@ impl AnimationPanel {
                 }
             } else if !clips.is_empty() {
                 ui.label(
-                    RichText::new("Imported clip: preview only")
+                    RichText::new(tr("animation.imported"))
                         .small()
                         .color(theme::TEXT_DIM),
                 );
@@ -514,12 +571,12 @@ impl AnimationPanel {
         let mut create = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
-            ui.label("Name");
+            ui.label(tr("animation.name"));
             let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0));
             edit.request_focus();
-            create = ui.button("Create").clicked()
+            create = ui.button(tr("menu.create")).clicked()
                 || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-            cancel = ui.button("Cancel").clicked();
+            cancel = ui.button(tr("dialog.cancel")).clicked();
         });
         if !create {
             if !cancel {
@@ -530,25 +587,34 @@ impl AnimationPanel {
         let name: String = name
             .trim()
             .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_')
+            .filter(|&c| super::is_name_char(c) || c == '_')
             .collect();
         if name.is_empty() || self.files.iter().any(|(_, f)| f.name == name) {
-            editor.fail("Choose another name for the clip");
+            editor.fail(tr("animation.name_taken"));
             return;
         }
-        let path = format!("anims/{}.toml", name.to_lowercase());
+        let path = clip_path(&name);
+        let full = editor.project().join(&path);
+        if full.exists() {
+            // Another player's clip, most likely: never written over.
+            editor.fail(tf("animation.file_exists", &[("path", &path)]));
+            self.new_clip = Some(name);
+            return;
+        }
         let file = ClipFile {
             name: name.clone(),
             length: Some(2.0),
             tracks: Vec::new(),
         };
-        let full = editor.project().join(&path);
         let written = full
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| std::fs::write(&full, file.to_toml().unwrap_or_default()));
         if let Err(err) = written {
-            editor.fail(format!("cannot write {path}: {err}"));
+            editor.fail(tf(
+                "animation.write_failed",
+                &[("path", &path), ("error", &err)],
+            ));
             return;
         }
         editor.assets.request_rescan();
@@ -565,9 +631,7 @@ impl AnimationPanel {
         self.files_for = None;
         self.player = None;
         self.clip = Some(name.clone());
-        editor.info(format!(
-            "Created clip {name} ({path}): select a node and press Key"
-        ));
+        editor.info(tf("animation.created", &[("name", &name), ("path", &path)]));
     }
 
     /// Advances playback, and poses the scene while previewing.
@@ -728,22 +792,65 @@ impl AnimationPanel {
         }
         self.begin_preview(editor, player);
         self.changed(editor, player, i);
-        editor.info(format!("Keyed {path} at {time:.2} s"));
+        editor.info(tf(
+            "animation.keyed",
+            &[("path", &path), ("time", &format!("{time:.2}"))],
+        ));
+    }
+
+    /// Whether Delete is for the panel's selected key rather than the selected nodes: a key
+    /// is selected and the panel is on screen.
+    pub fn takes_delete(&self) -> bool {
+        self.selected_key.is_some()
+            && self
+                .shown_at
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500))
+    }
+
+    /// Deletes the selected key the next time the panel is shown.
+    pub fn delete_selected_key(&mut self) {
+        self.delete_key = true;
+    }
+
+    /// Whether a clip file has changes that are not saved yet.
+    pub fn has_unsaved(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
+    /// Saves every clip file with unsaved changes; whether they all were.
+    pub fn save_all(&mut self, editor: &mut Editor) -> bool {
+        for i in 0..self.files.len() {
+            if self.dirty.contains(&self.files[i].0) {
+                self.save(editor, i);
+            }
+        }
+        self.dirty.is_empty()
+    }
+
+    /// Forgets unsaved clip changes (the files on disk stay as they are): read again on the
+    /// next show.
+    pub fn discard_changes(&mut self) {
+        self.dirty.clear();
+        self.files.clear();
+        self.files_for = None;
     }
 
     fn save(&mut self, editor: &mut Editor, i: usize) {
         let (path, file) = &self.files[i];
         let full = editor.project().join(path);
-        match file
-            .to_toml()
-            .map_err(|e| e.to_string())
-            .and_then(|text| editor.write_project_file(&full, text).map_err(|e| e.to_string()))
-        {
+        match file.to_toml().map_err(|e| e.to_string()).and_then(|text| {
+            editor
+                .write_project_file(&full, text)
+                .map_err(|e| e.to_string())
+        }) {
             Ok(()) => {
-                editor.info(format!("Saved {path}"));
+                editor.info(tf("animation.saved", &[("path", path)]));
                 self.dirty.remove(path);
             }
-            Err(err) => editor.fail(format!("cannot save {path}: {err}")),
+            Err(err) => editor.fail(tf(
+                "animation.save_failed",
+                &[("path", path), ("error", &err)],
+            )),
         }
     }
 
@@ -854,7 +961,13 @@ impl AnimationPanel {
                             }
                             if hit.dragged() {
                                 if let Some(p) = hit.interact_pointer_pos() {
-                                    row_actions.push(RowAction::Move(track, k, t_of(p.x)));
+                                    // The selected key is the one dragged (after passing a
+                                    // neighbour, this widget's index is the neighbour's).
+                                    let dragged = self
+                                        .selected_key
+                                        .filter(|s| s.0 == track)
+                                        .map_or(k, |s| s.1);
+                                    row_actions.push(RowAction::Move(track, dragged, t_of(p.x)));
                                 }
                             }
                             if hit.drag_stopped() {
@@ -887,7 +1000,7 @@ impl AnimationPanel {
                                 });
                                 if ui
                                     .small_button(icon::X)
-                                    .on_hover_text("Delete this track")
+                                    .on_hover_text(tr("animation.delete_track"))
                                     .clicked()
                                 {
                                     row_actions.push(RowAction::DeleteTrack(track));
@@ -901,9 +1014,9 @@ impl AnimationPanel {
                         Pos2::new(rect.left() + 8.0, rect.top() + RULER + ROW / 2.0),
                         egui::Align2::LEFT_CENTER,
                         if editable {
-                            "No tracks yet: select a node, move it, press Key."
+                            tr("animation.no_tracks_yet")
                         } else {
-                            "No tracks"
+                            tr("animation.no_tracks")
                         },
                         egui::FontId::proportional(12.0),
                         theme::TEXT_DIM,
@@ -936,12 +1049,8 @@ impl AnimationPanel {
                 }
                 self.apply(editor, player, row_actions);
             });
-        // Delete the selected key.
-        if editable
-            && self.selected_key.is_some()
-            && ui.input(|i| i.key_pressed(egui::Key::Delete))
-            && !ui.ctx().egui_wants_keyboard_input()
-        {
+        // Delete the selected key (Delete, routed here by the editor's shortcuts).
+        if std::mem::take(&mut self.delete_key) && editable && self.selected_key.is_some() {
             if let (Some(i), Some((track, key))) = (self.file_index(), self.selected_key.take()) {
                 // The selection may be from another clip (the game switched it).
                 if let Some(t) = self.files[i].1.tracks.get_mut(track) {
@@ -953,18 +1062,19 @@ impl AnimationPanel {
                 self.pose(editor, player);
             }
         }
-        section(ui, "anim_help", icon::INFO, "How to animate", |ui| {
-            ui.label(
-                RichText::new(
-                    "Create → Node → AnimationPlayer next to the nodes to animate, New clip, then: \
-                     move the playhead, select a node, move it with the gizmo, Key. Drag keys to retime them, \
-                     Delete removes the selected one, Ctrl + wheel zooms. The nodes go back to their places \
-                     when you press Stop. Scripts play clips with tree.animation(player).play(\"Clip\").",
-                )
-                .small()
-                .color(theme::TEXT_DIM),
-            );
-        });
+        section(
+            ui,
+            "anim_help",
+            icon::INFO,
+            &tr("animation.help_title"),
+            |ui| {
+                ui.label(
+                    RichText::new(tr("animation.help"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+            },
+        );
     }
 
     fn apply(&mut self, editor: &mut Editor, player: NodeHandle, actions: Vec<RowAction>) {
@@ -1112,6 +1222,11 @@ fn key_path(editor: &Editor, player: NodeHandle, node: NodeHandle) -> Option<Str
 }
 
 /// A new AnimationPlayer node (Create menu).
+/// Where a clip named `name` is kept, relative to the project.
+fn clip_path(name: &str) -> String {
+    format!("anims/{}.toml", name.to_lowercase())
+}
+
 pub fn new_player() -> NodeDesc {
     NodeDesc {
         name: "AnimationPlayer".into(),
@@ -1158,7 +1273,7 @@ mod tests {
             player: Some(player),
             ..Default::default()
         };
-        panel.load_files(&editor, player);
+        panel.load_files(&mut editor, player);
         panel.clip = Some("Open".into());
         let i = panel.file_index().expect("the clip file is editable");
         editor.select(Some(door));

@@ -32,9 +32,10 @@ commands:
                        by hash + index.abm: a patch ships the changed ones), or one file
                        (--single-file; --extras adds README and licenses as files); then
                        runs it from an empty folder to prove it is self-contained.
-                       --platform builds for Windows and/or Linux (dist/<name>-<platform>;
-                       Windows from Linux uses cargo-xwin), --archive also makes a .zip
-                       (Windows) / .tar.gz (Linux) to upload
+                       --platform builds for Windows, Linux and/or macOS (dist/<name>-<platform>;
+                       Windows from Linux uses cargo-xwin; macOS, an app bundle, on a Mac
+                       only), --archive also makes a .zip (Windows) / .tar.gz (Linux,
+                       macOS) to upload
   package-editor [--platform linux|windows|all] [--archive] [--out <dir>]
                        the editor to give to game makers, in dist/april-blink-editor-<platform>:
                        the editor, the players it exports games with (players/<platform>/)

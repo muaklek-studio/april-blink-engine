@@ -1,6 +1,7 @@
 //! Exporting games: shippable copies for players, in a folder per platform.
 //!
-//! For each platform (this machine's by default; also Windows from Linux with `cargo xwin`):
+//! For each platform (this machine's by default; also Windows from Linux with `cargo xwin`,
+//! and macOS on a Mac):
 //!
 //! 1. builds the game:
 //!    * a project ([`Game::Project`]): its script library in release mode, run by the
@@ -12,6 +13,9 @@
 //!
 //!    Windows builds link the C runtime statically, so players need no Visual C++
 //!    redistributable;
+//!    On macOS the game is an app bundle (`<title>.app`, see [`app_bundle`]) that players
+//!    double-click in Finder; the executable, its library and its assets go in
+//!    `Contents/MacOS`, and the bundle is signed ad hoc once complete;
 //! 2. packs the asset directory into chunks in `assets/` next to the executable (one pack per
 //!    top-level folder, named by hash, plus `assets/index.abm`; see `ab_vfs::ChunkedSource`),
 //!    or, with `single_file`, appends one pack to the executable;
@@ -20,7 +24,7 @@
 //! 4. verifies: the pack is read back in full, the exported game is run headless from an empty
 //!    directory (so an export that still depends on the source tree fails here instead of on a
 //!    player's PC) and Windows binaries are checked for DLLs players may not have;
-//! 5. with `archive`, zips it (Windows) or makes a `.tar.gz` (Linux), ready to upload.
+//! 5. with `archive`, zips it (Windows) or makes a `.tar.gz` (Linux, macOS), ready to upload.
 //!
 //! Progress goes to a log callback, one line at a time: `=== <title> <version> for
 //! <platform> ===` starts a platform, `exported <title> to <folder>` and `archive: <path>`
@@ -63,7 +67,47 @@ pub enum Game {
     },
 }
 
+/// File in every exported folder: only a folder holding it is replaced by the next export.
+const EXPORT_MARKER: &str = ".ablink-export";
+
+/// Removes a previous export at `dir` so the new one starts clean. Refuses a folder that is
+/// not an earlier export (neither the marker file nor the executable is there) or that holds the game's sources: a
+/// mistyped output folder must never delete a project.
+fn clear_export_dir(dir: &Path, game: &Game, exe_name: &str) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canonical(dir);
+    let source = canonical(game.source_dir());
+    if source.starts_with(&target) {
+        bail!(
+            "{} holds the game's sources: choose another output folder",
+            dir.display()
+        );
+    }
+    let empty = std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none());
+    // Exports made before the marker are known by their executable.
+    let earlier = dir.join(EXPORT_MARKER).is_file() || dir.join(exe_name).is_file();
+    if !empty && !earlier {
+        bail!(
+            "{} already exists and is not an earlier export: move it away or choose another \
+             output folder",
+            dir.display()
+        );
+    }
+    std::fs::remove_dir_all(dir).with_context(|| format!("clearing {}", dir.display()))
+}
+
 impl Game {
+    /// The folder of the game's sources (the project, or the engine workspace).
+    fn source_dir(&self) -> &Path {
+        match self {
+            Self::Project(project) => &project.root,
+            Self::Engine { workspace, .. } => workspace,
+        }
+    }
+
     /// Night Relics, from the engine's sources.
     pub fn slice(workspace: &Path) -> Self {
         Self::engine(
@@ -215,7 +259,7 @@ impl Options {
 }
 
 /// Command-line usage of an export (`cargo xtask export`, `ab-editor --export`).
-pub const USAGE: &str = "export <slice|demo|project folder> [--platform linux|windows|all] \
+pub const USAGE: &str = "export <slice|demo|project folder> [--platform linux|windows|macos|all] \
                          [--archive] [--single-file] [--extras] [--target <triple>] [--out <dir>] \
                          [--no-verify]";
 
@@ -240,7 +284,7 @@ pub fn parse_args(args: &[&str], default_out: &Path) -> Result<(String, Options)
             "--platform" | "-p" => {
                 platforms = Some(Platform::parse(
                     args.next()
-                        .context("--platform needs linux, windows or all")?,
+                        .context("--platform needs linux, windows, macos or all")?,
                 )?);
             }
             other if other.starts_with("--") => bail!("unknown option `{other}`\nusage: {USAGE}"),
@@ -373,12 +417,25 @@ fn export_one(
         name.clone()
     };
     let dir = options.out.join(&folder);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("clearing {}", dir.display()))?;
-    }
+    clear_export_dir(&dir, game, &exe_name)?;
     std::fs::create_dir_all(&dir)?;
-    let exe = dir.join(&exe_name);
-    let (stats, packs, assets) = if options.single_file {
+    // Marks the folder as an export: the next export may replace it, nothing else.
+    std::fs::write(dir.join(EXPORT_MARKER), b"")?;
+    // Where the executable and the files it needs next to it go.
+    let (bundle, bin_dir) = if platform == Platform::MacOs {
+        let (app, bin) = app_bundle(&dir, game.title(), &name, version)?;
+        (Some(app), bin)
+    } else {
+        (None, dir.clone())
+    };
+    let exe = bin_dir.join(&exe_name);
+    // A pack appended to a Mach-O executable fails code signing, and the bundle is a single
+    // item for players anyway: macOS keeps the chunks inside it.
+    let single_file = options.single_file && bundle.is_none();
+    if options.single_file && !single_file {
+        say!(log, "single file: the app bundle holds the assets on macOS");
+    }
+    let (stats, packs, assets) = if single_file {
         (
             append_to_executable(&built.executable, pack, &exe)?,
             1,
@@ -387,7 +444,7 @@ fn export_one(
     } else {
         std::fs::copy(&built.executable, &exe)
             .with_context(|| format!("copying {}", built.executable.display()))?;
-        let chunks = dir.join(CHUNK_DIR);
+        let chunks = bin_dir.join(CHUNK_DIR);
         let written = pack
             .write_chunks(&chunks)
             .with_context(|| format!("writing {}", chunks.display()))?;
@@ -395,15 +452,22 @@ fn export_one(
     };
     let library = match &built.library {
         Some(library) => {
-            let shipped = dir.join(platform.shipped_library(&name));
+            let shipped = bin_dir.join(platform.shipped_library(&name));
             std::fs::copy(library, &shipped)
                 .with_context(|| format!("copying {}", library.display()))?;
             Some(shipped)
         }
         None => None,
     };
+    if let Some(app) = &bundle {
+        sign_ad_hoc(app, log);
+    }
     if options.extras {
-        write_extras(&dir, game.title(), version, platform, &exe_name)?;
+        let launch = bundle
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(|| exe_name.clone(), |n| n.to_string_lossy().into_owned());
+        write_extras(&dir, game.title(), version, platform, &launch)?;
     }
     say!(
         log,
@@ -435,6 +499,8 @@ fn export_one(
         }
     }
     say!(log, "exported {} to {}", game.title(), dir.display());
+    // For the editor: the folder alone (the line above can hold " to " in the title too).
+    say!(log, "folder: {}", dir.display());
     let mut files: Vec<_> = std::fs::read_dir(&dir)?.flatten().collect();
     files.sort_by_key(|e| e.file_name());
     for entry in files {
@@ -564,15 +630,11 @@ fn build_command(build: &Build) -> Command {
 fn run(mut command: Command, dir: &Path, what: &str, log: Log<'_>) -> Result<()> {
     let shown = format!("{command:?}").replace('"', "");
     say!(log, "$ {shown}");
-    let output = command
-        .current_dir(dir)
-        .output()
+    // Line by line as cargo writes them: the editor shows what is compiling now.
+    let status = process::run_streaming(command.current_dir(dir), |line| log(line))
         .context("failed to run cargo: is Rust installed (https://rustup.rs)?")?;
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        log(line);
-    }
-    if !output.status.success() {
-        bail!("building {what} failed ({})", output.status);
+    if !status.success() {
+        bail!("building {what} failed ({status})");
     }
     Ok(())
 }
@@ -693,6 +755,121 @@ pub fn engine_binary(
     ))
 }
 
+/// Makes the app bundle `<title>.app` in `dir`: its `Info.plist` and an empty
+/// `Contents/MacOS`, where the executable `exe_name` and everything it reads next to itself
+/// go. Returns the bundle and that folder.
+fn app_bundle(
+    dir: &Path,
+    title: &str,
+    exe_name: &str,
+    version: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    // Finder shows the title; `/` and `:` cannot be in a file name there.
+    let file_name: String = title
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | ':' | '\\') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let file_name = match file_name.trim() {
+        "" => exe_name,
+        trimmed => trimmed,
+    };
+    let app = dir.join(format!("{file_name}.app"));
+    let bin = app.join("Contents/MacOS");
+    std::fs::create_dir_all(&bin).with_context(|| format!("creating {}", bin.display()))?;
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        info_plist(title, exe_name, version),
+    )?;
+    Ok((app, bin))
+}
+
+/// The `Info.plist` of a game's app bundle. Games run in full resolution on Retina screens,
+/// and macOS turns on Game Mode for them (`public.app-category.games`).
+fn info_plist(title: &str, exe_name: &str, version: &str) -> String {
+    let xml = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    // Reverse-DNS identifier: letters, digits, `-` and `.` only.
+    let id: String = exe_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    // CFBundleVersion takes up to three numbers: `0.1.0-beta` → `0.1.0`.
+    let build: String = version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let build = if build.is_empty() {
+        "0"
+    } else {
+        build.trim_end_matches('.')
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>{title}</string>
+	<key>CFBundleExecutable</key>
+	<string>{exe}</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.aprilblink.game.{id}</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>{title}</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{version}</string>
+	<key>CFBundleVersion</key>
+	<string>{build}</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<false/>
+</dict>
+</plist>
+"#,
+        title = xml(title),
+        exe = xml(exe_name),
+        version = xml(version),
+    )
+}
+
+/// Signs the bundle `app` ad hoc (`codesign --sign -`): Apple silicon Macs run no unsigned
+/// code, and the files added after linking would otherwise break the linker's signature.
+/// Only warns when it fails: the game still runs on the Mac that made it.
+fn sign_ad_hoc(app: &Path, log: Log<'_>) {
+    let mut command = process::command("codesign");
+    command.args(["--force", "--deep", "--sign", "-"]).arg(app);
+    match command.output() {
+        Ok(output) if output.status.success() => say!(log, "signed {} (ad hoc)", app.display()),
+        Ok(output) => say!(
+            log,
+            "warning: codesign failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(err) => say!(log, "warning: codesign not run: {err}"),
+    }
+}
+
 fn write_extras(
     dir: &Path,
     title: &str,
@@ -713,12 +890,20 @@ fn write_extras(
             "~/.local/share/<game>",
         ),
         Platform::MacOs => (
-            format!("Run `./{exe_name}` from Terminal."),
+            format!(
+                "Double-click `{exe_name}` (the first time, right-click it and choose Open: \
+                 the game is not notarized by Apple)."
+            ),
             "~/Library/Application Support/<game>",
         ),
     };
+    let keep = if platform == Platform::MacOs {
+        ""
+    } else {
+        " Keep the other files next to it."
+    };
     let text = format!(
-        "{title} {version}\n\n{run} Keep the other files next to it.\n\n\
+        "{title} {version}\n\n{run}{keep}\n\n\
          Keys: F11 fullscreen.\n\
          Options: --fullscreen, --windowed, --licenses.\n\n\
          Save games, the log (logs/latest.log) and crash reports are in your user data folder:\n\
@@ -853,6 +1038,9 @@ fn verify_assets(path: &Path) -> Result<usize> {
 }
 
 /// Checks the pack or chunks and runs the exported game headless from an empty directory.
+/// How long the exported game may take to start, run its frames and quit.
+const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 fn verify_export(exe: &Path, assets: &Path, log: Log<'_>) -> Result<()> {
     say!(log, "verify: pack OK ({} files)", verify_assets(assets)?);
 
@@ -861,15 +1049,19 @@ fn verify_export(exe: &Path, assets: &Path, log: Log<'_>) -> Result<()> {
     std::fs::create_dir_all(&sandbox)?;
     // A relative path (`--out dist`) would be looked up from the sandbox on Unix.
     let exe = std::path::absolute(exe)?;
-    let output = process::command(&exe)
+    let mut check = process::command(&exe);
+    check
         // `--overlay` proves a shipping build: it must be ignored, with a warning.
         .args(["--overlay", "--headless", "180"])
         .current_dir(&sandbox)
         .env_remove("AB_ASSETS")
         // Keep the check's log and saves out of the developer's own data folder.
         .env("AB_SAVE_DIR", sandbox.join("data"))
-        .env("RUST_LOG", "info")
-        .output()
+        // A failure is read from the output: no message box waiting for a click.
+        .env("AB_NO_DIALOGS", "1")
+        .env("RUST_LOG", "info");
+    // A game whose scripts loop forever must not hang the export.
+    let output = process::output_with_timeout(&mut check, VERIFY_TIMEOUT)
         .with_context(|| format!("running {}", exe.display()))?;
     let output_log = format!(
         "{}{}",
@@ -1011,5 +1203,55 @@ mod tests {
         assert_eq!(info.imports, ["kernel32.dll", "vcruntime140.dll"]);
         assert!(pe_info(b"\x7fELF").is_none());
         assert!(pe_info(&fake_pe(3, &[])).unwrap().imports.is_empty());
+    }
+
+    #[test]
+    fn an_export_replaces_only_an_earlier_export() {
+        let root = std::env::temp_dir().join(format!("ab-export-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_dir = root.join("game");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("game.toml"), "").unwrap();
+        let game = Game::Engine {
+            workspace: project_dir.clone(),
+            package: "game".into(),
+            binary: "game".into(),
+            assets: project_dir.join("assets"),
+            project_files: Vec::new(),
+            title: "Game".into(),
+            version: "0.1.0".into(),
+        };
+        // The sources themselves, or a folder holding them: never.
+        assert!(clear_export_dir(&project_dir, &game, "game").is_err());
+        assert!(clear_export_dir(&root, &game, "game").is_err());
+        assert!(project_dir.join("game.toml").is_file());
+        // Someone else's folder: refused.
+        let other = root.join("out/game");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("notes.txt"), "mine").unwrap();
+        assert!(clear_export_dir(&other, &game, "game").is_err());
+        // An earlier export: replaced.
+        std::fs::write(other.join(EXPORT_MARKER), "").unwrap();
+        clear_export_dir(&other, &game, "game").unwrap();
+        assert!(!other.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn macos_games_are_app_bundles() {
+        let root = std::env::temp_dir().join(format!("ab-export-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (app, bin) = app_bundle(&root, "Cats & Dogs: 2/3", "cats-dogs", "1.2.0-beta").unwrap();
+        assert_eq!(app, root.join("Cats & Dogs- 2-3.app"));
+        assert_eq!(bin, app.join("Contents/MacOS"));
+        assert!(bin.is_dir());
+        let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
+        assert!(plist.contains("<string>Cats &amp; Dogs: 2/3</string>"));
+        assert!(plist.contains("<string>cats-dogs</string>"));
+        assert!(plist.contains("<string>com.aprilblink.game.cats-dogs</string>"));
+        assert!(plist.contains("<string>1.2.0-beta</string>"));
+        assert!(plist.contains("<key>CFBundleVersion</key>\n\t<string>1.2.0</string>"));
+        assert!(plist.contains("public.app-category.games"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

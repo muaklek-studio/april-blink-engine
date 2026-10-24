@@ -59,7 +59,9 @@ pub fn export_target(assets: &Path) -> Option<ExportTarget> {
 pub struct ExportOptions {
     pub linux: bool,
     pub windows: bool,
-    /// Also a `.zip` (Windows) / `.tar.gz` (Linux).
+    /// An app bundle; only made on a Mac.
+    pub macos: bool,
+    /// Also a `.zip` (Windows) / `.tar.gz` (Linux, macOS).
     pub archive: bool,
     /// Assets inside the executable instead of chunks in `assets/` next to it.
     pub single_file: bool,
@@ -69,11 +71,21 @@ pub struct ExportOptions {
 }
 
 impl ExportOptions {
+    /// How many platforms are ticked.
+    fn platforms(&self) -> usize {
+        [self.linux, self.windows, self.macos]
+            .into_iter()
+            .filter(|&on| on)
+            .count()
+    }
+
     fn new(out: &Path) -> Self {
         Self {
-            // Both where possible: most players are on Windows. Linux builds need Linux.
-            linux: !cfg!(windows),
+            // Both where possible: most players are on Windows. Linux builds need Linux
+            // (a Mac has no Linux linker by default).
+            linux: cfg!(target_os = "linux"),
             windows: true,
+            macos: cfg!(target_os = "macos"),
             archive: true,
             single_file: false,
             extras: false,
@@ -101,10 +113,14 @@ impl ExportOptions {
 
     /// Arguments of `ab-editor` for this export of `game`.
     pub fn args(&self, game: &str) -> Vec<String> {
-        let platforms: Vec<&str> = [(self.linux, "linux"), (self.windows, "windows")]
-            .into_iter()
-            .filter_map(|(on, name)| on.then_some(name))
-            .collect();
+        let platforms: Vec<&str> = [
+            (self.linux, "linux"),
+            (self.windows, "windows"),
+            (self.macos, "macos"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
         let mut args = vec![
             "--export".to_owned(),
             game.to_owned(),
@@ -206,10 +222,8 @@ impl Progress {
         } else if let Some(path) = line.strip_prefix("archive: ") {
             self.step = "Making the archive".into();
             self.outputs.archives.push(PathBuf::from(path));
-        } else if let Some(rest) = line.strip_prefix("exported ") {
-            if let Some((_, dir)) = rest.rsplit_once(" to ") {
-                self.outputs.folders.push(PathBuf::from(dir));
-            }
+        } else if let Some(dir) = line.strip_prefix("folder: ") {
+            self.outputs.folders.push(PathBuf::from(dir));
         }
     }
 }
@@ -234,7 +248,7 @@ impl ExportJob {
         let mut command = ab_project::process::command(editor);
         command.args(options.for_target(target).args(&target.spec));
         let mut job = Self::spawn(command)?;
-        job.platforms = usize::from(options.linux) + usize::from(options.windows);
+        job.platforms = options.platforms();
         Ok(job)
     }
 
@@ -245,8 +259,7 @@ impl ExportJob {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Its own process group, so Cancel stops the builds it started too.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        ab_project::process::own_group(&mut command);
         let mut child = command
             .spawn()
             .map_err(|e| anyhow::anyhow!("cannot start the export: {e}"))?;
@@ -334,17 +347,7 @@ impl ExportJob {
         if self.state != JobState::Running {
             return;
         }
-        let pid = self.child.id().to_string();
-        #[cfg(unix)]
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .status();
-        #[cfg(windows)]
-        let _ = ab_project::process::command("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .status();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        ab_project::process::kill_tree(&mut self.child);
         self.state = JobState::Cancelled;
         self.finished = Some(Instant::now());
     }
@@ -404,8 +407,9 @@ fn reveal(path: &Path) {
     } else {
         "xdg-open"
     };
-    if let Err(err) = Command::new(program).arg(folder).spawn() {
-        tracing::warn!("cannot open {}: {err}", folder.display());
+    match Command::new(program).arg(folder).spawn() {
+        Ok(child) => crate::scripts::reap(child),
+        Err(err) => tracing::warn!("cannot open {}: {err}", folder.display()),
     }
 }
 
@@ -517,13 +521,20 @@ impl ExportWindow {
                             format!("{} Windows (.exe)", icon::WINDOWS_LOGO),
                         );
                         ui.checkbox(&mut options.linux, format!("{} Linux", icon::LINUX_LOGO));
+                        // Apple's linker and SDK exist only on a Mac.
+                        if cfg!(target_os = "macos") {
+                            ui.checkbox(
+                                &mut options.macos,
+                                format!("{} macOS (.app)", icon::APPLE_LOGO),
+                            );
+                        }
                     });
                     ui.end_row();
                     ui.label("Package");
                     ui.vertical(|ui| {
                         ui.checkbox(
                             &mut options.archive,
-                            "Archive to upload (.zip for Windows, .tar.gz for Linux)",
+                            "Archive to upload (.zip for Windows, .tar.gz for Linux and macOS)",
                         );
                         ui.checkbox(
                             &mut options.single_file,
@@ -547,12 +558,12 @@ impl ExportWindow {
 
         // What could stop it before it starts.
         let mut blocked = None;
-        if !options.windows && !options.linux {
+        if options.platforms() == 0 {
             blocked = Some("Pick at least one platform.".to_owned());
         }
-        if options.linux && cfg!(windows) {
+        if options.linux && !cfg!(target_os = "linux") {
             blocked =
-                Some("Linux builds cannot be made on Windows (use WSL or a Linux PC).".into());
+                Some("Linux builds need a Linux PC (or WSL on Windows): untick Linux here.".into());
         }
         if options.windows && !cfg!(windows) {
             match &self.toolchain {
@@ -828,6 +839,7 @@ mod tests {
         let mut options = ExportOptions {
             linux: true,
             windows: true,
+            macos: false,
             archive: true,
             single_file: false,
             extras: false,
@@ -912,7 +924,8 @@ mod tests {
             "   Compiling wgpu v30.0.1",
             "   Compiling ab-engine v0.1.0 (/x)",
             "packed 3 files (3 compressed): 0.0 MB of assets → 0.0 MB",
-            "exported My Game to /dist/my-game-linux",
+            "exported Back to School to /Back to School/dist/my-game-linux",
+            "folder: /Back to School/dist/my-game-linux",
             "archive: /dist/my-game-0.1.0-linux.tar.gz",
             "=== My Game 0.1.0 for windows ===",
         ] {
@@ -922,7 +935,10 @@ mod tests {
         assert_eq!((p.done, p.compiled), (1, 0));
         p.read("Compiling winit v0.30.13");
         assert_eq!(p.step, "Compiling winit");
-        assert_eq!(p.outputs.folders, [PathBuf::from("/dist/my-game-linux")]);
+        assert_eq!(
+            p.outputs.folders,
+            [PathBuf::from("/Back to School/dist/my-game-linux")]
+        );
         assert_eq!(
             p.outputs.archives,
             [PathBuf::from("/dist/my-game-0.1.0-linux.tar.gz")]

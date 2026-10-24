@@ -63,11 +63,16 @@ impl PathMode {
 }
 
 /// Creates a `Path3D` node from `desc` and builds along it.
-pub(super) fn create(tree: &mut SceneTree, name: &str, desc: &NodeDesc) -> Result<NodeHandle, String> {
+pub(super) fn create(
+    tree: &mut SceneTree,
+    name: &str,
+    desc: &NodeDesc,
+) -> Result<NodeHandle, String> {
     let path = desc.path.clone().unwrap_or_default();
     PathMode::of(&path)?;
     let node = tree.create_node3d(name);
-    tree.set_class_name(node, PATH_3D).map_err(|e| e.to_string())?;
+    tree.set_class_name(node, PATH_3D)
+        .map_err(|e| e.to_string())?;
     let material = desc.material.clone();
     tree.insert_component(node, Path3D::new(path))
         .map_err(|e| e.to_string())?;
@@ -118,7 +123,11 @@ pub fn build(tree: &mut SceneTree, node: NodeHandle) -> Result<(), String> {
     };
     let collide = d.collide.unwrap_or(false);
     let shape = collide.then(|| {
-        let vertices: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(v.position)).collect();
+        let vertices: Vec<Vec3> = mesh
+            .vertices
+            .iter()
+            .map(|v| Vec3::from(v.position))
+            .collect();
         let indices: Vec<[u32; 3]> = mesh.indices.as_chunks::<3>().0.to_vec();
         Shape::trimesh(vertices, indices)
     });
@@ -141,7 +150,8 @@ pub fn build(tree: &mut SceneTree, node: NodeHandle) -> Result<(), String> {
     };
     let visual = tree.create_mesh_instance3d("Mesh", MeshInstance3D::new(mesh, material));
     tree.add_child(built, visual).map_err(|e| e.to_string())?;
-    tree.insert_component(built, Generated).map_err(|e| e.to_string())?;
+    tree.insert_component(built, Generated)
+        .map_err(|e| e.to_string())?;
     tree.add_child(node, built).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -151,9 +161,14 @@ fn build_instances(tree: &mut SceneTree, node: NodeHandle, path: &Path3D) -> Res
     let Some(piece) = d.piece.clone().filter(|p| !p.trim().is_empty()) else {
         return Ok(()); // no piece chosen yet
     };
-    let places = spline::instance_places(&path.spline, d.spacing.unwrap_or(2.0), d.align.unwrap_or(true));
+    let places = spline::instance_places(
+        &path.spline,
+        d.spacing.unwrap_or(2.0),
+        d.align.unwrap_or(true),
+    );
     let built = tree.create_node3d("Built");
-    tree.insert_component(built, Generated).map_err(|e| e.to_string())?;
+    tree.insert_component(built, Generated)
+        .map_err(|e| e.to_string())?;
     tree.add_child(node, built).map_err(|e| e.to_string())?;
     // One description of the piece, instanced at each place.
     let scene = SceneFile {

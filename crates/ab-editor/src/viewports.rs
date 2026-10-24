@@ -63,6 +63,23 @@ pub struct ViewportArea {
 }
 
 impl ViewportArea {
+    /// Frames the selection in every view (in the four-view layout, each keeps its angle).
+    pub fn frame_selection_everywhere(&mut self, editor: &Editor) {
+        for view in &mut self.views {
+            view.frame_selection(editor);
+        }
+    }
+
+    /// Where new things go: the pivot of the view last clicked (the main view's in the
+    /// single layout).
+    pub fn placement(&self) -> ab_engine::core::Vec3 {
+        let index = match self.layout {
+            Layout::Single => 0,
+            Layout::Quad => self.active.min(self.views.len() - 1),
+        };
+        self.views[index].camera.pivot
+    }
+
     pub fn new(render_state: Option<&egui_wgpu::RenderState>) -> Self {
         let main = Viewport::new(render_state);
         Self {
@@ -141,7 +158,15 @@ impl ViewportArea {
         for (index, rect) in rects.into_iter().enumerate() {
             let view = &mut self.views[index];
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                view.show(ui, editor, render_state);
+                if index == 0 {
+                    view.show(ui, editor, render_state);
+                } else {
+                    // Only the main view's camera stays for the game (its damage numbers
+                    // and other screen-space effects project with it).
+                    crate::app::keeping_camera(editor, |editor| {
+                        view.show(ui, editor, render_state);
+                    });
+                }
             });
             if self.layout == Layout::Quad {
                 if pressed.is_some_and(|p| rect.contains(p)) {

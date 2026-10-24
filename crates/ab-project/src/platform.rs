@@ -52,7 +52,7 @@ impl Platform {
         }
     }
 
-    /// `linux`, `windows`, `all`, `host`, comma-separated.
+    /// `linux`, `windows`, `all`, `host`, comma-separated; `macos` on a Mac.
     pub fn parse(list: &str) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         for name in list.split(',').map(str::trim) {
@@ -62,7 +62,10 @@ impl Platform {
                 "all" => &[Self::Linux, Self::Windows],
                 "host" => &[Self::host()],
                 "macos" | "mac" if Self::host() == Self::MacOs => &[Self::MacOs],
-                other => bail!("unknown platform `{other}`: use linux, windows or all"),
+                other if other.starts_with("mac") => {
+                    bail!("macOS games are exported on a Mac (Apple's linker and SDK)")
+                }
+                other => bail!("unknown platform `{other}`: use linux, windows, macos or all"),
             };
             for &p in platforms {
                 if !out.contains(&p) {
@@ -139,10 +142,7 @@ mod tests {
             Platform::of_triple(Platform::Windows.triple()),
             Platform::Windows
         );
-        assert_eq!(
-            Platform::of_triple("aarch64-apple-darwin"),
-            Platform::MacOs
-        );
+        assert_eq!(Platform::of_triple("aarch64-apple-darwin"), Platform::MacOs);
         assert_eq!(Platform::MacOs.library("x"), "libx.dylib");
     }
 }

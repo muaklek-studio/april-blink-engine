@@ -107,7 +107,10 @@ fn game_config<'t>(c: &'t Call<'_>) -> Result<std::cell::Ref<'t, GameConfig>, Ca
     })
 }
 
-fn path_of<'t>(c: &'t Call<'_>, node: NodeHandle) -> Result<std::cell::Ref<'t, crate::scene_file::path::Path3D>, CallError> {
+fn path_of<'t>(
+    c: &'t Call<'_>,
+    node: NodeHandle,
+) -> Result<std::cell::Ref<'t, crate::scene_file::path::Path3D>, CallError> {
     c.tree
         .component::<crate::scene_file::path::Path3D>(node)
         .ok_or_else(|| CallError::Failed(format!("{node} is not a Path3D")))
@@ -116,7 +119,10 @@ fn path_of<'t>(c: &'t Call<'_>, node: NodeHandle) -> Result<std::cell::Ref<'t, c
 pub(super) fn add(b: &mut Builder) {
     b.add("path.length", |c| {
         let node = c.node(0)?;
-        let scale = c.tree.global_transform(node).map_or(1.0, |g| Vec3::from(g.matrix3.x_axis).length());
+        let scale = c
+            .tree
+            .global_transform(node)
+            .map_or(1.0, |g| Vec3::from(g.matrix3.x_axis).length());
         let length = path_of(c, node)?.spline.length() * scale;
         c.push_f64(f64::from(length));
         Ok(())

@@ -132,6 +132,7 @@ fn main() -> anyhow::Result<()> {
             for entry in pack.entries() {
                 let mode = match entry.compression {
                     Compression::Lz4 => "lz4",
+                    Compression::Deflate => "dfl",
                     Compression::None => "   ",
                 };
                 println!(

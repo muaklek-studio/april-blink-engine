@@ -84,8 +84,8 @@
 //! `canvas`, `label`, `button`, `panel`, `progress`, `box` or `image`: see [`ui`].
 
 mod format;
-mod load;
 pub mod generator;
+mod load;
 pub mod path;
 pub mod prefab;
 mod save;
@@ -93,13 +93,14 @@ pub mod ui;
 
 pub use format::{
     AnimationDesc, AudioDesc, BodyDesc, BoxDesc, ButtonDesc, CameraDesc, CanvasDesc, CharacterDesc,
-    ColorDesc, ControlDesc, EnvironmentDesc, ImageDesc, JointDesc, LabelDesc, LightDesc,
-    GeneratorDesc, MaterialDesc, MeshDesc, NodeDesc, PathDesc, PanelDesc, ParticlesDesc, ProgressDesc, RagdollDesc,
-    SceneFile, ShapeDesc, TimerDesc, SCENE_FORMAT_VERSION,
+    ColorDesc, ControlDesc, EnvironmentDesc, GeneratorDesc, ImageDesc, JointDesc, LabelDesc,
+    LightDesc, MaterialDesc, MeshDesc, NodeDesc, PanelDesc, ParticlesDesc, PathDesc, ProgressDesc,
+    RagdollDesc, SceneFile, ShapeDesc, TimerDesc, SCENE_FORMAT_VERSION,
 };
 pub use load::{
     apply_environment, install_clips, instantiate_scene, load_animations, load_scene,
-    material_handle, mesh_and_material, particle_emitter, resolve_material, SceneAssetCache, SceneFileError,
+    load_scene_piece, material_handle, mesh_and_material, particle_emitter, resolve_material,
+    SceneAssetCache, SceneFileError,
 };
 pub use save::{relative_path, save_contents, save_scene};
 

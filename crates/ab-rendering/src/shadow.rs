@@ -27,7 +27,8 @@ pub fn directional_shadow_matrix(
     map_size: u32,
 ) -> Mat4 {
     let direction = light_direction.normalize_or(Vec3::NEG_Y);
-    let far = distance.clamp(camera.near + 0.01, camera.far);
+    // `max`/`min` rather than `clamp`: a camera's far plane may sit closer than near + 0.01.
+    let far = distance.min(camera.far).max(camera.near + 0.01);
     let corners = camera.slice_corners(camera.near, far);
 
     // Centre on the view axis so the radius is rotation invariant.

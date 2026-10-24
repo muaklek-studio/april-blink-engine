@@ -165,7 +165,10 @@ fn walk(root: &Path, dir: &Path, entries: &mut Vec<AssetEntry>) {
                 name,
                 kind: AssetKind::Folder,
             });
-            walk(root, &path, entries);
+            // A linked folder is listed, not entered: a link back up would never end.
+            if !path.is_symlink() {
+                walk(root, &path, entries);
+            }
         } else {
             let kind = AssetKind::of(&path);
             entries.push(AssetEntry {

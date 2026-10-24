@@ -91,6 +91,11 @@ pub struct Editor {
     /// Every selected node, in the order they were selected (the active one included).
     pub selected: Vec<NodeHandle>,
     pub modified: bool,
+    /// The open scene's file as last read or written (size, time): a change by something
+    /// else (a git switch, pull or discard, another editor) is noticed.
+    scene_stamp: Option<(u64, std::time::SystemTime)>,
+    /// The scene as last opened or saved: undoing back to it leaves nothing unsaved.
+    saved_scene: Option<SceneFile>,
     /// Counts edits and scene replacements: views drawn in the background redraw when it
     /// moves (see [`Editor::revision`]).
     revision: u64,
@@ -114,6 +119,14 @@ pub struct Editor {
     pub clipboard: Clipboard,
     /// The project's `config.toml`, if it has one.
     pub config_path: Option<PathBuf>,
+    /// A node to open in its own editor (see [`crate::features`]): set by a double click in
+    /// the scene tree or by creating a UI node, taken by the editor window.
+    pub open_request: Option<NodeHandle>,
+    /// Game Config values were changed in the editor and not saved to the file yet.
+    pub config_modified: bool,
+    /// The config as it was when Play started: edits while playing are tweaks, undone on
+    /// Stop.
+    config_before_play: Option<ab_engine::game_config::GameConfig>,
     /// The piece being placed with the build tool (see [`crate::build`]).
     pub build: Option<BuildPiece>,
     /// The build tool's copy of the piece following the pointer: outside the scene (not
@@ -244,6 +257,8 @@ impl Editor {
             selection: None,
             selected: Vec::new(),
             modified: false,
+            scene_stamp: None,
+            saved_scene: None,
             revision: 0,
             history: History::default(),
             mode: Mode::Edit,
@@ -258,6 +273,9 @@ impl Editor {
             gesture: false,
             clipboard: Clipboard::default(),
             config_path: config_of(&project_dir),
+            open_request: None,
+            config_modified: false,
+            config_before_play: None,
             build: None,
             ghost: None,
             backups: None,
@@ -404,6 +422,8 @@ impl Editor {
         let scene = SceneFile::from_toml(text).expect("the template parses");
         if self.replace_scene(&scene).is_ok() {
             self.scene_path = None;
+            self.scene_stamp = None;
+            self.saved_scene = Some(self.describe());
             self.modified = false;
             self.history.clear();
             self.select(None);
@@ -424,6 +444,8 @@ impl Editor {
         match result {
             Ok(()) => {
                 self.scene_path = Some(path.to_owned());
+                self.scene_stamp = self.disk_stamp(path);
+                self.saved_scene = Some(self.describe());
                 self.modified = false;
                 self.history.clear();
                 self.select(None);
@@ -478,6 +500,39 @@ impl Editor {
         }
     }
 
+    fn disk_stamp(&self, path: &str) -> Option<(u64, std::time::SystemTime)> {
+        let metadata = std::fs::metadata(self.project().join(path)).ok()?;
+        Some((metadata.len(), metadata.modified().ok()?))
+    }
+
+    /// Looks whether the open scene's file was changed by something else (a git switch,
+    /// pull or discard; another program). Without unsaved changes the scene is read again;
+    /// with them, a warning says that saving would replace the file's new content.
+    pub fn check_scene_on_disk(&mut self) {
+        if self.is_playing() {
+            return;
+        }
+        let Some(path) = self.scene_path.clone() else {
+            return;
+        };
+        let now = self.disk_stamp(&path);
+        if now.is_none() || now == self.scene_stamp {
+            return;
+        }
+        self.scene_stamp = now;
+        if self.modified {
+            self.fail(format!(
+                "{path} was changed outside the editor: saving replaces those changes with \
+                 yours (File → Open to load the file's version instead)"
+            ));
+        } else {
+            self.open_scene(&path);
+            self.info(format!(
+                "Reloaded {path}: it was changed outside the editor"
+            ));
+        }
+    }
+
     /// Saves to the open scene's file.
     pub fn save(&mut self) {
         match self.scene_path.clone() {
@@ -498,10 +553,13 @@ impl Editor {
             self.fail("Stop the game before saving");
             return;
         }
-        let text = self.describe().to_toml();
+        let scene = self.describe();
+        let text = scene.to_toml();
         let full = self.project().join(&path);
         match self.write_project_file(&full, text) {
             Ok(()) => {
+                self.scene_stamp = self.disk_stamp(&path);
+                self.saved_scene = Some(scene);
                 self.scene_path = Some(path.clone());
                 self.modified = false;
                 self.assets.request_rescan();
@@ -558,12 +616,15 @@ impl Editor {
         }
     }
 
-    fn restore(&mut self, snapshot: &Snapshot) {
+    /// Puts the scene back as `snapshot` had it; whether that worked (the scene is left as
+    /// it was otherwise).
+    fn restore(&mut self, snapshot: &Snapshot) -> bool {
         if let Err(err) = self.replace_scene(&snapshot.scene) {
             self.fail(format!("cannot restore the scene: {err:#}"));
-            return;
+            return false;
         }
         self.restore_selection(snapshot);
+        true
     }
 
     fn restore_selection(&mut self, snapshot: &Snapshot) {
@@ -633,9 +694,13 @@ impl Editor {
         self.gesture = false;
         let current = self.snapshot();
         if let Some(previous) = self.history.undo(current) {
-            self.restore(&previous);
-            self.modified = true;
-            self.info("Undo");
+            if self.restore(&previous) {
+                self.modified = self.saved_scene.as_ref() != Some(&previous.scene);
+                self.info("Undo");
+            } else {
+                // Nothing changed: keep the step where it was.
+                self.history.redo(previous);
+            }
         }
     }
 
@@ -646,9 +711,12 @@ impl Editor {
         self.gesture = false;
         let current = self.snapshot();
         if let Some(next) = self.history.redo(current) {
-            self.restore(&next);
-            self.modified = true;
-            self.info("Redo");
+            if self.restore(&next) {
+                self.modified = self.saved_scene.as_ref() != Some(&next.scene);
+                self.info("Redo");
+            } else {
+                self.history.undo(next);
+            }
         }
     }
 
@@ -1276,7 +1344,7 @@ impl Editor {
         let name: String = stem
             .chars()
             .map(|c| {
-                if c.is_alphanumeric() || c == '_' || c == '-' {
+                if crate::panels::is_name_char(c) || c == '_' || c == '-' {
                     c
                 } else {
                     '_'
@@ -1469,12 +1537,17 @@ impl Editor {
         let generated_mesh = made.iter().any(|&m| {
             tree.subtree(m).into_iter().any(|n| {
                 tree.component::<MeshInstance3D>(n).is_some()
-                    && tree.component::<SceneOrigin>(n).is_none_or(|o| o.mesh.is_none())
+                    && tree
+                        .component::<SceneOrigin>(n)
+                        .is_none_or(|o| o.mesh.is_none())
                     && self.instance_owner(n) == Some(n)
             })
         });
         if generated_mesh {
-            return Err("this generator makes meshes (a terrain) that only it can make: it cannot be baked".into());
+            return Err(
+                "this generator makes meshes (a terrain) that only it can make: it cannot be baked"
+                    .into(),
+            );
         }
         let scenes: Vec<SceneFile> = made.iter().map(|&m| save_scene(tree, m)).collect();
         let parent = tree.parent(node).ok_or("no parent")?;
@@ -1488,7 +1561,13 @@ impl Editor {
                 kind: Some("Node3D".into()),
                 ..Default::default()
             };
-            let Some(g) = editor.add_scene_under(SceneFile { environment: None, nodes: vec![desc] }, parent) else {
+            let Some(g) = editor.add_scene_under(
+                SceneFile {
+                    environment: None,
+                    nodes: vec![desc],
+                },
+                parent,
+            ) else {
                 return;
             };
             if let Some(t) = transform {
@@ -1637,7 +1716,12 @@ impl Editor {
 
     pub fn rename(&mut self, node: NodeHandle, name: &str) {
         let name = name.trim();
-        if name.is_empty() || name.contains(['/', ':', '.']) {
+        if name.is_empty() {
+            return;
+        }
+        if name.contains(['/', ':', '.']) {
+            // Node paths use these characters.
+            self.fail(format!("\"{name}\": a name cannot contain / : or ."));
             return;
         }
         let Some(parent) = self.tree().parent(node) else {
@@ -1682,6 +1766,8 @@ impl Editor {
             let tree = self.tree_mut();
             let _ = tree.set_name(node, &name);
             if let Err(err) = tree.reparent(node, new_parent, true) {
+                // The node stays where it was, under its own name.
+                let _ = tree.set_name(node, &base);
                 self.fail(format!("{err}"));
                 return;
             }
@@ -1954,6 +2040,7 @@ impl Editor {
         match loaded {
             Ok(config) => {
                 self.tree_mut().world_mut().insert_resource(config);
+                self.config_modified = false;
                 None
             }
             Err(err) => {
@@ -1969,9 +2056,17 @@ impl Editor {
         }
         self.build = None;
         self.remove_ghost();
-        if let Some(err) = self.load_config() {
-            self.fail(format!("config: {err}"));
+        // Play starts from the file, or from the values edited and not saved yet.
+        if !self.config_modified {
+            if let Some(err) = self.load_config() {
+                self.fail(format!("config: {err}"));
+            }
         }
+        self.config_before_play = self
+            .tree()
+            .world()
+            .resource::<ab_engine::game_config::GameConfig>()
+            .map(|c| c.clone());
         let snapshot = self.snapshot();
         let environment = self
             .tree()
@@ -2031,6 +2126,9 @@ impl Editor {
             return;
         };
         self.mode = Mode::Edit;
+        if let Some(config) = self.config_before_play.take() {
+            self.tree_mut().world_mut().insert_resource(config);
+        }
         // Keep script versions hot reload brought in while playing.
         let current = self
             .tree()
@@ -2059,7 +2157,7 @@ impl Editor {
         if let Some(mut control) = world.resource_mut::<EngineControl>() {
             control.set_mouse_captured(false);
         }
-        self.restore(&snapshot);
+        let _ = self.restore(&snapshot);
         self.tree_mut().world_mut().insert_resource(environment);
         self.info("Stopped");
     }
@@ -2666,6 +2764,60 @@ mod tests {
     }
 
     #[test]
+    fn undoing_back_to_the_saved_scene_leaves_nothing_unsaved() {
+        let dir = std::env::temp_dir().join(format!("ab-editor-saved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut editor = Editor::new(dir.clone(), None, AudioOutput::Silent);
+        editor.save_as("level");
+        let floor = editor
+            .node_at("Floor")
+            .expect("the starter scene has a floor");
+        editor.rename(floor, "Ground");
+        assert!(editor.modified);
+        editor.undo();
+        assert!(!editor.modified, "back to what is on disk");
+        editor.redo();
+        assert!(editor.modified);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_scene_changed_outside_is_reloaded_or_warned_about() {
+        let dir = std::env::temp_dir().join(format!("ab-editor-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut editor = Editor::new(dir.clone(), None, AudioOutput::Silent);
+        editor.save_as("level");
+        let nodes = editor.describe().nodes.len();
+        editor.check_scene_on_disk();
+        assert!(
+            !editor.status.as_ref().unwrap().error,
+            "nothing changed yet"
+        );
+
+        // A git switch writes another version (one node fewer).
+        let mut theirs = editor.describe();
+        theirs.nodes.pop();
+        let write = |scene: &SceneFile| {
+            // A different size, whatever the clock's resolution.
+            std::fs::write(dir.join("level.abscene"), scene.to_toml()).unwrap();
+        };
+        write(&theirs);
+        editor.check_scene_on_disk();
+        assert_eq!(editor.describe().nodes.len(), nodes - 1, "reloaded");
+        assert!(!editor.modified);
+
+        // With unsaved changes, it warns instead.
+        editor.modified = true;
+        write(&SceneFile::from_toml(ab_project::NEW_SCENE).unwrap());
+        editor.check_scene_on_disk();
+        assert_eq!(editor.describe().nodes.len(), nodes - 1, "edits kept");
+        assert!(editor.status.as_ref().unwrap().error);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn saving_keeps_the_replaced_version_as_a_backup() {
         let root = std::env::temp_dir().join(format!("ab-editor-backup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2673,7 +2825,10 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let mut editor = Editor::new(project.clone(), None, AudioOutput::Silent);
         let backups = backup_dir(&root.join("store"), &project);
-        assert_ne!(backups, backup_dir(&root.join("store"), &root.join("other/game")));
+        assert_ne!(
+            backups,
+            backup_dir(&root.join("store"), &root.join("other/game"))
+        );
         editor.backups = Some(backups.clone());
 
         editor.save_as("levels/a");

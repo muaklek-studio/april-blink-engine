@@ -35,7 +35,12 @@ pub struct EditorSettings {
     pub windows: Vec<String>,
     /// Where each tool window was last: outer position and inner size, in points.
     pub window_rects: std::collections::BTreeMap<String, [f32; 4]>,
+    /// Scenes opened or saved lately, newest first, by project folder.
+    pub recent_scenes: std::collections::BTreeMap<String, Vec<String>>,
 }
+
+/// Recent scenes kept per project.
+const RECENT_SCENES: usize = 12;
 
 /// The interface zoom a user can pick.
 pub const UI_SCALES: std::ops::RangeInclusive<f32> = 0.75..=2.0;
@@ -53,6 +58,7 @@ impl Default for EditorSettings {
             ui_scale: 1.0,
             windows: Vec::new(),
             window_rects: Default::default(),
+            recent_scenes: Default::default(),
         }
     }
 }
@@ -134,6 +140,7 @@ impl EditorSettings {
             Ok(settings) => settings.unwrap_or_default(),
             Err(err) => {
                 tracing::warn!("editor settings unreadable, using the defaults: {err}");
+                keep_unreadable(store, SLOT);
                 Self::default()
             }
         }
@@ -146,6 +153,24 @@ impl EditorSettings {
         }
     }
 
+    /// Records `scene` (of the project at `project`) as the newest recent scene.
+    pub fn add_recent_scene(&mut self, project: &std::path::Path, scene: &str) {
+        let list = self
+            .recent_scenes
+            .entry(project.to_string_lossy().into_owned())
+            .or_default();
+        list.retain(|s| s != scene);
+        list.insert(0, scene.to_owned());
+        list.truncate(RECENT_SCENES);
+    }
+
+    /// The project's recent scenes, newest first.
+    pub fn recent_scenes(&self, project: &std::path::Path) -> &[String] {
+        self.recent_scenes
+            .get(project.to_string_lossy().as_ref())
+            .map_or(&[], Vec::as_slice)
+    }
+
     fn sanitized(mut self) -> Self {
         self.snap = self.snap.sanitized();
         if !(self.ui_scale.is_finite() && UI_SCALES.contains(&self.ui_scale)) {
@@ -155,6 +180,19 @@ impl EditorSettings {
             self.language = "en".into();
         }
         self
+    }
+}
+
+/// Keeps a copy of slot `slot` that could not be read (`<slot>.unreadable.json`) before the
+/// defaults replace it, so a hand edit gone wrong never costs every other setting.
+pub(crate) fn keep_unreadable(store: &SaveStore, slot: &str) {
+    let path = store.dir().join(format!("{slot}.json"));
+    let copy = store.dir().join(format!("{slot}.unreadable.json"));
+    if path.is_file() {
+        match std::fs::copy(&path, &copy) {
+            Ok(_) => tracing::warn!("the unreadable file was kept as {}", copy.display()),
+            Err(err) => tracing::warn!("cannot keep a copy of {}: {err}", path.display()),
+        }
     }
 }
 

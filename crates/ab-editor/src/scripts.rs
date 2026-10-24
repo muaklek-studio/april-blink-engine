@@ -491,10 +491,8 @@ impl GameScripts {
         let text =
             std::fs::read_to_string(&lib).with_context(|| format!("reading {}", lib.display()))?;
         match wire_lib(&text) {
-            Ok(Some(wired)) => {
-                ab_engine::core::fs::atomic_write(&lib, wired)
-                    .with_context(|| format!("writing {}", lib.display()))?
-            }
+            Ok(Some(wired)) => ab_engine::core::fs::atomic_write(&lib, wired)
+                .with_context(|| format!("writing {}", lib.display()))?,
             Ok(None) => {}
             Err(reason) => bail!(
                 "{reason}: add `pub mod scripts;` and call `scripts::register(registry)` in \
@@ -685,9 +683,10 @@ fn open_command(editor: &CodeEditor, file: &Path, line: usize, folder: &Path) ->
 pub fn open_script(file: &Path, line: usize, folder: &Path) -> Result<String> {
     match code_editor() {
         Some(editor) => {
-            open_command(&editor, file, line, folder)
+            let child = open_command(&editor, file, line, folder)
                 .spawn()
                 .with_context(|| format!("starting {}", editor.program.display()))?;
+            reap(child);
             Ok(editor.name.to_owned())
         }
         None => {
@@ -712,10 +711,18 @@ pub fn open_with_system(path: &Path) -> Result<()> {
         c.arg(path);
         c
     };
-    command
+    let child = command
         .spawn()
         .with_context(|| format!("opening {}", path.display()))?;
+    reap(child);
     Ok(())
+}
+
+/// Waits for a launcher in the background, so it does not stay a zombie process.
+pub fn reap(mut child: std::process::Child) {
+    let _ = std::thread::Builder::new()
+        .name("ab-reap".into())
+        .spawn(move || child.wait());
 }
 
 #[cfg(test)]

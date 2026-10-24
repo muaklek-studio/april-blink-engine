@@ -1,12 +1,14 @@
 //! Crash reports for shipped games: a panic that escapes the game loop, or an error that ends
 //! the game, is written to `<data folder>/logs/crash-<time>.txt` with the log file next to it,
-//! and shown in a message box on Windows release builds (which have no console).
+//! and shown in a message box by release builds started without a terminal (from Explorer,
+//! Finder or a file manager), whose players would otherwise never see it.
 //!
 //! Script panics are caught and recovered by the scene tree; they are logged, not reported
 //! as crashes. That is why the panic hook only *remembers* the last panic, and the report is
 //! written when the panic reaches [`run_reporting_crashes`].
 
 use std::backtrace::Backtrace;
+use std::io::IsTerminal as _;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once};
@@ -46,7 +48,7 @@ pub fn install_panic_hook() {
 }
 
 /// Runs `body` and, when it panics or fails, writes a crash report into `log_dir` (and shows
-/// it on Windows release builds) before passing the failure on.
+/// it, see [`report`]) before passing the failure on.
 pub fn run_reporting_crashes(
     title: &str,
     log_dir: Option<&Path>,
@@ -73,7 +75,9 @@ pub fn run_reporting_crashes(
     }
 }
 
-/// Writes the report and tells the player (message box on Windows release builds).
+/// Writes the report and tells the player: a message box in release builds, on Windows
+/// (no console there) or when no terminal shows the output. `AB_NO_DIALOGS` turns the box
+/// off (automated runs, where nobody would close it).
 fn report(title: &str, log_dir: Option<&Path>, what: &str, backtrace: Option<&str>) {
     let path = log_dir.and_then(|dir| write_report(dir, title, what, backtrace));
     let mut message = format!("{title} stopped unexpectedly.\n\n{what}");
@@ -83,7 +87,8 @@ fn report(title: &str, log_dir: Option<&Path>, what: &str, backtrace: Option<&st
             path.display()
         ));
     }
-    if cfg!(all(windows, not(debug_assertions))) {
+    let unseen = cfg!(windows) || !std::io::stderr().is_terminal();
+    if !cfg!(debug_assertions) && unseen && std::env::var_os("AB_NO_DIALOGS").is_none() {
         message_box(title, &message);
     }
 }
@@ -150,8 +155,35 @@ fn message_box(title: &str, text: &str) {
     }
 }
 
+/// An alert on macOS; on Linux, `zenity` or `kdialog` when one is installed.
 #[cfg(not(windows))]
-fn message_box(_title: &str, _text: &str) {}
+fn message_box(title: &str, text: &str) {
+    use std::process::Command;
+    if cfg!(target_os = "macos") {
+        // The texts go in as arguments: nothing in them is read as AppleScript.
+        let _ = Command::new("osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "display alert (item 1 of argv) message (item 2 of argv) as critical",
+                "-e",
+                "end run",
+                title,
+                text,
+            ])
+            .status();
+    } else {
+        let _ = Command::new("zenity")
+            .args(["--error", "--no-markup", "--title", title, "--text", text])
+            .status()
+            .or_else(|_| {
+                Command::new("kdialog")
+                    .args(["--title", title, "--error", text])
+                    .status()
+            });
+    }
+}
 
 #[cfg(test)]
 mod tests {

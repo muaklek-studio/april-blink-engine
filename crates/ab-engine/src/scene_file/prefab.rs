@@ -330,7 +330,10 @@ mesh = { primitive = "cube" }
         let mut loaded = prefab.clone();
         assert!(apply_overrides(&mut loaded, &diff).is_empty());
         assert_eq!(loaded.nodes[1].script_list(), Vec::<String>::new());
-        assert_eq!(loaded.nodes[1].body.clone().unwrap_or_default(), BodyDesc::default());
+        assert_eq!(
+            loaded.nodes[1].body.clone().unwrap_or_default(),
+            BodyDesc::default()
+        );
     }
 
     #[test]

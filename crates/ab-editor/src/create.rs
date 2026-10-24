@@ -2,6 +2,7 @@
 //! their mesh and shape, lights, cameras, sounds, every particle effect preset, and UI
 //! controls and screens.
 
+use crate::i18n::{t as tr, tf};
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::core::Vec3;
@@ -470,13 +471,13 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
             }
         });
     };
-    section(ui, "Node", BASIC);
-    section(ui, "Mesh", MESHES);
-    section(ui, "Path", PATHS);
-    section(ui, "Light", LIGHTS);
-    section(ui, "Camera", CAMERAS);
-    section(ui, "Physics", PHYSICS);
-    if entry(ui, "AnimationPlayer", "Animation Player") {
+    section(ui, &tr("create.node"), BASIC);
+    section(ui, &tr("create.mesh"), MESHES);
+    section(ui, &tr("create.path"), PATHS);
+    section(ui, &tr("create.light"), LIGHTS);
+    section(ui, &tr("create.camera"), CAMERAS);
+    section(ui, &tr("create.physics"), PHYSICS);
+    if entry(ui, "AnimationPlayer", &tr("create.animation_player")) {
         chosen = Some(SceneFile {
             environment: None,
             nodes: vec![crate::panels::animation::new_player()],
@@ -494,9 +495,9 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
                 .any(|m| tree.component::<ab_engine::rendering::Skin>(m).is_some())
         })
         .and_then(|n| editor.tree().name(n).map(|name| name.to_owned()));
-    ui.menu_button("Ragdoll", |ui| {
+    ui.menu_button(tr("create.ragdoll"), |ui| {
         if let Some(name) = &character {
-            if entry(ui, "Ragdoll", &format!("For {name} (from its skeleton)")) {
+            if entry(ui, "Ragdoll", &tf("create.ragdoll_for", &[("name", name)])) {
                 let mut node = ab_engine::ragdoll::ragdoll_node("Ragdoll", false);
                 if let Some(desc) = node.ragdoll.as_mut() {
                     desc.skeleton = Some(format!("../{name}"));
@@ -509,15 +510,15 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
             }
             ui.separator();
         }
-        if entry(ui, "Ragdoll", "Humanoid (falls on Play)") {
+        if entry(ui, "Ragdoll", &tr("create.ragdoll_falls")) {
             chosen = Some(ragdoll(true));
             ui.close();
         }
-        if entry(ui, "Ragdoll", "Humanoid (stands until hit)") {
+        if entry(ui, "Ragdoll", &tr("create.ragdoll_stands")) {
             chosen = Some(ragdoll(false));
             ui.close();
         }
-        if entry(ui, "Ragdoll", "Empty Ragdoll") {
+        if entry(ui, "Ragdoll", &tr("create.ragdoll_empty")) {
             chosen = Some(SceneFile {
                 environment: None,
                 nodes: vec![ab_engine::ragdoll::ragdoll_node("Ragdoll", true)],
@@ -525,8 +526,8 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
             ui.close();
         }
     });
-    ui.menu_button("Effect", |ui| {
-        if entry(ui, "Node3D", "Layered effect (edit in Effects)") {
+    ui.menu_button(tr("create.effect"), |ui| {
+        if entry(ui, "Node3D", &tr("create.layered_effect")) {
             chosen = Some(layered_effect());
             ui.close();
         }
@@ -540,43 +541,29 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
             }
         }
     });
-    if entry(ui, "AudioStreamPlayer3D", "Sound") {
+    if entry(ui, "AudioStreamPlayer3D", &tr("create.sound")) {
         chosen = Some(sound(editor));
         ui.close();
     }
-    let mut chosen_ui: Option<SceneFile> = None;
-    ui.menu_button("UI", |ui| {
-        for template in UI {
-            if entry(ui, template.class, template.label) {
-                chosen_ui = Some(template.scene());
-                ui.close();
-            }
+    // A UI node: its controls are made in the UI Editor, which opens on it.
+    if entry(ui, "CanvasLayer", &tr("create.ui")) {
+        ui.close();
+        // At the top of the scene: an interface is not part of a 3D object.
+        editor.select(None);
+        editor.add_scene(UI[0].scene(), None);
+        if let Some(layer) = editor.selection {
+            editor.open_request = Some(layer);
         }
-        let picture = image(editor);
-        if ui
-            .add_enabled(
-                picture.is_some(),
-                egui::Button::new(format!("{}  Image", theme::class_icon("TextureRect"))),
-            )
-            .on_disabled_hover_text("Add a PNG or JPEG to the project first")
-            .clicked()
-        {
-            chosen_ui = picture;
-            ui.close();
-        }
-        ui.separator();
-        for template in UI_SCREENS {
-            if entry(ui, template.class, template.label) {
-                chosen_ui = Some(template.scene());
-                ui.close();
-            }
-        }
-    });
-    if let Some(scene) = chosen_ui {
-        let scene = place_ui(editor, scene);
-        editor.add_scene(scene, None);
-    } else if let Some(scene) = chosen {
+    }
+    if let Some(scene) = chosen {
         editor.add_scene(scene, Some(at));
+        // An AnimationPlayer or an effect opens in its editor, ready to work on.
+        if let Some(node) = editor
+            .selection
+            .filter(|&n| crate::features::Feature::of(editor, n).is_some())
+        {
+            editor.open_request = Some(node);
+        }
     }
 }
 
@@ -589,10 +576,12 @@ mod tests {
         let project =
             std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
-        let all: Vec<&Template> = [BASIC, MESHES, PATHS, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS]
-            .iter()
-            .flat_map(|group| group.iter())
-            .collect();
+        let all: Vec<&Template> = [
+            BASIC, MESHES, PATHS, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS,
+        ]
+        .iter()
+        .flat_map(|group| group.iter())
+        .collect();
         let mut scenes: Vec<SceneFile> = all.iter().map(|t| t.scene()).collect();
         scenes.extend(ParticleSettings::PRESETS.iter().map(|p| effect(p)));
         scenes.push(layered_effect());

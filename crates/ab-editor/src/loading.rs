@@ -717,12 +717,17 @@ fn load_projects() -> (Outcome, RecentProjects) {
             }
             (Outcome::ok(detail), recent)
         }
-        Err(err) => (
-            Outcome::warn(format!(
-                "The project list is unreadable ({err}); starting empty"
-            )),
-            RecentProjects::default(),
-        ),
+        Err(err) => {
+            // Starting empty saves an empty list later: keep the old one first.
+            crate::settings::keep_unreadable(&RecentProjects::store(), "projects");
+            (
+                Outcome::warn(format!(
+                    "The project list is unreadable ({err}); starting empty (the old \
+                     list is kept as projects.unreadable.json)"
+                )),
+                RecentProjects::default(),
+            )
+        }
     }
 }
 

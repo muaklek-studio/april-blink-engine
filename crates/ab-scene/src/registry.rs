@@ -1,5 +1,5 @@
-use crate::script::{Guarded, NodeScript};
 use crate::property::ScriptPropertyDesc;
+use crate::script::{Guarded, NodeScript};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;

@@ -1,7 +1,8 @@
 //! The Game Config panel: the project's named values (`config.toml`) by group, edited
-//! within their rules. While playing, edits are live tweaks (Play starts again from the
-//! file); while editing, Save writes them to the file.
+//! within their rules. While playing, edits are live tweaks (undone on Stop); while
+//! editing, they are unsaved changes until Save writes them to the file.
 
+use crate::i18n::{t, tf};
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::game_config::{ConfigEntry, ConfigValue, GameConfig};
@@ -17,23 +18,35 @@ pub struct ConfigPanel {
 
 impl ConfigPanel {
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+        self.show_values(ui, editor);
+    }
+
+    /// Writes the edited values to the project's config file; whether it worked.
+    pub fn save_to_file(&mut self, editor: &mut Editor) -> bool {
+        if let Some(path) = editor.config_path.clone() {
+            self.save(editor, &path);
+        }
+        !editor.config_modified
+    }
+
+    fn show_values(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         let Some(path) = editor.config_path.clone() else {
-            super::empty_hint(
-                ui,
-                icon::SLIDERS,
-                "No config file: add config = \"config.toml\" to game.toml",
-            );
+            super::empty_hint(ui, icon::SLIDERS, &t("config.no_file"));
             return;
         };
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text(format!("{}  Filter values", icon::MAGNIFYING_GLASS))
+                    .hint_text(format!(
+                        "{}  {}",
+                        icon::MAGNIFYING_GLASS,
+                        t("config.filter")
+                    ))
                     .desired_width(180.0),
             );
             if ui
-                .button(format!("{}  Reload", icon::ARROW_CLOCKWISE))
-                .on_hover_text(format!("Read {} again", path.display()))
+                .button(format!("{}  {}", icon::ARROW_CLOCKWISE, t("config.reload")))
+                .on_hover_text(tf("config.reload_hint", &[("path", &path.display())]))
                 .clicked()
             {
                 self.error = editor.load_config();
@@ -42,10 +55,10 @@ impl ConfigPanel {
             let save = ui
                 .add_enabled(
                     editing,
-                    egui::Button::new(format!("{}  Save", icon::FLOPPY_DISK)),
+                    egui::Button::new(format!("{}  {}", icon::FLOPPY_DISK, t("command.save"))),
                 )
-                .on_hover_text("Write the values to config.toml (its comments are not kept)")
-                .on_disabled_hover_text("While playing, edits are tweaks: stop to save values");
+                .on_hover_text(t("config.save_hint"))
+                .on_disabled_hover_text(t("config.save_playing"));
             if save.clicked() {
                 self.save(editor, &path);
             }
@@ -61,10 +74,7 @@ impl ConfigPanel {
             .resource::<GameConfig>()
             .map(|c| c.clone())
         else {
-            ui.label(
-                RichText::new("The config file could not be read: see the Console.")
-                    .color(theme::WARN),
-            );
+            ui.label(RichText::new(t("config.unreadable")).color(theme::WARN));
             return;
         };
         let needle = self.filter.trim().to_lowercase();
@@ -104,11 +114,11 @@ impl ConfigPanel {
                         }
                         if entry.constant {
                             ui.label(RichText::new(icon::LOCK_SIMPLE).color(theme::TEXT_DIM))
-                                .on_hover_text("Constant: fixed for the whole game");
+                                .on_hover_text(t("config.constant"));
                         } else if entry.value != entry.default
                             && ui
                                 .small_button(icon::ARROW_COUNTER_CLOCKWISE)
-                                .on_hover_text(format!("Back to {}", entry.default))
+                                .on_hover_text(tf("config.reset", &[("value", &entry.default)]))
                                 .clicked()
                         {
                             let result = config.reset(key).map_err(|e| e.to_string());
@@ -123,7 +133,8 @@ impl ConfigPanel {
                     self.error = None;
                     editor.tree_mut().world_mut().insert_resource(config);
                     if !editor.is_playing() {
-                        editor.info(format!("{key} changed (Save writes it to config.toml)"));
+                        editor.config_modified = true;
+                        editor.info(tf("config.changed", &[("key", &key)]));
                     }
                 }
                 Err(err) => self.error = Some(err),
@@ -144,7 +155,8 @@ impl ConfigPanel {
         match editor.write_project_file(path, config.to_toml()) {
             Ok(()) => {
                 editor.tree_mut().world_mut().insert_resource(config);
-                editor.info(format!("Saved {}", path.display()));
+                editor.config_modified = false;
+                editor.info(tf("config.saved", &[("path", &path.display())]));
                 self.error = None;
             }
             Err(err) => self.error = Some(format!("{}: {err}", path.display())),
@@ -165,15 +177,21 @@ fn value_editor(ui: &mut egui::Ui, key: &str, entry: &ConfigEntry) -> Option<Con
             let mut v = *v;
             let range = entry.min.map_or(i64::MIN, |m| m.ceil() as i64)
                 ..=entry.max.map_or(i64::MAX, |m| m.floor() as i64);
-            ui.add(egui::DragValue::new(&mut v).range(range).speed(0.2))
-                .changed()
-                .then_some(ConfigValue::Int(v))
+            ui.add(
+                egui::DragValue::new(&mut v)
+                    .custom_parser(crate::panels::parse_finite)
+                    .range(range)
+                    .speed(0.2),
+            )
+            .changed()
+            .then_some(ConfigValue::Int(v))
         }
         ConfigValue::Float(v) => {
             let mut v = *v;
             let range = entry.min.unwrap_or(f64::MIN)..=entry.max.unwrap_or(f64::MAX);
             ui.add(
                 egui::DragValue::new(&mut v)
+                    .custom_parser(crate::panels::parse_finite)
                     .range(range)
                     .speed(0.01)
                     .max_decimals(4),

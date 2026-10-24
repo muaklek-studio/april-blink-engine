@@ -779,7 +779,8 @@ fn prefab_instances_keep_their_own_changes_when_the_prefab_changes() {
 
 #[test]
 fn paths_build_roads_pipes_and_fences_and_save_only_their_points() {
-    let post = "[[node]]\nname = \"Post\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\n";
+    let post =
+        "[[node]]\nname = \"Post\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\n";
     let scene = "[[node]]\nname = \"Land\"\ntype = \"Node3D\"\n\n\
                  [[node]]\nname = \"Road\"\nparent = \".\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 5.0]], mode = \"ribbon\", width = 4.0, collide = true }\nmaterial = { color = \"#333333\" }\n\n\
                  [[node]]\nname = \"Fence\"\nparent = \".\"\ntype = \"Path3D\"\npath = { points = [[0.0, 0.0, 5.0], [10.0, 0.0, 5.0]], mode = \"instances\", piece = \"post.abscene\", spacing = 2.5 }\n\n\
@@ -790,9 +791,15 @@ fn paths_build_roads_pipes_and_fences_and_save_only_their_points() {
     let road = tree.get_node(land, "Road").unwrap();
     assert_eq!(tree.class_name(road), Some("Path3D"));
     assert!(tree.get_node(road, "Built/Mesh").is_some());
-    assert!(tree.get_node(road, "Built/Shape").is_some(), "the road can be driven on");
+    assert!(
+        tree.get_node(road, "Built/Shape").is_some(),
+        "the road can be driven on"
+    );
     let fence = tree.get_node(land, "Fence").unwrap();
-    assert_eq!(tree.children(tree.get_node(fence, "Built").unwrap()).len(), 5);
+    assert_eq!(
+        tree.children(tree.get_node(fence, "Built").unwrap()).len(),
+        5
+    );
     assert!(tree.get_node(land, "Cable/Built/Mesh").is_some());
 
     let saved = save_scene(tree, land);
@@ -851,32 +858,58 @@ generator = { kind = "town", seed = 1, blocks_x = 2, blocks_z = 1, houses = 1 }
         tree.children(node)
     };
     assert_eq!(built(tree, "Hills").len(), 1, "one terrain");
-    assert!(tree.get_node(root, "Hills/Built/Terrain/Shape").is_some(), "with collision");
+    assert!(
+        tree.get_node(root, "Hills/Built/Terrain/Shape").is_some(),
+        "with collision"
+    );
     let trees = built(tree, "Trees");
     assert!(trees.len() >= 15, "{}", trees.len());
     // Standing on the hills, not at y = 0.
-    let heights: Vec<f32> = trees.iter().map(|&t| tree.transform(t).unwrap().translation.y).collect();
+    let heights: Vec<f32> = trees
+        .iter()
+        .map(|&t| tree.transform(t).unwrap().translation.y)
+        .collect();
     assert!(heights.iter().any(|&y| y > 0.5), "{heights:?}");
     let crypt = built(tree, "Crypt");
-    assert!(crypt.len() > 20, "floors, walls and lights: {}", crypt.len());
+    assert!(
+        crypt.len() > 20,
+        "floors, walls and lights: {}",
+        crypt.len()
+    );
     let village = built(tree, "Village");
-    let roads = village.iter().filter(|&&n| tree.class_name(n) == Some("Path3D")).count();
+    let roads = village
+        .iter()
+        .filter(|&&n| tree.class_name(n) == Some("Path3D"))
+        .count();
     assert_eq!(roads, 3 + 2, "roads around 2 × 1 blocks");
-    let house = village.iter().copied().find(|&n| tree.class_name(n) == Some("Generator")).unwrap();
-    assert!(tree.get_node(house, "Built/Roof").is_some(), "the town's buildings are built too");
+    let house = village
+        .iter()
+        .copied()
+        .find(|&n| tree.class_name(n) == Some("Generator"))
+        .unwrap();
+    assert!(
+        tree.get_node(house, "Built/Roof").is_some(),
+        "the town's buildings are built too"
+    );
 
     // The same seed: the same result.
     let again = load_scene(tree, "world.abscene").unwrap();
     let positions = |r: NodeHandle| {
         let built = tree.get_node(r, "Trees/Built").unwrap();
-        tree.children(built).iter().map(|&t| tree.transform(t).unwrap().translation).collect::<Vec<_>>()
+        tree.children(built)
+            .iter()
+            .map(|&t| tree.transform(t).unwrap().translation)
+            .collect::<Vec<_>>()
     };
     assert_eq!(positions(root), positions(again));
 
     // Saved: the recipes only.
     let saved = save_scene(tree, root);
     assert_eq!(saved.nodes.len(), 5);
-    assert_eq!(saved.nodes[2].generator.as_ref().unwrap().params["count"].as_integer(), Some(20));
+    assert_eq!(
+        saved.nodes[2].generator.as_ref().unwrap().params["count"].as_integer(),
+        Some(20)
+    );
     assert_eq!(SceneFile::from_toml(&saved.to_toml()).unwrap(), saved);
 
     let bad = "[[node]]\nname = \"G\"\ntype = \"Generator\"\ngenerator = { kind = \"galaxy\" }\n";
@@ -924,7 +957,10 @@ fn exported_script_properties_reach_the_script_and_save_back() {
         .register::<Mover>("Mover")
         .register_metadata(
             "Mover",
-            vec![prop("speed", ffi::Tag::FLOAT), prop("tint", ffi::Tag::COLOR)],
+            vec![
+                prop("speed", ffi::Tag::FLOAT),
+                prop("tint", ffi::Tag::COLOR),
+            ],
         );
     let tree = engine.tree_mut();
     let a = load_scene(tree, "props.abscene").unwrap();

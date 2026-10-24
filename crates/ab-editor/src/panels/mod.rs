@@ -96,6 +96,7 @@ pub fn opt_f32(
     let changed = ui
         .add(
             egui::DragValue::new(&mut v)
+                .custom_parser(crate::panels::parse_finite)
                 .range(range)
                 .speed(speed)
                 .max_decimals(3),
@@ -115,7 +116,12 @@ pub fn opt_u32(
 ) -> bool {
     let mut v = value.unwrap_or(default);
     let changed = ui
-        .add(egui::DragValue::new(&mut v).range(range).speed(1.0))
+        .add(
+            egui::DragValue::new(&mut v)
+                .custom_parser(crate::panels::parse_finite)
+                .range(range)
+                .speed(1.0),
+        )
         .changed();
     if changed {
         *value = Some(v);
@@ -181,6 +187,7 @@ pub fn vec3(ui: &mut egui::Ui, value: &mut [f32; 3], speed: f64, suffix: &str) -
                 .add_sized(
                     [width, ui.spacing().interact_size.y],
                     egui::DragValue::new(&mut value[i])
+                        .custom_parser(crate::panels::parse_finite)
                         .speed(speed)
                         .max_decimals(3)
                         .suffix(suffix),
@@ -202,3 +209,26 @@ pub fn empty_hint(ui: &mut egui::Ui, icon: &str, text: &str) {
 
 /// Fill color for a selected row.
 pub const ROW_SELECTED: Color32 = theme::ACCENT_DIM;
+
+/// Whether `c` may stay in a name made from user text (node, clip and file names): letters,
+/// digits and the marks that combine with them. `char::is_alphanumeric` alone turns Thai
+/// tone marks and vowels above or below (ไม้, กล่อง) into `_`.
+pub fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(c,
+            '\u{0300}'..='\u{036F}' // combining diacritics
+            | '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}' // Thai
+            | '\u{0EB1}' | '\u{0EB4}'..='\u{0EBC}' | '\u{0EC8}'..='\u{0ECD}' // Lao
+        )
+}
+
+/// Number fields' parser: egui's, minus `inf` and `nan` (Rust's float parser takes them, and
+/// a non-finite position or size breaks bounds, framing and the saved scene).
+pub fn parse_finite(text: &str) -> Option<f64> {
+    let text: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| if c == '\u{2212}' { '-' } else { c })
+        .collect();
+    text.parse::<f64>().ok().filter(|v| v.is_finite())
+}

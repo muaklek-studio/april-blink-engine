@@ -58,6 +58,12 @@ pub fn load_scene(tree: &mut SceneTree, path: &str) -> Result<NodeHandle, SceneF
     load_nested(tree, path, 0, true)
 }
 
+/// Like [`load_scene`], for a piece put into the current level (a prefab, an effect): the
+/// level keeps its own `[environment]`.
+pub fn load_scene_piece(tree: &mut SceneTree, path: &str) -> Result<NodeHandle, SceneFileError> {
+    load_nested(tree, path, 0, false)
+}
+
 fn load_nested(
     tree: &mut SceneTree,
     path: &str,
@@ -81,16 +87,21 @@ fn load_nested(
         path: path.to_owned(),
         source,
     })?;
+    let node = instantiate_at_depth(tree, &scene, path, depth)?;
+    // Only once the scene is built: a scene that fails to load changes nothing.
     if with_environment {
         if let Some(environment) = &scene.environment {
-            apply_environment(tree, environment).map_err(|reason| SceneFileError::Node {
-                path: path.to_owned(),
-                node: "[environment]".into(),
-                reason,
-            })?;
+            if let Err(reason) = apply_environment(tree, environment) {
+                tree.free_immediately(node);
+                return Err(SceneFileError::Node {
+                    path: path.to_owned(),
+                    node: "[environment]".into(),
+                    reason,
+                });
+            }
         }
     }
-    instantiate_at_depth(tree, &scene, path, depth)
+    Ok(node)
 }
 
 /// A prefab scene with an instance's overrides on top (see [`super::prefab`]).
@@ -246,15 +257,15 @@ fn instantiate_at_depth(
         Ok(root)
     })();
     if result.is_err() {
-        // Free what was built: the first node holds everything attached so far.
+        // Free what was built: the first node holds everything attached so far. Only these
+        // nodes: what the game queued for the end of the frame stays queued.
         if let Some(&first) = created.first() {
-            let _ = tree.queue_free(first);
+            tree.free_immediately(first);
             for node in created {
                 if tree.parent(node).is_none() && tree.is_valid(node) {
-                    let _ = tree.queue_free(node);
+                    tree.free_immediately(node);
                 }
             }
-            tree.flush_deletions();
         }
     }
     result
@@ -826,40 +837,40 @@ pub fn mesh_and_material(
     let world = tree.world_mut();
     world.resource_or_insert_with(SceneAssetCache::default);
     let mesh = {
-    let world = tree.world();
-    let mut cache = world
-        .resource_mut::<SceneAssetCache>()
-        .expect("inserted above");
-    let mut assets = world
-        .resource_mut::<RenderAssets>()
-        .ok_or("the RenderAssets resource is missing")?;
-    let mesh_key = format!("{mesh:?}");
-    let mesh = match cache.meshes.get(&mesh_key) {
-        Some(&handle) => handle,
-        None => {
-            let built = match *mesh {
-                MeshDesc::Cube { size } => Mesh::cube(size),
-                MeshDesc::Sphere {
-                    radius,
-                    segments,
-                    rings,
-                    // Capped: a typo like `subdivisions = 100000` would otherwise build billions
-                    // of vertices.
-                } => Mesh::sphere(
-                    radius,
-                    segments.clamp(3, MAX_MESH_DETAIL),
-                    rings.clamp(2, MAX_MESH_DETAIL),
-                ),
-                MeshDesc::Plane { size, subdivisions } => {
-                    Mesh::plane(size, subdivisions.clamp(1, MAX_MESH_DETAIL))
-                }
-            };
-            let handle = assets.add_mesh(built).map_err(|e| e.to_string())?;
-            cache.meshes.insert(mesh_key, handle);
-            handle
-        }
-    };
-    mesh
+        let world = tree.world();
+        let mut cache = world
+            .resource_mut::<SceneAssetCache>()
+            .expect("inserted above");
+        let mut assets = world
+            .resource_mut::<RenderAssets>()
+            .ok_or("the RenderAssets resource is missing")?;
+        let mesh_key = format!("{mesh:?}");
+        let mesh = match cache.meshes.get(&mesh_key) {
+            Some(&handle) => handle,
+            None => {
+                let built = match *mesh {
+                    MeshDesc::Cube { size } => Mesh::cube(size),
+                    MeshDesc::Sphere {
+                        radius,
+                        segments,
+                        rings,
+                        // Capped: a typo like `subdivisions = 100000` would otherwise build billions
+                        // of vertices.
+                    } => Mesh::sphere(
+                        radius,
+                        segments.clamp(3, MAX_MESH_DETAIL),
+                        rings.clamp(2, MAX_MESH_DETAIL),
+                    ),
+                    MeshDesc::Plane { size, subdivisions } => {
+                        Mesh::plane(size, subdivisions.clamp(1, MAX_MESH_DETAIL))
+                    }
+                };
+                let handle = assets.add_mesh(built).map_err(|e| e.to_string())?;
+                cache.meshes.insert(mesh_key, handle);
+                handle
+            }
+        };
+        mesh
     };
     let material = material_handle(tree, material)?;
     Ok((mesh, material))
@@ -867,7 +878,10 @@ pub fn mesh_and_material(
 
 /// The material `material` describes, made once and shared by every node that describes the
 /// same one (its `file` and textures read in).
-pub fn material_handle(tree: &mut SceneTree, material: &MaterialDesc) -> Result<MaterialHandle, String> {
+pub fn material_handle(
+    tree: &mut SceneTree,
+    material: &MaterialDesc,
+) -> Result<MaterialHandle, String> {
     let world = tree.world_mut();
     world.resource_or_insert_with(SceneAssetCache::default);
     let world = tree.world();

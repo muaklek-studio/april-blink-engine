@@ -701,7 +701,10 @@ impl<'a> Tree<'a> {
     /// Where a `Path3D` is `distance` metres from its start, and which way it goes there
     /// (world space): move a train, a camera or a patrol along it. A closed path wraps.
     pub fn path_point(&self, path: Node, distance: f32) -> Result<(Vec3, Vec3), Error> {
-        let values = self.values(method!("path.point"), &[path.to_value(), distance.to_value()])?;
+        let values = self.values(
+            method!("path.point"),
+            &[path.to_value(), distance.to_value()],
+        )?;
         match values.as_slice() {
             [p, d] => match (p.get::<Vec3>(), d.get::<Vec3>()) {
                 (Some(p), Some(d)) => Ok((p, d)),

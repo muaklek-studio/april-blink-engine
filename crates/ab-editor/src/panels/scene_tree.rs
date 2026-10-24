@@ -3,6 +3,7 @@
 
 use super::ROW_SELECTED;
 use crate::commands::{self, Command};
+use crate::features::{self, Feature};
 use crate::scripts::ScriptDrag;
 use crate::state::Editor;
 use crate::theme;
@@ -64,6 +65,8 @@ enum Action {
     MakePrefab(NodeHandle),
     /// Turn a generator's output into ordinary nodes.
     BakeGenerator(NodeHandle),
+    /// Open the node in its own editor (a UI node, an AnimationPlayer, an effect).
+    Open(NodeHandle),
 }
 
 impl SceneTreePanel {
@@ -103,11 +106,15 @@ impl SceneTreePanel {
                     crate::create::menu(ui, editor, focus);
                 })
                 .response
-                .on_hover_text("Add a node under the selection");
+                .on_hover_text(crate::i18n::t("scene_tree.add_hint"));
             });
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text(format!("{}  Filter nodes", icon::MAGNIFYING_GLASS))
+                    .hint_text(format!(
+                        "{}  {}",
+                        icon::MAGNIFYING_GLASS,
+                        crate::i18n::t("scene_tree.filter")
+                    ))
                     .desired_width(f32::INFINITY),
             );
         });
@@ -177,6 +184,10 @@ impl SceneTreePanel {
         for action in actions {
             match action {
                 Action::Select(node) => select_row(editor, node, modifiers, &previous_rows),
+                Action::Open(node) => {
+                    editor.select(Some(node));
+                    editor.open_request = Some(node);
+                }
                 Action::SelectForMenu(node) => {
                     // Right-clicking inside a multi-selection keeps it.
                     if !editor.is_selected(node) {
@@ -258,6 +269,10 @@ impl SceneTreePanel {
             if !editor.is_editable(node) {
                 continue;
             }
+            // Inside a UI node or an effect: found in that one's editor.
+            if features::owner(editor, node).is_some_and(|o| o != node) {
+                continue;
+            }
             let name = tree.name(node).map(|n| n.to_owned()).unwrap_or_default();
             let class = tree.class_name(node).unwrap_or("Node");
             let script = tree.script_names(node).join(" ");
@@ -299,7 +314,11 @@ impl SceneTreePanel {
             }
         }
         if !any {
-            super::empty_hint(ui, icon::MAGNIFYING_GLASS, "No matching nodes");
+            super::empty_hint(
+                ui,
+                icon::MAGNIFYING_GLASS,
+                &crate::i18n::t("scene_tree.no_match"),
+            );
         }
     }
 
@@ -325,7 +344,10 @@ impl SceneTreePanel {
                 .children(node)
                 .first()
                 .is_some_and(|&c| editor.is_override_target(c));
-        let children: Vec<NodeHandle> = if instance && !prefab {
+        // A UI node's controls and an effect's layers are edited in their own window.
+        let feature = Feature::of(editor, node);
+        let owned = feature.is_some_and(Feature::owns_children);
+        let children: Vec<NodeHandle> = if (instance && !prefab) || owned {
             Vec::new()
         } else {
             tree.children(node)
@@ -335,7 +357,13 @@ impl SceneTreePanel {
         } else {
             !self.collapsed.contains(&path)
         };
-        let selected = editor.is_selected(node);
+        // Something selected inside (from the viewport, say) shows on the node holding it.
+        let selected = editor.is_selected(node)
+            || (owned
+                && editor
+                    .selected
+                    .iter()
+                    .any(|&s| features::owner(editor, s) == Some(node)));
         let active = editor.selection == Some(node);
         self.rows.push(node);
         let visible = tree.is_visible(node);
@@ -488,9 +516,34 @@ impl SceneTreePanel {
                 galley,
                 color,
             );
+            let mut after = name_width + 8.0;
+            if let Some(feature) = feature {
+                // Opens in its own editor (the tooltip says how); a UI node says how many
+                // controls it holds.
+                let hint = match feature {
+                    Feature::Ui => format!(
+                        "{}  {}",
+                        icon::ARROW_SQUARE_OUT,
+                        crate::i18n::tf(
+                            "features.ui_hint",
+                            &[("count", &tree.subtree(node).len().saturating_sub(1))],
+                        )
+                    ),
+                    Feature::Animation | Feature::Effect => icon::ARROW_SQUARE_OUT.to_owned(),
+                };
+                let galley =
+                    painter.layout_no_wrap(hint, egui::FontId::proportional(11.0), theme::TEXT_DIM);
+                let width = galley.size().x;
+                painter.galley(
+                    text_pos + egui::vec2(after, -galley.size().y / 2.0),
+                    galley,
+                    theme::TEXT_DIM,
+                );
+                after += width + 8.0;
+            }
             if let Some(script) = &script {
                 painter.text(
-                    text_pos + egui::vec2(name_width + 8.0, 0.0),
+                    text_pos + egui::vec2(after, 0.0),
                     egui::Align2::LEFT_CENTER,
                     format!("{} {script}", icon::SCROLL),
                     egui::FontId::proportional(11.5),
@@ -537,9 +590,21 @@ impl SceneTreePanel {
                 (false, false) => _ = self.collapsed.remove(&path),
             }
         }
+        let response = match feature {
+            Some(Feature::Ui) => response.on_hover_text(crate::i18n::t("features.ui_open")),
+            Some(Feature::Animation) => {
+                response.on_hover_text(crate::i18n::t("features.animation_hint"))
+            }
+            Some(Feature::Effect) => response.on_hover_text(crate::i18n::t("features.effect_hint")),
+            None => response,
+        };
         if response.double_clicked() {
-            actions.push(Action::Select(node));
-            self.frame_request = true;
+            if feature.is_some() {
+                actions.push(Action::Open(node));
+            } else {
+                actions.push(Action::Select(node));
+                self.frame_request = true;
+            }
         }
         if response.secondary_clicked() {
             actions.push(Action::SelectForMenu(node));
@@ -560,6 +625,18 @@ impl SceneTreePanel {
         }
 
         response.context_menu(|ui| {
+            if feature.is_some()
+                && ui
+                    .button(format!(
+                        "{}  {}",
+                        icon::ARROW_SQUARE_OUT,
+                        crate::i18n::t("features.open")
+                    ))
+                    .clicked()
+            {
+                actions.push(Action::Open(node));
+                ui.close();
+            }
             let editable = !editor.is_playing();
             ui.add_enabled_ui(editable, |ui| {
                 if ui
@@ -578,8 +655,12 @@ impl SceneTreePanel {
                     && editor.is_editable(node)
                     && !editor.is_instance(node)
                     && ui
-                        .button(format!("{}  Create Prefab", icon::LINK_SIMPLE))
-                        .on_hover_text("Save this node and its children as prefabs/<name>.abscene and use an instance of it here")
+                        .button(format!(
+                            "{}  {}",
+                            icon::LINK_SIMPLE,
+                            crate::i18n::t("menu.create_prefab")
+                        ))
+                        .on_hover_text(crate::i18n::t("scene_tree.prefab_hint"))
                         .clicked()
                 {
                     actions.push(Action::MakePrefab(node));
@@ -591,8 +672,12 @@ impl SceneTreePanel {
                         .component::<ab_engine::scene_file::generator::GeneratorNode>(node)
                         .is_some()
                     && ui
-                        .button(format!("{}  Bake Generator", icon::CUBE))
-                        .on_hover_text("Replace the generator with the nodes it made, to edit them by hand")
+                        .button(format!(
+                            "{}  {}",
+                            icon::CUBE,
+                            crate::i18n::t("scene_tree.bake")
+                        ))
+                        .on_hover_text(crate::i18n::t("scene_tree.bake_hint"))
                         .clicked()
                 {
                     actions.push(Action::BakeGenerator(node));
@@ -792,7 +877,7 @@ pub fn prefab_path(editor: &Editor, node: NodeHandle) -> String {
         .unwrap_or_default()
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
+            if super::is_name_char(c) || c == '-' {
                 c.to_ascii_lowercase()
             } else {
                 '_'
