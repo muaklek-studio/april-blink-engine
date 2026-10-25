@@ -24,12 +24,15 @@ foundation for making games, with a small codebase that one person can read and 
 
 - **Scenes**: a node tree (`Node3D`, physics bodies, lights, cameras, UI controls…) on a
   small sparse-set ECS, with signals, groups, tweens and `.abscene` scene files (TOML
-  inside).
+  inside). A level can be preloaded in the background (models, textures and sounds on
+  loader threads, textures reaching the GPU a few per frame) and then built without a
+  stall.
 - **Rendering**: a wgpu forward renderer with shadows, bloom, skinned meshes, particles,
   debug lines and MSDF text (complex scripts such as Thai included).
 - **Physics**: Rapier 3D bodies, joints, ragdolls, areas, scene queries and a kinematic
   character controller; grid navigation baked from the physics world.
-- **Audio**: Kira streams, 2D/3D players and a listener.
+- **Audio**: Kira sounds, 2D/3D players and a listener; long files (music, ambience) stream
+  while they play instead of being decoded up front.
 - **Languages**: translations in `locales/<code>.toml` (`ab-locale`) with fallbacks and
   `{placeholders}`; UI labels and buttons with a `key` follow the language at runtime, and
   fonts fall back per character for scripts the UI font lacks.
@@ -78,7 +81,7 @@ foundation for making games, with a small codebase that one person can read and 
 | `ab-scene` | Godot-style node tree, signals, scene files |
 | `ab-platform` | Windowing, OS events, frame pacing (winit), gamepads (gilrs) |
 | `ab-input` | Keyboard, mouse and gamepad state with an action map |
-| `ab-asset` | glTF 2.0 and PNG/JPEG loading and caching |
+| `ab-asset` | glTF 2.0, PNG/JPEG and audio loading and caching, in the background on request |
 | `ab-vfs` | Virtual file system, `.abp` asset packs and chunk folders |
 | `ab-rendering` | wgpu forward renderer |
 | `ab-animation` | Keyframe clips and playback |

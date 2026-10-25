@@ -506,6 +506,57 @@ fn scenes_and_files(b: &mut Builder) {
         c.push_node(node);
         Ok(())
     });
+    b.add("scene.preload", |c| {
+        crate::scene_file::preload_scene(c.tree, c.str(0)?);
+        Ok(())
+    });
+    // loaded, total, ready, then the error if the scene cannot be read; nothing if the
+    // scene was not preloaded.
+    b.add("scene.preload_progress", |c| {
+        if let Some(progress) = crate::scene_file::preload_progress(c.tree, c.str(0)?) {
+            c.push_int(progress.loaded as i64);
+            c.push_int(progress.total as i64);
+            c.push_bool(progress.ready);
+            if let Some(error) = &progress.error {
+                c.push_str(error);
+            }
+        }
+        Ok(())
+    });
+    // One model, image or sound, loaded in the background (by its extension).
+    b.add("assets.preload", |c| {
+        let path = c.str(0)?;
+        let extension = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut server = c
+            .tree
+            .world()
+            .resource_mut::<ab_asset::AssetServer>()
+            .ok_or_else(|| CallError::failed("no AssetServer"))?;
+        match extension.as_str() {
+            "gltf" | "glb" => server.request_gltf(path),
+            "png" | "jpg" | "jpeg" => server.request_texture(path, ab_rendering::ColorSpace::Srgb),
+            "wav" | "ogg" | "mp3" | "flac" => server.request_audio(path),
+            _ => {
+                return Err(CallError::Failed(format!(
+                    "cannot preload {path}: not a model, image or sound"
+                )))
+            }
+        }
+        .map_err(CallError::failed)
+    });
+    b.add("assets.pending", |c| {
+        let pending = c
+            .tree
+            .world()
+            .resource::<ab_asset::AssetServer>()
+            .map_or(0, |s| s.pending_loads());
+        c.push_int(pending as i64);
+        Ok(())
+    });
     b.add("assets.read_text", |c| {
         let path = c.str(0)?;
         let bytes = c

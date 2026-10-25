@@ -192,6 +192,12 @@ impl UiPass {
     }
 
     /// Uploads instances and textures for `list`. Returns whether there is anything to draw.
+    /// Drops the bind group of image `handle`: its view changed (a streamed texture got
+    /// sharper), so the next frame binds the new one.
+    pub(crate) fn forget_image(&mut self, handle: TextureHandle) {
+        self.images.remove(&handle);
+    }
+
     /// `image_view` resolves a texture handle to its GPU view.
     pub(crate) fn prepare<'a>(
         &mut self,

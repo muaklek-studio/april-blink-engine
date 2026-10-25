@@ -303,3 +303,59 @@ fn finished_signal_reaches_scripts() {
     frame(&mut tree); // process delivers the queued signal
     assert!(tree.script::<Done>(done).unwrap().0);
 }
+
+/// Minimal 16-bit mono PCM WAV file.
+fn wav(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
+#[test]
+fn streaming_sound_plays_to_the_end() {
+    let mut tree = new_tree();
+    let stream = AudioStream::streaming(wav(8000, &[0; 4000])).unwrap();
+    let node = tree.create_audio_stream_player("Music", AudioPlayer::new(stream.clone()));
+    tree.add_child(tree.root(), node).unwrap();
+    tree.component_mut::<AudioPlayer>(node).unwrap().play();
+    frame(&mut tree);
+    assert!(player(&tree, node).is_playing());
+
+    // The decoder runs on its own thread, so the silent backend may get ahead of it and
+    // wait: give it time rather than counting frames exactly.
+    let mut seen_finished = 0;
+    for _ in 0..2000 {
+        frame(&mut tree);
+        seen_finished += finished(&tree).iter().filter(|&&n| n == node).count();
+        if !player(&tree, node).is_playing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!player(&tree, node).is_playing());
+    assert_eq!(seen_finished, 1);
+
+    // One-shots and replays each get a decoder of their own.
+    let mut audio = tree.world().resource_mut::<Audio>().unwrap();
+    audio.play(&stream, SoundOptions::default());
+    audio.play_at(&stream, Vec3::ZERO, SoundOptions::default());
+    drop(audio);
+    tree.component_mut::<AudioPlayer>(node).unwrap().play();
+    frame(&mut tree);
+    assert!(player(&tree, node).is_playing());
+}

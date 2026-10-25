@@ -4,7 +4,9 @@
 //!   the packed VFS in release builds (Phase 12), [`MemorySource`] in tests.
 //! * [`AssetServer`] (an ECS resource) loads images, audio and glTF 2.0 files (`.gltf` with
 //!   external or embedded buffers, and `.glb`) and caches them by normalised path, so loading
-//!   the same file twice returns the same GPU resources.
+//!   the same file twice returns the same GPU resources. Files can also be requested ahead
+//!   of time and loaded on background threads ([`AssetServer::request_gltf`] and friends),
+//!   so the frame never waits on the disk; large audio files stream while they play.
 //! * A loaded [`GltfScene`] is a template; [`instantiate_gltf`] builds a node tree from it
 //!   (meshes, materials, textures, skins and an `AnimationPlayer` with every clip).
 //!
@@ -20,6 +22,7 @@ mod error;
 mod gltf_loader;
 mod image_loader;
 mod instantiate;
+mod loader;
 mod server;
 mod source;
 
@@ -27,5 +30,6 @@ pub use error::AssetError;
 pub use gltf_loader::{GltfMesh, GltfNode, GltfPrimitive, GltfScene, GltfSkin};
 pub use image_loader::{decode_image, set_decode_cache};
 pub use instantiate::{instantiate_gltf, spawn_gltf, ANIMATION_PLAYER_CLASS};
-pub use server::AssetServer;
+pub use loader::{AssetRequest, LoadStatus};
+pub use server::{AssetServer, STREAMING_AUDIO_MIN_BYTES, STREAMING_AUDIO_MIN_SECONDS};
 pub use source::{normalize_path, AssetSource, FileSystemSource, MemorySource};

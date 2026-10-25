@@ -19,7 +19,7 @@ use ab_animation::{
 use ab_core::{Color, Mat4, Quat, Transform3D, Vec2, Vec3};
 use ab_rendering::{
     ColorSpace, Material, MaterialHandle, Mesh, MeshHandle, RenderAssets, SamplerSettings,
-    SkinWeights, TextureFilter, TextureHandle, TextureWrap, Vertex,
+    SkinWeights, Texture, TextureFilter, TextureHandle, TextureWrap, Vertex,
 };
 use gltf::animation::util::ReadOutputs;
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
@@ -95,6 +95,21 @@ struct Loader<'a> {
     max_joints: usize,
 }
 
+/// A decoded material texture: texture index and color space, label, result.
+type DecodedTexture = ((usize, ColorSpace), String, Result<Texture, AssetError>);
+
+/// A glTF file read and parsed, with its material textures decoded: everything that does
+/// not touch [`RenderAssets`], so it can run on another thread ([`prepare`]). [`finish`]
+/// registers the resources.
+pub(crate) struct PreparedGltf {
+    path: String,
+    gltf: gltf::Gltf,
+    buffers: Vec<Vec<u8>>,
+    /// Decoded material textures, keyed by texture index and color space, with their labels.
+    textures: Vec<DecodedTexture>,
+}
+
+/// Loads a glTF file into `render` and `library` ([`prepare`] then [`finish`]).
 pub(crate) fn load(
     path: &str,
     bytes: &[u8],
@@ -102,11 +117,43 @@ pub(crate) fn load(
     render: &mut RenderAssets,
     library: &mut AnimationLibrary,
 ) -> Result<GltfScene, AssetError> {
+    finish(prepare(path, bytes, source)?, source, render, library)
+}
+
+/// Parses the file, reads its buffers and decodes its material textures.
+pub(crate) fn prepare(
+    path: &str,
+    bytes: &[u8],
+    source: &dyn AssetSource,
+) -> Result<PreparedGltf, AssetError> {
     let gltf = gltf::Gltf::from_slice(bytes).map_err(|source| AssetError::Gltf {
         path: path.to_owned(),
         source,
     })?;
     let buffers = load_buffers(path, &gltf, source)?;
+    let textures = decode_textures(path, &gltf.document, &buffers, source)?;
+    Ok(PreparedGltf {
+        path: path.to_owned(),
+        gltf,
+        buffers,
+        textures,
+    })
+}
+
+/// Registers a prepared file's textures, materials, meshes and clips.
+pub(crate) fn finish(
+    prepared: PreparedGltf,
+    source: &dyn AssetSource,
+    render: &mut RenderAssets,
+    library: &mut AnimationLibrary,
+) -> Result<GltfScene, AssetError> {
+    let PreparedGltf {
+        path,
+        gltf,
+        buffers,
+        textures: decoded,
+    } = prepared;
+    let path = path.as_str();
     let document = &gltf.document;
     let mut loader = Loader {
         path,
@@ -122,7 +169,13 @@ pub(crate) fn load(
             .unwrap_or(0),
     };
 
-    loader.decode_textures(document)?;
+    for (key, label, texture) in decoded {
+        let handle = loader
+            .render
+            .add_texture(texture?)
+            .map_err(|e| AssetError::invalid(&label, e.to_string()))?;
+        loader.textures.insert(key, handle);
+    }
     let materials = document
         .materials()
         .map(|m| loader.material(&m))
@@ -254,52 +307,58 @@ fn material_textures(document: &gltf::Document) -> Vec<(gltf::Texture<'_>, Color
     out
 }
 
-impl Loader<'_> {
-    /// Decodes every material texture up front, in parallel on the [`ab_core::jobs`]
-    /// workers (PNG/JPEG decoding dominates model load times), and caches the handles for
-    /// [`Loader::texture`].
-    fn decode_textures(&mut self, document: &gltf::Document) -> Result<(), AssetError> {
-        enum Bytes<'b> {
-            View(&'b [u8]),
-            Owned(Vec<u8>),
-        }
-        let used = material_textures(document);
-        // Reading goes through the asset source, serially; views borrow the buffers.
-        let mut pending = Vec::with_capacity(used.len());
-        for (texture, space) in &used {
-            let image = texture.source();
-            let bytes = match image.source() {
-                gltf::image::Source::View { view, .. } => {
-                    let buffer = &self.buffers[view.buffer().index()];
-                    let range = view.offset()..view.offset() + view.length();
-                    Bytes::View(buffer.get(range).ok_or_else(|| {
-                        AssetError::invalid(self.path, "image view out of bounds")
-                    })?)
-                }
-                gltf::image::Source::Uri { uri, .. } => {
-                    Bytes::Owned(read_uri(self.path, uri, self.source)?)
-                }
-            };
-            let label = format!("{}#image{}", self.path, image.index());
-            pending.push((label, bytes, *space, sampler_settings(&texture.sampler())));
-        }
-        let decoded = ab_core::jobs::par_map(&pending, 1, |(label, bytes, space, sampler)| {
-            let bytes = match bytes {
-                Bytes::View(bytes) => bytes,
-                Bytes::Owned(bytes) => bytes.as_slice(),
-            };
-            decode_image(label, bytes, *space, *sampler)
-        });
-        for (((texture, space), (label, ..)), decoded) in used.iter().zip(&pending).zip(decoded) {
-            let handle = self
-                .render
-                .add_texture(decoded?)
-                .map_err(|e| AssetError::invalid(label, e.to_string()))?;
-            self.textures.insert((texture.index(), *space), handle);
-        }
-        Ok(())
+/// Decodes every material texture up front, in parallel on the [`ab_core::jobs`] workers
+/// (PNG/JPEG decoding dominates model load times), for [`finish`] to register before
+/// [`Loader::texture`] looks them up.
+fn decode_textures(
+    path: &str,
+    document: &gltf::Document,
+    buffers: &[Vec<u8>],
+    source: &dyn AssetSource,
+) -> Result<Vec<DecodedTexture>, AssetError> {
+    enum Bytes<'b> {
+        View(&'b [u8]),
+        Owned(Vec<u8>),
     }
+    let used = material_textures(document);
+    // Reading goes through the asset source, serially; views borrow the buffers.
+    let mut pending = Vec::with_capacity(used.len());
+    for (texture, space) in &used {
+        let image = texture.source();
+        let bytes = match image.source() {
+            gltf::image::Source::View { view, .. } => {
+                let buffer = &buffers[view.buffer().index()];
+                let range = view.offset()..view.offset() + view.length();
+                Bytes::View(
+                    buffer
+                        .get(range)
+                        .ok_or_else(|| AssetError::invalid(path, "image view out of bounds"))?,
+                )
+            }
+            gltf::image::Source::Uri { uri, .. } => Bytes::Owned(read_uri(path, uri, source)?),
+        };
+        let label = format!("{path}#image{}", image.index());
+        pending.push((label, bytes, *space, sampler_settings(&texture.sampler())));
+    }
+    let decoded = ab_core::jobs::par_map(&pending, 1, |(label, bytes, space, sampler)| {
+        let bytes = match bytes {
+            Bytes::View(bytes) => bytes,
+            Bytes::Owned(bytes) => bytes.as_slice(),
+        };
+        // Mips too, while on this thread: the renderer then only uploads.
+        decode_image(label, bytes, *space, *sampler).map(Texture::with_prepared_mips)
+    });
+    Ok(used
+        .iter()
+        .zip(pending)
+        .zip(decoded)
+        .map(|(((texture, space), (label, ..)), decoded)| {
+            ((texture.index(), *space), label, decoded)
+        })
+        .collect())
+}
 
+impl Loader<'_> {
     fn texture(
         &mut self,
         texture: gltf::Texture<'_>,

@@ -88,6 +88,7 @@ pub mod generator;
 mod load;
 pub mod path;
 pub mod prefab;
+mod preload;
 mod save;
 pub mod ui;
 
@@ -101,6 +102,10 @@ pub use load::{
     apply_environment, install_clips, instantiate_scene, load_animations, load_scene,
     load_scene_piece, material_handle, mesh_and_material, particle_emitter, resolve_material,
     SceneAssetCache, SceneFileError,
+};
+pub use preload::{
+    forget_preload, preload_progress, preload_scene, update_preloads, PreloadProgress,
+    ScenePreloads,
 };
 pub use save::{relative_path, save_contents, save_scene};
 

@@ -1,5 +1,5 @@
 use crate::components::{Attenuation, AudioListener3D, AudioPlayer, Command};
-use crate::stream::AudioStream;
+use crate::stream::{streaming_data, AudioStream, StreamData};
 use ab_core::{Affine3A, Quat, Time, Vec3};
 use ab_ecs::{Entity, World};
 use ab_scene::{NodeHandle, NodeInfo, Signal, SignalQueue, Transform};
@@ -7,7 +7,8 @@ use kira::backend::mock::{MockBackend, MockBackendSettings};
 use kira::backend::Backend;
 use kira::listener::{ListenerHandle, ListenerId};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::sound::{PlaybackState, Region};
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
+use kira::sound::{FromFileError, PlaybackState, Region};
 use kira::track::{SpatialTrackBuilder, SpatialTrackDistances, SpatialTrackHandle};
 use kira::{AudioManager, AudioManagerSettings, Capacities, Tween};
 use std::collections::{HashMap, HashSet};
@@ -73,10 +74,78 @@ macro_rules! with_manager {
     };
 }
 
+/// Plays configured sound data on `$target` (an `AudioManager` or a track), giving back a
+/// [`Sound`] or the error as text.
+macro_rules! play_on {
+    ($target:expr, $playback:expr) => {
+        match $playback {
+            Playback::Decoded(data) => $target
+                .play(data)
+                .map(Sound::Decoded)
+                .map_err(|err| err.to_string()),
+            Playback::Streaming(data) => $target
+                .play(data)
+                .map(Sound::Streaming)
+                .map_err(|err| err.to_string()),
+        }
+    };
+}
+
+/// Sound data set up for one playback.
+enum Playback {
+    Decoded(StaticSoundData),
+    Streaming(StreamingSoundData<FromFileError>),
+}
+
+/// A sound kira is playing.
+enum Sound {
+    Decoded(StaticSoundHandle),
+    Streaming(StreamingSoundHandle<FromFileError>),
+}
+
+impl Sound {
+    fn stop(&mut self) {
+        match self {
+            Sound::Decoded(sound) => sound.stop(Tween::default()),
+            Sound::Streaming(sound) => sound.stop(Tween::default()),
+        }
+    }
+
+    fn set_volume(&mut self, volume_db: f32) {
+        match self {
+            Sound::Decoded(sound) => sound.set_volume(volume_db, Tween::default()),
+            Sound::Streaming(sound) => sound.set_volume(volume_db, Tween::default()),
+        }
+    }
+
+    fn set_playback_rate(&mut self, rate: f64) {
+        match self {
+            Sound::Decoded(sound) => sound.set_playback_rate(rate, Tween::default()),
+            Sound::Streaming(sound) => sound.set_playback_rate(rate, Tween::default()),
+        }
+    }
+
+    fn state(&self) -> PlaybackState {
+        match self {
+            Sound::Decoded(sound) => sound.state(),
+            Sound::Streaming(sound) => sound.state(),
+        }
+    }
+
+    /// Logs decoding errors of a streaming sound (a damaged file stops it early).
+    fn report_errors(&mut self) {
+        if let Sound::Streaming(sound) = self {
+            while let Some(err) = sound.pop_error() {
+                warn!("audio stream failed: {err}");
+            }
+        }
+    }
+}
+
 /// Playback state of one [`AudioPlayer`] node.
 #[derive(Default)]
 struct Voice {
-    sound: Option<StaticSoundHandle>,
+    sound: Option<Sound>,
     /// Spatial track of a positional player, with the attenuation it was built with.
     track: Option<(SpatialTrackHandle, Attenuation)>,
     position: Vec3,
@@ -88,7 +157,7 @@ struct Voice {
 impl Voice {
     fn stop(&mut self) {
         if let Some(mut sound) = self.sound.take() {
-            sound.stop(Tween::default());
+            sound.stop();
         }
     }
 }
@@ -160,22 +229,27 @@ impl Audio {
 
     /// Plays a non-positional one-shot (UI clicks, stingers).
     pub fn play(&mut self, stream: &AudioStream, options: SoundOptions) {
-        let data = configure(stream, options.volume_db, options.pitch_scale, false);
-        if let Err(err) = with_manager!(&mut self.output, m => m.play(data)) {
+        let Some(data) = configure(stream, options.volume_db, options.pitch_scale, false) else {
+            return;
+        };
+        // A streaming one-shot plays to its end without its handle.
+        if let Err(err) = with_manager!(&mut self.output, m => play_on!(m, data)) {
             warn!("cannot play sound: {err}");
         }
     }
 
     /// Plays a one-shot at a global position (impacts, footsteps, explosions).
     pub fn play_at(&mut self, stream: &AudioStream, position: Vec3, options: SoundOptions) {
-        let data = configure(stream, options.volume_db, options.pitch_scale, false);
+        let Some(data) = configure(stream, options.volume_db, options.pitch_scale, false) else {
+            return;
+        };
         let builder = spatial_builder(options.attenuation).persist_until_sounds_finish(true);
         let listener = self.listener.id();
         let track = with_manager!(&mut self.output, m => m.add_spatial_sub_track(listener, mint_vec(position), builder));
         match track {
             // The track outlives its handle until the sound is done.
             Ok(mut track) => {
-                if let Err(err) = track.play(data) {
+                if let Err(err) = play_on!(track, data) {
                     warn!("cannot play sound: {err}");
                 }
             }
@@ -268,14 +342,13 @@ impl Audio {
                     None => {
                         if let Some(sound) = &mut voice.sound {
                             if voice.volume_db != player.volume_db {
-                                sound.set_volume(player.volume_db, Tween::default());
+                                sound.set_volume(player.volume_db);
                                 voice.volume_db = player.volume_db;
                             }
                             if voice.pitch_scale != player.pitch_scale {
-                                sound.set_playback_rate(
-                                    f64::from(player.pitch_scale.max(MIN_PITCH_SCALE)),
-                                    Tween::default(),
-                                );
+                                sound.set_playback_rate(f64::from(
+                                    player.pitch_scale.max(MIN_PITCH_SCALE),
+                                ));
                                 voice.pitch_scale = player.pitch_scale;
                             }
                         }
@@ -321,6 +394,9 @@ impl Audio {
             let Some(player) = players.get_mut(*entity) else {
                 continue;
             };
+            if let Some(sound) = &mut voice.sound {
+                sound.report_errors();
+            }
             let ended = voice
                 .sound
                 .as_ref()
@@ -464,15 +540,18 @@ fn start(output: &mut Output, voice: &mut Voice, player: &mut AudioPlayer) {
         player.playing = false;
         return;
     };
-    let data = configure(stream, player.volume_db, player.pitch_scale, player.looping);
+    let Some(data) = configure(stream, player.volume_db, player.pitch_scale, player.looping) else {
+        player.playing = false;
+        return;
+    };
     let result = match &mut voice.track {
-        Some((track, _)) => track.play(data),
+        Some((track, _)) => play_on!(track, data),
         None if player.positional.is_some() => {
             // Track creation failed (already warned).
             player.playing = false;
             return;
         }
-        None => with_manager!(output, m => m.play(data)),
+        None => with_manager!(output, m => play_on!(m, data)),
     };
     match result {
         Ok(sound) => {
@@ -488,17 +567,34 @@ fn start(output: &mut Output, voice: &mut Voice, player: &mut AudioPlayer) {
     }
 }
 
+/// Sets up one playback of `stream`; `None` (with a warning) if a streaming file cannot be
+/// opened.
 fn configure(
     stream: &AudioStream,
     volume_db: f32,
     pitch_scale: f32,
     looping: bool,
-) -> StaticSoundData {
-    stream
-        .data
-        .volume(volume_db)
-        .playback_rate(f64::from(pitch_scale.max(MIN_PITCH_SCALE)))
-        .loop_region(looping.then(|| Region::from(..)))
+) -> Option<Playback> {
+    let rate = f64::from(pitch_scale.max(MIN_PITCH_SCALE));
+    let region = looping.then(|| Region::from(..));
+    match &stream.data {
+        StreamData::Decoded(data) => Some(Playback::Decoded(
+            data.volume(volume_db)
+                .playback_rate(rate)
+                .loop_region(region),
+        )),
+        StreamData::Streaming { bytes, .. } => match streaming_data(bytes) {
+            Ok(data) => Some(Playback::Streaming(
+                data.volume(volume_db)
+                    .playback_rate(rate)
+                    .loop_region(region),
+            )),
+            Err(err) => {
+                warn!("cannot play sound: {err}");
+                None
+            }
+        },
+    }
 }
 
 /// A NaN position (a body that blew up, `play_at(NaN)`) would make the track's gain NaN and

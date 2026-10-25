@@ -16,7 +16,16 @@ pub struct RendererConfig {
     pub vsync: bool,
     /// Resolution of each shadow-map layer (square).
     pub shadow_map_size: u32,
+    /// Most texture data (bytes) prepared and uploaded to the GPU in one frame; `None`
+    /// uploads every new texture whole at once. With a budget, textures stream: each first
+    /// arrives as a small, blurry version (its mips up to 128 px), then sharpens a mip
+    /// level at a time over the next frames, so a level bringing many large textures never
+    /// freezes on one frame. Some progress is made every frame, whatever the budget.
+    pub texture_upload_budget: Option<u64>,
 }
+
+/// A texture upload budget that keeps frames smooth: about three 2048² textures a frame.
+pub const DEFAULT_TEXTURE_UPLOAD_BUDGET: u64 = 64 * 1024 * 1024;
 
 impl Default for RendererConfig {
     fn default() -> Self {
@@ -24,6 +33,7 @@ impl Default for RendererConfig {
             msaa_samples: 4,
             vsync: true,
             shadow_map_size: 2048,
+            texture_upload_budget: None,
         }
     }
 }

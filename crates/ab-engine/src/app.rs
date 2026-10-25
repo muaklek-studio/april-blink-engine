@@ -79,7 +79,12 @@ pub fn render_offscreen(
     height: u32,
 ) -> Result<Vec<[u8; 4]>, RenderError> {
     let gpu = GpuContext::new_headless()?;
-    let mut renderer = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, config);
+    // One frame is rendered: every texture must be there whole, not streaming in.
+    let config = RendererConfig {
+        texture_upload_budget: None,
+        ..config.clone()
+    };
+    let mut renderer = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &config);
     let target = OffscreenTarget::new(&gpu, width, height);
     let world = engine.tree().world();
     ab_ui::prepare_ui(world, width, height);

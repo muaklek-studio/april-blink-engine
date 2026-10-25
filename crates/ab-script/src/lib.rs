@@ -61,7 +61,7 @@ pub use physics::{
     RayHit,
 };
 pub use script::{script_type, Property, Registry, Script, Signal};
-pub use tree::{Connection, Engine, Input, RenderStats, Saves, Tree};
+pub use tree::{Connection, Engine, Input, PreloadProgress, RenderStats, Saves, Tree};
 pub use ui::{
     BoxContainerRef, ButtonRef, ControlRef, Easing, HAlign, LabelRef, LayoutPreset, MouseFilter,
     PanelRef, ProgressBarRef, VAlign, PRESSED,

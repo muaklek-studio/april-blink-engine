@@ -20,7 +20,7 @@ use std::collections::HashMap;
 /// Most segments, rings or subdivisions of a procedural mesh in a scene file.
 const MAX_MESH_DETAIL: u32 = 512;
 /// Instances nested deeper than this are refused (a scene instancing itself).
-const MAX_DEPTH: u32 = 16;
+pub(super) const MAX_DEPTH: u32 = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SceneFileError {

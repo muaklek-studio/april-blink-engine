@@ -15,6 +15,8 @@ const SIZE: u32 = 128;
 struct Scene {
     tree: SceneTree,
     sun: NodeHandle,
+    /// The cube's material.
+    red: ab_rendering::MaterialHandle,
 }
 
 /// Red cube floating over a grey floor, sun straight down, camera above and in front.
@@ -68,7 +70,7 @@ fn scene() -> Scene {
     tree.add_child(root, sun).unwrap();
 
     tree.update_transforms();
-    Scene { tree, sun }
+    Scene { tree, sun, red }
 }
 
 fn render(gpu: &GpuContext, tree: &SceneTree, msaa: u32) -> Vec<[u8; 4]> {
@@ -563,4 +565,111 @@ fn skinned_normals_follow_non_uniform_joint_scale() {
         differing < 20,
         "{differing} pixels shade differently when skinned"
     );
+}
+
+#[test]
+fn textures_over_the_upload_budget_arrive_over_several_frames() {
+    let Some(gpu) = gpu() else { return };
+    let scene = scene();
+    {
+        let mut assets = scene.tree.world().resource_mut::<RenderAssets>().unwrap();
+        for _ in 0..3 {
+            let texture = ab_rendering::Texture::new(
+                64,
+                64,
+                vec![255; 64 * 64 * 4],
+                ab_rendering::ColorSpace::Srgb,
+            )
+            .unwrap();
+            let handle = assets.add_texture(texture).unwrap();
+            assets.add_material(Material {
+                albedo_texture: Some(handle),
+                ..Material::default()
+            });
+        }
+    }
+    let config = RendererConfig {
+        msaa_samples: 1,
+        shadow_map_size: 256,
+        // Room for one 64² texture (with mips) a frame.
+        texture_upload_budget: Some(64 * 64 * 6),
+        ..Default::default()
+    };
+    let mut renderer = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &config);
+    let target = OffscreenTarget::new(&gpu, SIZE, SIZE);
+    let mut waiting = Vec::new();
+    for _ in 0..4 {
+        renderer.render(&gpu, scene.tree.world(), target.view(), SIZE, SIZE);
+        waiting.push(renderer.pending_texture_uploads());
+    }
+    assert_eq!(waiting, [2, 1, 0, 0]);
+
+    let mut unlimited =
+        SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &RendererConfig::default());
+    unlimited.render(&gpu, scene.tree.world(), target.view(), SIZE, SIZE);
+    assert_eq!(unlimited.pending_texture_uploads(), 0);
+}
+
+#[test]
+fn streamed_textures_show_a_preview_at_once_then_sharpen() {
+    let Some(gpu) = gpu() else { return };
+    let scene = scene();
+    {
+        // The cube gets a 512² texture of wide green and blue bands: the small mips keep
+        // the bands, so the preview already looks close to the final image.
+        let mut assets = scene.tree.world().resource_mut::<RenderAssets>().unwrap();
+        let mut texels = Vec::with_capacity(512 * 512 * 4);
+        for i in 0..512 * 512 {
+            let band = (i % 512) / 128;
+            texels.extend_from_slice(if band % 2 == 0 {
+                &[20, 220, 40, 255]
+            } else {
+                &[30, 60, 230, 255]
+            });
+        }
+        let texture =
+            ab_rendering::Texture::new(512, 512, texels, ab_rendering::ColorSpace::Srgb).unwrap();
+        let handle = assets.add_texture(texture).unwrap();
+        let cube = assets.material_mut(scene.red).unwrap();
+        cube.albedo = Color::WHITE;
+        cube.albedo_texture = Some(handle);
+    }
+    let config = |budget| RendererConfig {
+        msaa_samples: 1,
+        shadow_map_size: 256,
+        texture_upload_budget: budget,
+        ..Default::default()
+    };
+    let target = OffscreenTarget::new(&gpu, SIZE, SIZE);
+    let mut whole = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &config(None));
+    whole.render(&gpu, scene.tree.world(), target.view(), SIZE, SIZE);
+    let expected = target.read_pixels(&gpu).unwrap();
+    assert!(
+        expected
+            .iter()
+            .any(|p| u16::from(p[1]) > 2 * u16::from(p[0]) && p[1] > 60),
+        "the green cube is on screen"
+    );
+
+    // Almost no budget: one level a frame.
+    let mut streamed = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &config(Some(1)));
+    let mut waiting = Vec::new();
+    for frame in 0..4 {
+        streamed.render(&gpu, scene.tree.world(), target.view(), SIZE, SIZE);
+        waiting.push(streamed.pending_texture_uploads());
+        let pixels = target.read_pixels(&gpu).unwrap();
+        let differing = pixels
+            .iter()
+            .zip(&expected)
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 3))
+            .count();
+        // The preview is blurrier at the bands' edges; the final frame matches.
+        let allowed = if frame < 2 { pixels.len() / 20 } else { 0 };
+        assert!(
+            differing <= allowed,
+            "frame {frame}: {differing} pixels differ from the full texture's image"
+        );
+    }
+    // 128² preview first, then 256², then 512².
+    assert_eq!(waiting, [1, 1, 0, 0]);
 }

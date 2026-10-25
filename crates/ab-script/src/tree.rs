@@ -691,6 +691,42 @@ impl<'a> Tree<'a> {
         self.created(method!("scene.reload"), &[])
     }
 
+    /// Starts loading everything the scene file at `path` uses (models, textures, sounds,
+    /// instanced scenes) in the background, so [`Tree::load_scene`] or
+    /// [`Tree::change_scene`] later does not stall the game. Watch
+    /// [`Tree::preload_progress`]; calling it again restarts the preload.
+    pub fn preload_scene(&mut self, path: &str) -> Result<(), Error> {
+        self.run(method!("scene.preload"), &[path.to_value()])
+    }
+
+    /// How far [`Tree::preload_scene`] has got for `path`; `None` if it was not called.
+    pub fn preload_progress(&self, path: &str) -> Option<PreloadProgress> {
+        let values = self
+            .values(method!("scene.preload_progress"), &[path.to_value()])
+            .ok()?;
+        let at = |i: usize| values.get(i).and_then(Arg::get::<u32>).unwrap_or(0);
+        Some(PreloadProgress {
+            loaded: at(0),
+            total: at(1),
+            ready: values.get(2)?.get::<bool>()?,
+            error: values.get(3).and_then(Arg::get::<String>),
+        })
+    }
+
+    /// Starts loading one model (`.glb`, `.gltf`), image (`.png`, `.jpg`) or sound (`.wav`,
+    /// `.ogg`, `.mp3`, `.flac`) in the background; using it later does not wait.
+    pub fn preload_asset(&mut self, path: &str) -> Result<(), Error> {
+        self.run(method!("assets.preload"), &[path.to_value()])
+    }
+
+    /// Background loads not finished yet (0 once everything requested is ready).
+    pub fn pending_loads(&self) -> u32 {
+        self.fetch::<u32>(method!("assets.pending"), &[])
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    }
+
     /// The length of a `Path3D` (metres, in the world).
     pub fn path_length(&self, path: Node) -> Result<f32, Error> {
         self.fetch::<f64>(method!("path.length"), &[path.to_value()])?
@@ -825,6 +861,29 @@ pub(crate) fn report(method: &MethodCell, err: &Error) {
             "ab_script",
             format_args!("`{}`: {err}", method.name()),
         );
+    }
+}
+
+/// How far a scene preload has got ([`Tree::preload_progress`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreloadProgress {
+    /// Assets loaded so far.
+    pub loaded: u32,
+    /// Assets the scene uses (0 while its file is being read).
+    pub total: u32,
+    /// Everything is loaded (or the scene could not be read: see `error`).
+    pub ready: bool,
+    pub error: Option<String>,
+}
+
+impl PreloadProgress {
+    /// 0..=1, for a progress bar.
+    pub fn fraction(&self) -> f32 {
+        match (self.ready, self.total) {
+            (true, _) => 1.0,
+            (false, 0) => 0.0,
+            (false, total) => self.loaded as f32 / total as f32,
+        }
     }
 }
 

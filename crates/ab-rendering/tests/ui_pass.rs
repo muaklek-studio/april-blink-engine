@@ -103,3 +103,57 @@ fn rounded_corners_are_cut() {
     assert!(pixel(&pixels, 32, 1)[0] > 245, "edge middle filled");
     assert!(pixel(&pixels, 32, 32)[0] > 245);
 }
+
+#[test]
+fn streamed_images_sharpen() {
+    let Some(gpu) = gpu() else { return };
+    const BIG: u32 = 512;
+    let mut world = World::new();
+    // One-texel red and blue stripes: blurred, they turn purple.
+    let mut texels = Vec::with_capacity((BIG * BIG * 4) as usize);
+    for i in 0..BIG * BIG {
+        texels.extend_from_slice(if i % 2 == 0 {
+            &[255, 0, 0, 255]
+        } else {
+            &[0, 0, 255, 255]
+        });
+    }
+    let mut assets = RenderAssets::new();
+    let stripes = assets
+        .add_texture(Texture::new(BIG, BIG, texels, ColorSpace::Srgb).unwrap())
+        .unwrap();
+    world.insert_resource(assets);
+    world.insert_resource(UiDrawList {
+        quads: vec![UiQuad {
+            fill: UiFill::Image(stripes),
+            corner_radius: 0.0,
+            ..UiQuad::solid([0.0, 0.0, BIG as f32, BIG as f32], Color::WHITE)
+        }],
+        atlas: None,
+        size: [BIG, BIG],
+    });
+
+    let config = RendererConfig {
+        texture_upload_budget: Some(1),
+        ..Default::default()
+    };
+    let mut renderer = SceneRenderer::new(&gpu, OffscreenTarget::FORMAT, &config);
+    let target = OffscreenTarget::new(&gpu, BIG, BIG);
+    let mut frame = || {
+        renderer.render(&gpu, &world, target.view(), BIG, BIG);
+        let pixels = target.read_pixels(&gpu).unwrap();
+        (
+            pixels[(100 * BIG + 100) as usize],
+            pixels[(100 * BIG + 101) as usize],
+        )
+    };
+    let (a, b) = frame();
+    assert!(a[0] > 100 && a[2] > 100, "a blurry preview first: {a:?}");
+    assert_eq!(a, b);
+    frame();
+    let (a, b) = frame();
+    assert!(
+        close(a, [255, 0, 0]) && close(b, [0, 0, 255]),
+        "sharp at last: {a:?} {b:?}"
+    );
+}

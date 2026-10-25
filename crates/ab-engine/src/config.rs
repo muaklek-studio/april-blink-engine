@@ -44,7 +44,10 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             window: WindowConfig::default(),
-            renderer: RendererConfig::default(),
+            renderer: RendererConfig {
+                texture_upload_budget: Some(ab_rendering::DEFAULT_TEXTURE_UPLOAD_BUDGET),
+                ..RendererConfig::default()
+            },
             physics_hz: 60,
             max_physics_steps_per_frame: 8,
             asset_root: PathBuf::from("assets"),

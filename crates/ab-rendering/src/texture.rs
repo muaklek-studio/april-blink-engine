@@ -1,5 +1,10 @@
 //! CPU-side textures (RGBA8) and their sampling settings.
 
+use std::sync::{Arc, Mutex};
+
+/// Width, height and RGBA8 texels of one mip level.
+pub type MipLevel = (u32, u32, Vec<u8>);
+
 /// How texel values are interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorSpace {
@@ -56,6 +61,26 @@ pub struct Texture {
     pub data: Vec<u8>,
     pub color_space: ColorSpace,
     pub sampler: SamplerSettings,
+    /// Mips built ahead of time ([`Texture::with_prepared_mips`]).
+    prepared: PreparedMips,
+}
+
+/// Mip levels built on a loading thread, handed over once to the renderer (which then
+/// frees them). Not part of the texture's value: ignored by `==`, shared by clones.
+#[derive(Clone, Default)]
+struct PreparedMips(Arc<Mutex<Option<Vec<MipLevel>>>>);
+
+impl PartialEq for PreparedMips {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for PreparedMips {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ready = self.0.lock().is_ok_and(|mips| mips.is_some());
+        f.write_str(if ready { "prepared" } else { "none" })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -79,6 +104,7 @@ impl Texture {
             data,
             color_space,
             sampler: SamplerSettings::default(),
+            prepared: PreparedMips::default(),
         };
         texture.validate()?;
         Ok(texture)
@@ -92,6 +118,7 @@ impl Texture {
             data: rgba.to_vec(),
             color_space,
             sampler: SamplerSettings::default(),
+            prepared: PreparedMips::default(),
         }
     }
 
@@ -129,41 +156,109 @@ impl Texture {
 
     /// The full mip chain, level 0 first, built with a 2×2 box filter (odd edges are clamped).
     /// sRGB data is averaged in linear space so mips do not darken.
-    pub fn mip_chain(&self) -> Vec<(u32, u32, Vec<u8>)> {
+    pub fn mip_chain(&self) -> Vec<MipLevel> {
         let mut levels = vec![(self.width, self.height, self.data.clone())];
+        levels.extend(self.mips());
+        levels
+    }
+
+    /// The mip levels below level 0 (largest first), as in [`Texture::mip_chain`] without
+    /// copying the texture itself. Rows are filtered in parallel on the job pool.
+    pub fn mips(&self) -> Vec<MipLevel> {
+        let mut levels: Vec<MipLevel> = Vec::new();
         for _ in 1..self.mip_level_count() {
-            let (w, h, src) = levels.last().expect("level 0 exists");
-            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-            let mut dst = vec![0u8; (nw * nh * 4) as usize];
-            for y in 0..nh {
-                for x in 0..nw {
-                    for c in 0..4 {
-                        let srgb = self.color_space == ColorSpace::Srgb && c < 3;
-                        let mut sum = 0.0;
-                        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                            let sx = (2 * x + dx).min(w - 1);
-                            let sy = (2 * y + dy).min(h - 1);
-                            let v = src[((sy * w + sx) * 4 + c) as usize];
-                            sum += if srgb {
-                                srgb_to_linear(v)
-                            } else {
-                                v as f32 / 255.0
-                            };
-                        }
-                        let avg = sum / 4.0;
-                        let out = if srgb { linear_to_srgb(avg) } else { avg };
-                        dst[((y * nw + x) * 4 + c) as usize] = (out * 255.0).round() as u8;
-                    }
-                }
-            }
-            levels.push((nw, nh, dst));
+            let (w, h, src) = match levels.last() {
+                Some((w, h, data)) => (*w, *h, data.as_slice()),
+                None => (self.width, self.height, self.data.as_slice()),
+            };
+            let level = downsample(w, h, src, self.color_space);
+            levels.push(level);
         }
         levels
     }
+
+    /// Builds the mips now (call it on a loading thread), so the renderer does not have to
+    /// when the texture is first drawn. Change the texture before this, not after.
+    #[must_use]
+    pub fn with_prepared_mips(self) -> Self {
+        let mips = self.mips();
+        if let Ok(mut prepared) = self.prepared.0.lock() {
+            *prepared = Some(mips);
+        }
+        self
+    }
+
+    /// Whether mips were prepared ([`Texture::with_prepared_mips`]) and not handed over yet.
+    pub fn has_prepared_mips(&self) -> bool {
+        self.prepared.0.lock().is_ok_and(|mips| mips.is_some())
+    }
+
+    /// The mips ([`Texture::mips`]): the prepared ones the first time (handing them over),
+    /// otherwise built now.
+    pub fn take_mips(&self) -> Vec<MipLevel> {
+        let prepared = self.prepared.0.lock().ok().and_then(|mut p| p.take());
+        let expected = self.mip_level_count() as usize - 1;
+        let first = ((self.width / 2).max(1), (self.height / 2).max(1));
+        match prepared {
+            // Built for this size and sampler.
+            Some(mips)
+                if mips.len() == expected
+                    && mips.first().is_none_or(|(w, h, _)| (*w, *h) == first) =>
+            {
+                mips
+            }
+            _ => self.mips(),
+        }
+    }
 }
 
-fn srgb_to_linear(v: u8) -> f32 {
-    let c = v as f32 / 255.0;
+/// One mip level below `src` (`w` × `h`): each texel the average of a 2×2 block.
+fn downsample(w: u32, h: u32, src: &[u8], color_space: ColorSpace) -> MipLevel {
+    let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+    let mut dst = vec![0u8; (nw * nh * 4) as usize];
+    let srgb = color_space == ColorSpace::Srgb;
+    let tables = srgb.then(srgb_tables);
+    let mut rows: Vec<&mut [u8]> = dst.chunks_mut((nw * 4) as usize).collect();
+    // Small levels are not worth spreading over threads.
+    let min_rows = (16_384 / nw.max(1)).max(1) as usize;
+    ab_core::jobs::par_for_each_indexed_mut(&mut rows, min_rows, |y, row| {
+        let y = y as u32;
+        let (y0, y1) = ((2 * y).min(h - 1), (2 * y + 1).min(h - 1));
+        for x in 0..nw {
+            let (x0, x1) = ((2 * x).min(w - 1), (2 * x + 1).min(w - 1));
+            let at = |sx: u32, sy: u32, c: usize| src[((sy * w + sx) * 4) as usize + c];
+            for c in 0..4 {
+                let texels = [at(x0, y0, c), at(x1, y0, c), at(x0, y1, c), at(x1, y1, c)];
+                row[(x * 4) as usize + c] = match tables {
+                    Some((to_linear, thresholds)) if c < 3 => {
+                        let sum: f32 = texels.iter().map(|&v| to_linear[v as usize]).sum();
+                        // The sRGB value whose range holds the average: the same as
+                        // rounding `linear_to_srgb(avg) * 255`, without the `powf`.
+                        thresholds.partition_point(|&t| t <= sum / 4.0) as u8
+                    }
+                    _ => {
+                        let sum: u32 = texels.iter().map(|&v| u32::from(v)).sum();
+                        ((sum + 2) / 4) as u8
+                    }
+                };
+            }
+        }
+    });
+    (nw, nh, dst)
+}
+
+/// sRGB byte → linear value, and the linear values where the rounded sRGB byte steps up
+/// (`thresholds[i]`: the start of byte `i + 1`).
+fn srgb_tables() -> &'static ([f32; 256], [f32; 255]) {
+    static TABLES: std::sync::OnceLock<([f32; 256], [f32; 255])> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let to_linear = std::array::from_fn(|v| srgb_to_linear(v as u8));
+        let thresholds = std::array::from_fn(|i| srgb_unit_to_linear((i as f32 + 0.5) / 255.0));
+        (to_linear, thresholds)
+    })
+}
+
+fn srgb_unit_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {
@@ -171,12 +266,8 @@ fn srgb_to_linear(v: u8) -> f32 {
     }
 }
 
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
+fn srgb_to_linear(v: u8) -> f32 {
+    srgb_unit_to_linear(v as f32 / 255.0)
 }
 
 #[cfg(test)]
@@ -223,6 +314,72 @@ mod tests {
         // 50% linear grey is ~188 in sRGB, not 128.
         let srgb = Texture::new(2, 2, data, ColorSpace::Srgb).unwrap();
         assert_eq!(srgb.mip_chain()[1].2, [188, 188, 188, 255]);
+    }
+
+    #[test]
+    fn mips_match_the_exact_filter() {
+        fn exact(texels: [u8; 4], srgb: bool) -> u8 {
+            if !srgb {
+                let sum: f32 = texels.iter().map(|&v| v as f32 / 255.0).sum();
+                return (sum / 4.0 * 255.0).round() as u8;
+            }
+            let avg = texels.iter().map(|&v| srgb_to_linear(v)).sum::<f32>() / 4.0;
+            let out = if avg <= 0.0031308 {
+                avg * 12.92
+            } else {
+                1.055 * avg.powf(1.0 / 2.4) - 0.055
+            };
+            (out * 255.0).round() as u8
+        }
+        let (w, h) = (37u32, 22u32);
+        let data: Vec<u8> = (0..w * h * 4)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        for space in [ColorSpace::Srgb, ColorSpace::Linear] {
+            let texture = Texture::new(w, h, data.clone(), space).unwrap();
+            let (nw, nh, mip) = &texture.mips()[0];
+            let mut off_by_one = 0;
+            for y in 0..*nh {
+                for x in 0..*nw {
+                    for c in 0..4 {
+                        let at = |sx: u32, sy: u32| data[((sy * w + sx) * 4 + c) as usize];
+                        let texels = [
+                            at(2 * x, 2 * y),
+                            at(2 * x + 1, 2 * y),
+                            at(2 * x, 2 * y + 1),
+                            at(2 * x + 1, 2 * y + 1),
+                        ];
+                        let want = exact(texels, space == ColorSpace::Srgb && c < 3);
+                        let got = mip[((y * nw + x) * 4 + c) as usize];
+                        assert!(got.abs_diff(want) <= 1, "{space:?} ({x}, {y}).{c}");
+                        off_by_one += usize::from(got != want);
+                    }
+                }
+            }
+            // Only float ties may round the other way.
+            assert!(off_by_one <= 2, "{space:?}: {off_by_one} values differ");
+        }
+    }
+
+    #[test]
+    fn prepared_mips_are_handed_over_once() {
+        let data: Vec<u8> = (0..16 * 8 * 4).map(|i| i as u8).collect();
+        let texture = Texture::new(16, 8, data, ColorSpace::Srgb).unwrap();
+        let built = texture.mips();
+        let prepared = texture.clone().with_prepared_mips();
+        assert_eq!(prepared, texture, "prepared mips do not change the value");
+        assert_eq!(prepared.take_mips(), built);
+        assert_eq!(prepared.take_mips(), built, "built again once taken");
+
+        // Prepared for other settings: rebuilt.
+        let stale = texture
+            .clone()
+            .with_prepared_mips()
+            .with_sampler(SamplerSettings {
+                mipmaps: false,
+                ..Default::default()
+            });
+        assert!(stale.take_mips().is_empty());
     }
 
     #[test]

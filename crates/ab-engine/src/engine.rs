@@ -83,8 +83,9 @@ impl Engine {
     /// Creates the engine and registers the core resources: [`Time`], [`InputState`],
     /// [`Actions`], [`EngineControl`], [`RenderAssets`], [`Environment`], [`RenderStats`],
     /// [`AssetServer`], [`AnimationLibrary`], [`PhysicsWorld`], [`Audio`] and the UI
-    /// resources (see [`ab_ui::register`]), plus the built-in systems (action evaluation
-    /// and UI input in `PreUpdate`, physics in `PostFixedUpdate`, animation and UI
+    /// resources (see [`ab_ui::register`]), plus the built-in systems (background asset
+    /// loads ([`AssetServer::poll`]) and level preloads
+    /// ([`preload_scene`](crate::scene_file::preload_scene)), action evaluation and UI input in `PreUpdate`, physics in `PostFixedUpdate`, animation and UI
     /// animation in `Update`, audio in `PostUpdate`). Starts the worker threads
     /// ([`ab_core::jobs`]) on first use.
     pub fn new(config: &EngineConfig) -> Self {
@@ -119,6 +120,14 @@ impl Engine {
         ab_ui::register(world);
         ab_effects::register(world);
         let mut schedule = Schedule::new();
+        schedule.add_system(
+            ScheduleStage::PreUpdate,
+            ab_ecs::named("asset_loading", asset_loading_system),
+        );
+        schedule.add_system(
+            ScheduleStage::PreUpdate,
+            ab_ecs::named("scene_preload", crate::scene_file::update_preloads),
+        );
         schedule.add_system(
             ScheduleStage::PreUpdate,
             ab_ecs::named("debug_draw", debug_draw_system),
@@ -476,6 +485,18 @@ impl Engine {
 }
 
 /// Evaluates the action map against this frame's input.
+/// Registers the assets that finished loading in the background ([`AssetServer::poll`]).
+fn asset_loading_system(world: &mut ab_ecs::World) {
+    let (Some(mut assets), Some(mut render), Some(mut animations)) = (
+        world.resource_mut::<AssetServer>(),
+        world.resource_mut::<RenderAssets>(),
+        world.resource_mut::<ab_animation::AnimationLibrary>(),
+    ) else {
+        return;
+    };
+    assets.poll(&mut render, &mut animations);
+}
+
 fn update_actions(world: &mut ab_ecs::World) {
     let (Some(input), Some(mut actions)) = (
         world.resource::<InputState>(),

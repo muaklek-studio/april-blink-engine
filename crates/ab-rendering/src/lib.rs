@@ -47,13 +47,16 @@ pub use extract::{
 pub use gpu::{
     backend_name, instance_flags, test_gpu_context, AdapterCandidate, FrameStats, GpuContext,
     OffscreenTarget, RenderError, RendererConfig, SceneRenderer, WindowRenderer,
+    DEFAULT_TEXTURE_UPLOAD_BUDGET,
 };
 pub use material::Material;
 pub use mesh::{Aabb, Mesh, MeshError, SkinWeights, Vertex};
 pub use nodes::{class, RenderNodes};
 pub use particles::{ParticleDrawList, ParticleInstance};
 pub use shadow::{directional_shadow_matrix, spot_shadow_matrix};
-pub use texture::{ColorSpace, SamplerSettings, Texture, TextureError, TextureFilter, TextureWrap};
+pub use texture::{
+    ColorSpace, MipLevel, SamplerSettings, Texture, TextureError, TextureFilter, TextureWrap,
+};
 pub use ui::{GlyphAtlasImage, UiDrawList, UiFill, UiQuad};
 
 /// Light limits of the forward shader. Extra lights (farthest from the camera) are dropped.

@@ -14,7 +14,7 @@ use crate::material::Material;
 use crate::mesh::{SkinWeights, Vertex};
 use crate::particles::ParticleDrawList;
 use crate::shadow::{directional_shadow_matrix, spot_shadow_matrix};
-use crate::texture::{ColorSpace, SamplerSettings, Texture, TextureFilter, TextureWrap};
+use crate::texture::{ColorSpace, MipLevel, SamplerSettings, Texture, TextureFilter, TextureWrap};
 use crate::ui::UiDrawList;
 use ab_core::{Color, Mat3, Mat4, Time};
 use ab_ecs::World;
@@ -70,13 +70,35 @@ struct GpuMesh {
 }
 
 struct GpuTexture {
+    texture: wgpu::Texture,
+    /// Starts at the `resident` level.
     view: wgpu::TextureView,
     sampler: SamplerSettings,
+    /// Size of level 0.
+    size: (u32, u32),
+    /// The largest mip level on the GPU so far (0 once the texture is complete).
+    resident: u32,
+    /// Levels 1.. not uploaded yet (`mips[i]` is level `i + 1`; the next to go is the last).
+    /// Level 0 is read from the `RenderAssets` texture when its turn comes.
+    mips: Vec<MipLevel>,
 }
 
-/// Bind group for one material, with the texture handles it was built from.
+impl GpuTexture {
+    /// Width and height of mip level `level`.
+    fn level_size(&self, level: u32) -> (u32, u32) {
+        ((self.size.0 >> level).max(1), (self.size.1 >> level).max(1))
+    }
+}
+
+/// Streamed textures first reach the GPU with their mips up to this size (a blurry but
+/// right-looking version), then sharpen a level at a time.
+const STREAM_PREVIEW_SIZE: u32 = 128;
+
+/// Bind group for one material, with the texture handles (and the resident mip level of
+/// each, see [`GpuTexture::resident`]) it was built from.
 struct MaterialBinding {
     key: [Option<TextureHandle>; MATERIAL_TEXTURE_SLOTS],
+    resident: [u32; MATERIAL_TEXTURE_SLOTS],
     bind_group: wgpu::BindGroup,
 }
 
@@ -98,6 +120,11 @@ pub struct SceneRenderer {
     target_format: wgpu::TextureFormat,
     msaa_samples: u32,
     shadow_map_size: u32,
+    texture_upload_budget: Option<u64>,
+    /// Textures in `RenderAssets` not uploaded yet (held back by the budget).
+    textures_waiting: usize,
+    /// Indices of textures on the GPU with mip levels still to upload.
+    textures_streaming: Vec<usize>,
 
     /// Indexed by [`forward_variant`].
     forward_pipelines: [wgpu::RenderPipeline; 8],
@@ -405,6 +432,9 @@ impl SceneRenderer {
             target_format,
             msaa_samples,
             shadow_map_size,
+            texture_upload_budget: config.texture_upload_budget,
+            textures_waiting: 0,
+            textures_streaming: Vec::new(),
             forward_pipelines,
             sky_pipeline,
             sky: false,
@@ -465,6 +495,13 @@ impl SceneRenderer {
     /// Effective MSAA sample count (may be lower than requested).
     pub fn msaa_samples(&self) -> u32 {
         self.msaa_samples
+    }
+
+    /// Textures waiting for a later frame to be uploaded or to get their sharper mip
+    /// levels ([`RendererConfig::texture_upload_budget`]); 0 once everything is on the GPU
+    /// at full resolution.
+    pub fn pending_texture_uploads(&self) -> usize {
+        self.textures_waiting + self.textures_streaming.len()
     }
 
     /// The render list built for the last frame.
@@ -725,18 +762,96 @@ impl SceneRenderer {
         }
     }
 
-    /// Uploads textures added since the last frame. Their mip chains (the CPU-heavy part)
-    /// are built in parallel; the uploads themselves stay on this thread.
+    /// Uploads textures added since the last frame. Their mips come prepared from the
+    /// loading threads ([`Texture::with_prepared_mips`]) or are built here, in parallel; the
+    /// uploads themselves stay on this thread.
+    ///
+    /// With an upload budget, textures stream: new ones go up with only their small mips
+    /// ([`STREAM_PREVIEW_SIZE`]), then the budget left sharpens textures a level at a time,
+    /// lowest resolution first, so a level full of textures comes into focus evenly. New
+    /// textures without prepared mips are admitted as the budget covers building them (at
+    /// least one a frame); materials use the default textures until theirs arrive.
     fn upload_textures(&mut self, gpu: &GpuContext, assets: &RenderAssets) {
         let new = &assets.textures()[self.textures.len()..];
-        let chains = ab_core::jobs::par_map(new, 1, Texture::mip_chain);
-        for (texture, levels) in new.iter().zip(&chains) {
-            self.textures.push(upload_texture_levels(
-                gpu,
-                texture,
-                levels,
-                "material texture",
-            ));
+        let Some(budget) = self.texture_upload_budget else {
+            let mips = ab_core::jobs::par_map(new, 1, Texture::take_mips);
+            for (texture, mips) in new.iter().zip(mips) {
+                let (uploaded, _) =
+                    upload_texture_levels(gpu, texture, mips, "material texture", false);
+                self.textures.push(uploaded);
+            }
+            return;
+        };
+
+        let mut cost = 0u64;
+        let count = new
+            .iter()
+            .take_while(|texture| {
+                let first = cost == 0;
+                let (w, h) = (u64::from(texture.width), u64::from(texture.height));
+                let preview = u64::from(STREAM_PREVIEW_SIZE).pow(2);
+                // The bytes uploaded now (the mips add a third), plus the whole texture's
+                // when its mips are still to build.
+                cost += (w * h).min(preview) * 16 / 3 + 1;
+                if !texture.has_prepared_mips() {
+                    cost += w * h * 16 / 3;
+                }
+                first || cost <= budget
+            })
+            .count();
+        self.textures_waiting = new.len() - count;
+        let new = &new[..count];
+        let mips = ab_core::jobs::par_map(new, 1, Texture::take_mips);
+        let mut uploaded = 0u64;
+        for (texture, mips) in new.iter().zip(mips) {
+            let (texture, bytes) =
+                upload_texture_levels(gpu, texture, mips, "material texture", true);
+            uploaded += bytes;
+            if texture.resident > 0 {
+                self.textures_streaming.push(self.textures.len());
+            }
+            self.textures.push(texture);
+        }
+
+        // Sharpen: always one level a frame, more while the budget lasts.
+        loop {
+            let next = self
+                .textures_streaming
+                .iter()
+                .enumerate()
+                .map(|(at, &index)| {
+                    let texture = &self.textures[index];
+                    let (w, h) = texture.level_size(texture.resident - 1);
+                    (u64::from(w) * u64::from(h) * 4, at)
+                })
+                .min();
+            let Some((bytes, at)) = next else { break };
+            if uploaded > 0 && uploaded + bytes > budget {
+                break;
+            }
+            uploaded += bytes;
+            let index = self.textures_streaming[at];
+            let texture = &mut self.textures[index];
+            texture.resident -= 1;
+            let level = texture.resident;
+            let size = texture.level_size(level);
+            if level == 0 {
+                write_level(
+                    gpu,
+                    &texture.texture,
+                    0,
+                    size,
+                    &assets.textures()[index].data,
+                );
+                self.textures_streaming.swap_remove(at);
+            } else {
+                let (.., texels) = texture.mips.pop().expect("levels above 0 are kept");
+                write_level(gpu, &texture.texture, level, size, &texels);
+            }
+            // Materials notice the new level by themselves (`prepare_materials`); UI images
+            // are bound once, so they are told.
+            self.ui_pass.forget_image(TextureHandle(index as u32));
+            texture.view = resident_view(&texture.texture, texture.resident);
         }
     }
 
@@ -750,16 +865,21 @@ impl SceneRenderer {
             let key = material
                 .texture_slots()
                 .map(|slot| slot.filter(|t| t.index() < texture_count));
+            let resident = key.map(|t| t.map_or(0, |t| self.textures[t.index()].resident));
             self.materials
                 .push(pack_material(material, key[2].is_some()));
             self.material_flags.push(material.double_sided);
 
             let up_to_date = self.material_bindings[index]
                 .as_ref()
-                .is_some_and(|binding| binding.key == key);
+                .is_some_and(|binding| binding.key == key && binding.resident == resident);
             if !up_to_date {
                 let bind_group = self.create_material_bind_group(gpu, &key);
-                self.material_bindings[index] = Some(MaterialBinding { key, bind_group });
+                self.material_bindings[index] = Some(MaterialBinding {
+                    key,
+                    resident,
+                    bind_group,
+                });
             }
         }
     }
@@ -1304,88 +1424,167 @@ fn pack_material(material: &Material, has_normal_map: bool) -> MaterialGpu {
 }
 
 fn upload_texture(gpu: &GpuContext, texture: &Texture, label: &str) -> GpuTexture {
-    upload_texture_levels(gpu, texture, &texture.mip_chain(), label)
+    upload_texture_levels(gpu, texture, texture.take_mips(), label, false).0
 }
 
-/// Uploads `texture` with its mip chain `levels` (see [`Texture::mip_chain`]).
+/// Creates the GPU texture for `texture` with its `mips` (see [`Texture::mips`]) and
+/// uploads them, or with `stream` only the levels up to [`STREAM_PREVIEW_SIZE`] (the rest
+/// are kept for later, see [`GpuTexture::mips`]). Returns it with the bytes uploaded.
 fn upload_texture_levels(
     gpu: &GpuContext,
     texture: &Texture,
-    levels: &[(u32, u32, Vec<u8>)],
+    mut mips: Vec<MipLevel>,
     label: &str,
-) -> GpuTexture {
+    stream: bool,
+) -> (GpuTexture, u64) {
     let format = match texture.color_space {
         ColorSpace::Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         ColorSpace::Linear => wgpu::TextureFormat::Rgba8Unorm,
     };
-    // Textures larger than the GPU allows (8192 on many integrated GPUs) start at the first
-    // mip that fits, or are shrunk when they have no mips.
     let max = gpu.max_texture_size();
-    let shrunk;
-    let levels = match levels.iter().position(|(w, h, _)| *w <= max && *h <= max) {
-        Some(0) => levels,
-        Some(first) => {
-            warn!(
-                label,
-                width = texture.width,
-                height = texture.height,
-                max,
-                "texture larger than the GPU supports; using a smaller mip"
-            );
-            &levels[first..]
+    if texture.width > max || texture.height > max {
+        // Larger than the GPU allows (8192 on many integrated GPUs): starts at the first mip
+        // that fits, or shrunk when it has no mips; not streamed.
+        let mut levels = Vec::with_capacity(mips.len() + 1);
+        match mips.iter().position(|(w, h, _)| *w <= max && *h <= max) {
+            Some(first) => {
+                warn!(
+                    label,
+                    width = texture.width,
+                    height = texture.height,
+                    max,
+                    "texture larger than the GPU supports; using a smaller mip"
+                );
+                levels.extend(mips.drain(first..));
+            }
+            None => {
+                warn!(
+                    label,
+                    width = texture.width,
+                    height = texture.height,
+                    max,
+                    "texture larger than the GPU supports; shrinking it"
+                );
+                levels.push(shrink_to_fit(texture, max));
+            }
         }
-        None => {
-            warn!(
-                label,
-                width = texture.width,
-                height = texture.height,
-                max,
-                "texture larger than the GPU supports; shrinking it"
-            );
-            shrunk = [shrink_to_fit(texture, max)];
-            &shrunk[..]
+        let (width, height) = (levels[0].0, levels[0].1);
+        let gpu_texture = create_texture(gpu, label, format, (width, height), levels.len());
+        let mut uploaded = 0;
+        for (level, (w, h, texels)) in levels.iter().enumerate() {
+            write_level(gpu, &gpu_texture, level as u32, (*w, *h), texels);
+            uploaded += texels.len() as u64;
         }
+        let texture = GpuTexture {
+            view: resident_view(&gpu_texture, 0),
+            texture: gpu_texture,
+            sampler: texture.sampler,
+            size: (width, height),
+            resident: 0,
+            mips: Vec::new(),
+        };
+        return (texture, uploaded);
+    }
+
+    let size = (texture.width, texture.height);
+    let gpu_texture = create_texture(gpu, label, format, size, mips.len() + 1);
+    let mut out = GpuTexture {
+        view: resident_view(&gpu_texture, 0),
+        texture: gpu_texture,
+        sampler: texture.sampler,
+        size,
+        resident: 0,
+        mips: Vec::new(),
     };
-    let (width, height) = (levels[0].0, levels[0].1);
-    let gpu_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+    // The smallest level (1×1) is always within the preview size.
+    let last = mips.len() as u32;
+    let resident = if stream {
+        (0..=last)
+            .find(|&level| {
+                let (w, h) = out.level_size(level);
+                w.max(h) <= STREAM_PREVIEW_SIZE
+            })
+            .unwrap_or(last)
+    } else {
+        0
+    };
+    let mut uploaded = 0;
+    for level in resident..=last {
+        let texels = match level {
+            0 => &texture.data,
+            _ => &mips[level as usize - 1].2,
+        };
+        write_level(gpu, &out.texture, level, out.level_size(level), texels);
+        uploaded += texels.len() as u64;
+    }
+    mips.truncate(resident.saturating_sub(1) as usize);
+    out.mips = mips;
+    out.resident = resident;
+    if resident > 0 {
+        out.view = resident_view(&out.texture, resident);
+    }
+    (out, uploaded)
+}
+
+fn create_texture(
+    gpu: &GpuContext,
+    label: &str,
+    format: wgpu::TextureFormat,
+    (width, height): (u32, u32),
+    levels: usize,
+) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: levels.len() as u32,
+        mip_level_count: levels as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
-    });
-    for (level, (width, height, data)) in levels.iter().enumerate() {
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &gpu_texture,
-                mip_level: level as u32,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(*height),
-            },
-            wgpu::Extent3d {
-                width: *width,
-                height: *height,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-    GpuTexture {
-        view: gpu_texture.create_view(&Default::default()),
-        sampler: texture.sampler,
-    }
+    })
+}
+
+/// Writes one mip level (`width` × `height` RGBA8 `texels`) of `texture`.
+fn write_level(
+    gpu: &GpuContext,
+    texture: &wgpu::Texture,
+    level: u32,
+    (width, height): (u32, u32),
+    texels: &[u8],
+) {
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: level,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        texels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// A view of `texture` from mip level `resident` down: the levels above it are not
+/// uploaded yet, so sampling sees the sharpest level that is.
+fn resident_view(texture: &wgpu::Texture, resident: u32) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        base_mip_level: resident,
+        ..Default::default()
+    })
 }
 
 /// A nearest-neighbour copy of `texture` no larger than `max` on either side.

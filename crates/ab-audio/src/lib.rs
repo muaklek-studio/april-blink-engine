@@ -1,6 +1,7 @@
 //! Audio on top of [kira](https://docs.rs/kira), exposed through Godot-style nodes.
 //!
-//! * [`AudioStream`]: decoded sound data (WAV, Ogg Vorbis, MP3, FLAC).
+//! * [`AudioStream`]: sound data (WAV, Ogg Vorbis, MP3, FLAC), decoded up front or streamed
+//!   while it plays.
 //! * [`AudioPlayer`]: component of `AudioStreamPlayer` (music, UI) and `AudioStreamPlayer3D`
 //!   (positional) nodes, with volume, pitch, looping and autoplay.
 //! * [`AudioListener3D`]: where positional sound is heard from.
