@@ -1,4 +1,5 @@
 use crate::assets::TextureHandle;
+use crate::shader::{ShaderHandle, MAX_PARAMS};
 use ab_core::Color;
 
 /// Surface parameters for the forward PBR shader (metallic/roughness workflow, glTF style).
@@ -29,6 +30,10 @@ pub struct Material {
     pub double_sided: bool,
     /// Ignore lights; output `albedo` (plus emission) directly.
     pub unshaded: bool,
+    /// A custom surface shader (see [`crate::shader`]); `None` is the standard surface.
+    pub shader: Option<ShaderHandle>,
+    /// The values of the shader's `// param` lines, in order.
+    pub shader_params: [f32; MAX_PARAMS],
 }
 
 impl Material {
@@ -105,6 +110,8 @@ impl Default for Material {
             alpha_cutoff: None,
             double_sided: false,
             unshaded: false,
+            shader: None,
+            shader_params: [0.0; MAX_PARAMS],
         }
     }
 }

@@ -43,6 +43,8 @@ pub struct SceneTreePanel {
     pub frame_request: bool,
     /// The rows drawn this frame, top to bottom (Shift+click selects a range of them).
     rows: Vec<NodeHandle>,
+    /// Show only this node and what is under it (a tool window's subject).
+    pub root: Option<NodeHandle>,
 }
 
 /// Deferred edits, applied after drawing (the tree is borrowed while drawing).
@@ -128,7 +130,11 @@ impl SceneTreePanel {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let filter = self.filter.trim().to_lowercase();
                 if filter.is_empty() {
-                    self.row(ui, editor, editor.scene_root, 0, &mut actions);
+                    let root = self
+                        .root
+                        .filter(|&r| editor.tree().is_valid(r))
+                        .unwrap_or(editor.scene_root);
+                    self.row(ui, editor, root, 0, &mut actions);
                 } else {
                     self.filtered(ui, editor, &filter, &mut actions);
                 }
@@ -347,12 +353,16 @@ impl SceneTreePanel {
         // A UI node's controls and an effect's layers are edited in their own window.
         let feature = Feature::of(editor, node);
         let owned = feature.is_some_and(Feature::owns_children);
-        let children: Vec<NodeHandle> = if (instance && !prefab) || owned {
+        // A tool window's subject shows what is inside it, a model's bones too.
+        let subject = self.root == Some(node);
+        let children: Vec<NodeHandle> = if ((instance && !prefab) || owned) && !subject {
             Vec::new()
         } else {
             tree.children(node)
         };
-        let open = if prefab {
+        let open = if subject {
+            true
+        } else if prefab {
             self.expanded.contains(&path)
         } else {
             !self.collapsed.contains(&path)
@@ -529,7 +539,10 @@ impl SceneTreePanel {
                             &[("count", &tree.subtree(node).len().saturating_sub(1))],
                         )
                     ),
-                    Feature::Animation | Feature::Effect => icon::ARROW_SQUARE_OUT.to_owned(),
+                    Feature::Animation
+                    | Feature::Cutscene
+                    | Feature::AnimationGraph
+                    | Feature::Effect => icon::ARROW_SQUARE_OUT.to_owned(),
                 };
                 let galley =
                     painter.layout_no_wrap(hint, egui::FontId::proportional(11.0), theme::TEXT_DIM);
@@ -594,6 +607,12 @@ impl SceneTreePanel {
             Some(Feature::Ui) => response.on_hover_text(crate::i18n::t("features.ui_open")),
             Some(Feature::Animation) => {
                 response.on_hover_text(crate::i18n::t("features.animation_hint"))
+            }
+            Some(Feature::Cutscene) => {
+                response.on_hover_text(crate::i18n::t("features.cutscene_hint"))
+            }
+            Some(Feature::AnimationGraph) => {
+                response.on_hover_text(crate::i18n::t("features.graph_hint"))
             }
             Some(Feature::Effect) => response.on_hover_text(crate::i18n::t("features.effect_hint")),
             None => response,

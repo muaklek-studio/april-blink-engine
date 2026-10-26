@@ -108,6 +108,10 @@ pub struct ViewOptions {
     /// While editing: select, move and resize UI controls in the view (off by default: the
     /// UI Editor is where interfaces are made).
     pub ui: bool,
+    /// Label each mesh with levels of detail with the level it is drawn at.
+    pub lod_levels: bool,
+    /// Show the occlusion culling buffer in a corner (and keep it each frame).
+    pub occlusion_buffer: bool,
 }
 
 impl Default for ViewOptions {
@@ -124,6 +128,8 @@ impl Default for ViewOptions {
             free_camera_in_play: false,
             editor_lighting: true,
             ui: false,
+            lod_levels: false,
+            occlusion_buffer: false,
         }
     }
 }
@@ -302,6 +308,10 @@ pub struct ViewportRenderer {
     target: Option<OffscreenTarget>,
     texture: Option<egui::TextureId>,
     pub stats: FrameStats,
+    /// The last frame's occlusion buffer (with occlusion debugging on).
+    pub occlusion: Option<ab_engine::rendering::OcclusionDebug>,
+    /// What the scene renderer holds on the GPU.
+    pub gpu_memory: ab_engine::rendering::GpuMemory,
 }
 
 impl ViewportRenderer {
@@ -322,6 +332,8 @@ impl ViewportRenderer {
             target: None,
             texture: None,
             stats: FrameStats::default(),
+            occlusion: None,
+            gpu_memory: Default::default(),
         }
     }
 
@@ -343,6 +355,8 @@ impl ViewportRenderer {
             target: None,
             texture: None,
             stats: FrameStats::default(),
+            occlusion: None,
+            gpu_memory: Default::default(),
         }
     }
 
@@ -376,10 +390,10 @@ impl ViewportRenderer {
         }
         let target = self.target.as_ref().expect("created above");
         ab_engine::ui::prepare_ui(world, width, height);
-        self.stats =
-            self.renderer
-                .borrow_mut()
-                .render(&self.gpu, world, target.view(), width, height);
+        let mut renderer = self.renderer.borrow_mut();
+        self.stats = renderer.render(&self.gpu, world, target.view(), width, height);
+        self.occlusion = renderer.last_render_list().occlusion.clone();
+        self.gpu_memory = renderer.gpu_memory();
         self.texture.expect("registered above")
     }
 }
@@ -415,6 +429,17 @@ struct GizmoDrag {
     start_angle: f32,
 }
 
+/// A line a tool draws over a view (see [`Viewport::overlay`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayLine {
+    pub from: Vec3,
+    pub to: Vec3,
+    pub color: Color32,
+    pub width: f32,
+    /// A dot at `from` (a joint).
+    pub joint: bool,
+}
+
 /// Per-viewport interaction state.
 pub struct Viewport {
     pub camera: EditorCamera,
@@ -425,9 +450,18 @@ pub struct Viewport {
     pub main: bool,
     /// The layout button was pressed (the viewport area acts on it).
     pub toggle_layout: bool,
+    /// Look through this camera (world transform, field of view in degrees) instead of the
+    /// view's own, which then cannot be moved: a cutscene's camera, previewed.
+    pub look_through: Option<(Affine3A, f32)>,
     /// Draw the scene this frame; when off, the last image is shown again (a view in a
     /// background window, see [`crate::tool_window::Redraw`]).
     pub redraw: bool,
+    /// Lines a tool draws over the scene (world space, width in points): a skeleton's
+    /// bones. Set before each show.
+    pub overlay: Vec<OverlayLine>,
+    /// Show only this node and what is under it, under studio lighting, as if it were
+    /// alone (the Animation and Effects Editors' views). Picking and the icons keep to it.
+    pub isolate: Option<NodeHandle>,
     renderer: Option<ViewportRenderer>,
     drag: Option<GizmoDrag>,
     /// What the gizmo drag moves: each selected root with its transforms at the start.
@@ -482,7 +516,10 @@ impl Viewport {
             kind: ViewKind::Perspective,
             main: true,
             toggle_layout: false,
+            look_through: None,
             redraw: true,
+            overlay: Vec::new(),
+            isolate: None,
             renderer,
             drag: None,
             drag_group: Vec::new(),
@@ -548,7 +585,10 @@ impl Viewport {
 
     /// The view camera's global transform: the orbit camera, or for an orthographic view
     /// its fixed direction from far behind the pivot.
-    fn view_global(&self) -> Affine3A {
+    pub fn view_global(&self) -> Affine3A {
+        if let Some((global, _)) = self.look_through {
+            return global;
+        }
         match self.kind.rotation() {
             Some(rotation) => Affine3A::from_rotation_translation(
                 rotation,
@@ -579,6 +619,21 @@ impl Viewport {
         editor: &mut Editor,
         render_state: Option<&egui_wgpu::RenderState>,
     ) {
+        let isolate = self
+            .isolate
+            .filter(|&n| editor.tree().is_valid(n) && n != editor.scene_root);
+        let scope = std::mem::replace(&mut editor.view_scope, isolate);
+        self.show_scene(ui, editor, render_state, isolate);
+        editor.view_scope = scope;
+    }
+
+    fn show_scene(
+        &mut self,
+        ui: &mut egui::Ui,
+        editor: &mut Editor,
+        render_state: Option<&egui_wgpu::RenderState>,
+        isolate: Option<NodeHandle>,
+    ) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         self.pixels_per_point = ui.ctx().pixels_per_point();
@@ -589,12 +644,12 @@ impl Viewport {
         );
 
         let editor_camera = self.uses_editor_camera(editor);
-        if editor_camera {
+        if editor_camera && self.look_through.is_none() {
             self.navigate(ui, &response, editor);
         }
         let ortho_height = self.ortho_height();
         let camera = Camera3D {
-            fov_y_degrees: self.camera.fov,
+            fov_y_degrees: self.look_through.map_or(self.camera.fov, |(_, fov)| fov),
             near: 0.05,
             far: if ortho_height.is_some() {
                 ORTHO_BACK * 2.0 + 2000.0
@@ -632,14 +687,26 @@ impl Viewport {
             }
             (Some(renderer), Some(state)) => {
                 let lit = self.options.editor_lighting && editor.mode == Mode::Edit;
-                let saved = lit.then(|| brighten(editor.tree().world())).flatten();
+                let saved = match isolate {
+                    Some(root) => studio(editor, root),
+                    None => lit.then(|| brighten(editor.tree().world())).flatten(),
+                };
                 let start = std::time::Instant::now();
+                if let Some(mut occlusion) = editor
+                    .tree()
+                    .world()
+                    .resource_mut::<ab_engine::rendering::OcclusionCulling>(
+                ) {
+                    occlusion.debug = self.options.occlusion_buffer;
+                }
                 let texture = renderer.render(state, editor.tree().world(), width, height);
                 let world = editor.tree_mut().world_mut();
                 if let Some(environment) = saved {
                     world.insert_resource(environment);
                 }
+                world.remove_resource::<ab_engine::rendering::RenderIsolation>();
                 world.insert_resource(ab_engine::RenderStats(renderer.stats));
+                world.insert_resource(ab_engine::memory::GpuMemoryReport(renderer.gpu_memory));
                 if let Some(mut profiler) = world.resource_mut::<ab_engine::Profiler>() {
                     profiler.record("render", start.elapsed());
                 }
@@ -688,6 +755,9 @@ impl Viewport {
             if self.options.collision {
                 draw_collision(&painter, &projector, editor);
             }
+            if self.options.lod_levels {
+                draw_lod_levels(&painter, &projector, editor, rect);
+            }
             if self.options.icons && !editor.is_playing() {
                 draw_icons(&painter, &projector, editor);
             }
@@ -704,6 +774,16 @@ impl Viewport {
                 for node in editor.selected_nodes() {
                     let active = editor.selection == Some(node);
                     draw_selection(&painter, &projector, editor, node, active);
+                }
+            }
+            for line in &self.overlay {
+                if let (Some(a), Some(b)) =
+                    (projector.project(line.from), projector.project(line.to))
+                {
+                    painter.line_segment([a, b], Stroke::new(line.width, line.color));
+                    if line.joint {
+                        painter.circle_filled(a, line.width + 1.5, line.color);
+                    }
                 }
             }
         }
@@ -1344,6 +1424,12 @@ impl Viewport {
         ui.checkbox(&mut self.options.grid, t("menu.grid"));
         ui.checkbox(&mut self.options.icons, t("menu.node_icons"));
         ui.checkbox(&mut self.options.collision, t("menu.collision"));
+        ui.checkbox(&mut self.options.lod_levels, t("menu.lod_levels"));
+        ui.checkbox(
+            &mut self.options.occlusion_buffer,
+            t("menu.occlusion_buffer"),
+        )
+        .on_hover_text(t("menu.occlusion_buffer_hint"));
         ui.checkbox(
             &mut self.options.highlight_selection,
             t("menu.highlight_selection"),
@@ -1939,13 +2025,34 @@ impl Viewport {
             })
         });
 
+        if self.options.occlusion_buffer {
+            let painter = ui.painter_at(rect);
+            match self.renderer.as_ref().and_then(|r| r.occlusion.as_ref()) {
+                Some(buffer) => draw_occlusion_buffer(ui, &painter, rect, buffer),
+                None => {
+                    painter.text(
+                        Pos2::new(rect.right() - 10.0, rect.top() + 40.0),
+                        egui::Align2::RIGHT_TOP,
+                        t("viewport.occlusion_off"),
+                        egui::FontId::proportional(11.5),
+                        theme::TEXT_DIM,
+                    );
+                }
+            }
+        }
         if self.options.stats {
             let stats = self.stats();
             let fps = ui.ctx().input(|i| 1.0 / i.stable_dt.max(1e-4));
-            let text = format!(
+            let mut text = format!(
                 "{fps:.0} FPS\n{} objects · {} draws · {} culled\n{} lights · {} particles",
                 stats.objects, stats.draw_calls, stats.culled, stats.lights, stats.particles
             );
+            if stats.lod_reduced + stats.lod_culled + stats.hlod_proxies + stats.occluded > 0 {
+                text.push_str(&format!(
+                    "\n{} LOD · {} LOD culled · {} HLOD · {} occluded",
+                    stats.lod_reduced, stats.lod_culled, stats.hlod_proxies, stats.occluded
+                ));
+            }
             let painter = ui.painter_at(rect);
             let galley = painter.layout_no_wrap(
                 text,
@@ -2226,6 +2333,78 @@ pub fn key_code(key: egui::Key) -> Option<KeyCode> {
 }
 
 /// Brightens the scene's environment for editing; returns the original to restore.
+/// Draws only `root` (and what is under it) under studio lighting: a neutral background, no
+/// fog, an even ambient and a key light. Returns the scene's environment to put back.
+fn studio(editor: &mut Editor, root: NodeHandle) -> Option<Environment> {
+    let floor = studio_floor(editor, root);
+    let world = editor.tree_mut().world_mut();
+    world.insert_resource(ab_engine::rendering::RenderIsolation {
+        root: root.entity(),
+        studio_light: true,
+        floor,
+    });
+    let mut environment = world.resource_mut::<Environment>()?;
+    let original = environment.clone();
+    let post = original.post;
+    *environment = Environment {
+        background: Color::rgb(0.105, 0.11, 0.125),
+        ambient_color: Color::rgb(0.8, 0.84, 0.92),
+        ambient_energy: 0.55,
+        ..Default::default()
+    };
+    // The look of the game's image stays (tonemapping, exposure, bloom for glowing
+    // effects); what is about the place goes.
+    environment.post.tonemap = post.tonemap;
+    environment.post.exposure = post.exposure;
+    environment.post.bloom = post.bloom;
+    Some(original)
+}
+
+/// A plain floor under `root`: at the bottom of its meshes (at the node for an effect),
+/// wide enough that its edge stays out of view. Its mesh and material are made once.
+fn studio_floor(
+    editor: &mut Editor,
+    root: NodeHandle,
+) -> Option<(
+    ab_engine::rendering::MeshHandle,
+    ab_engine::rendering::MaterialHandle,
+    Affine3A,
+)> {
+    let tree = editor.tree();
+    let bounds = tree.subtree_bounds(root);
+    let at = tree.global_position(root)?;
+    let (center, base, size) = match bounds {
+        Some(b) => (b.center(), b.min.y, b.size().x.max(b.size().z).max(1.0)),
+        None => (at, at.y, 2.0),
+    };
+    let assets_id = tree.world().resource::<RenderAssets>()?.id();
+    let handles = match editor.studio_floor {
+        Some((id, mesh, material)) if id == assets_id => (mesh, material),
+        _ => {
+            let mut assets = editor.tree().world().resource_mut::<RenderAssets>()?;
+            let mesh = assets
+                .add_mesh(ab_engine::rendering::Mesh::plane(1.0, 1))
+                .ok()?;
+            let material = assets.add_material(ab_engine::rendering::Material {
+                albedo: Color::rgb(0.075, 0.08, 0.09),
+                roughness: 0.95,
+                ..Default::default()
+            });
+            drop(assets);
+            editor.studio_floor = Some((assets_id, mesh, material));
+            (mesh, material)
+        }
+    };
+    let extent = size * 12.0;
+    let place = Affine3A::from_scale_rotation_translation(
+        Vec3::new(extent, 1.0, extent),
+        ab_engine::core::Quat::IDENTITY,
+        // A hair under the feet: no flicker where they touch it.
+        Vec3::new(center.x, base - 0.002, center.z),
+    );
+    Some((handles.0, handles.1, place))
+}
+
 fn brighten(world: &ab_engine::ecs::World) -> Option<Environment> {
     let mut environment = world.resource_mut::<Environment>()?;
     let original = environment.clone();
@@ -2320,7 +2499,7 @@ fn pick(editor: &Editor, projector: &Projector, pos: Pos2) -> Option<NodeHandle>
 /// collision shape (so a trigger volume does not hide the objects inside it).
 fn hit(editor: &Editor, projector: &Projector, pos: Pos2) -> Option<Hit> {
     let tree = editor.tree();
-    let nodes = tree.subtree(editor.scene_root);
+    let nodes = tree.subtree(editor.view_root());
     let found = |part: NodeHandle| selectable_owner(editor, part).map(|owner| Hit { owner, part });
     let mut best_icon: Option<(f32, NodeHandle)> = None;
     for &node in &nodes {
@@ -2424,7 +2603,7 @@ fn surface_at(editor: &Editor, projector: &Projector, pos: Pos2) -> crate::build
     let (origin, dir) = projector.ray(pos);
     let mut best: Option<(f32, Vec3, NodeHandle)> = None;
     if let Some(assets) = tree.world().resource::<RenderAssets>() {
-        for node in tree.subtree(editor.scene_root) {
+        for node in tree.subtree(editor.view_root()) {
             if !tree.is_visible_in_tree(node) {
                 continue;
             }
@@ -2637,7 +2816,7 @@ fn icon_shown(editor: &Editor, node: NodeHandle, class: &str) -> bool {
 
 fn draw_icons(painter: &egui::Painter, projector: &Projector, editor: &Editor) {
     let tree = editor.tree();
-    for node in tree.subtree(editor.scene_root) {
+    for node in tree.subtree(editor.view_root()) {
         let Some(class) = tree
             .class_name(node)
             .filter(|c| icon_shown(editor, node, c))
@@ -2732,7 +2911,7 @@ fn draw_box(painter: &egui::Painter, projector: &Projector, corners: &[Vec3; 8],
 fn marquee_nodes(editor: &Editor, projector: &Projector, rect: Rect) -> Vec<NodeHandle> {
     let tree = editor.tree();
     let mut found = Vec::new();
-    for node in tree.subtree(editor.scene_root) {
+    for node in tree.subtree(editor.view_root()) {
         if node == editor.scene_root || !tree.is_visible_in_tree(node) {
             continue;
         }
@@ -2814,6 +2993,28 @@ fn draw_selection(
         }
     }
     for &n in &nodes {
+        // A post-processing volume: its box, and where it has faded out.
+        let volume = tree
+            .component::<ab_engine::rendering::PostVolume>(n)
+            .map(|v| *v);
+        if let (Some(volume), Some(global)) = (volume, tree.global_transform(n)) {
+            if !volume.global {
+                let h = volume.half_extents;
+                draw_box(painter, projector, &box_corners(&global, -h, h), stroke);
+                if volume.blend_distance > 0.0 {
+                    let (scale, _, _) = global.to_scale_rotation_translation();
+                    let b = Vec3::splat(volume.blend_distance) / scale.abs().max(Vec3::splat(1e-3));
+                    let faded = Stroke::new(1.0_f32, stroke.color.gamma_multiply(0.35));
+                    draw_box(
+                        painter,
+                        projector,
+                        &box_corners(&global, -h - b, h + b),
+                        faded,
+                    );
+                }
+                any = true;
+            }
+        }
         let Some(mesh) = tree.component::<MeshInstance3D>(n).map(|m| *m) else {
             continue;
         };
@@ -2840,6 +3041,113 @@ fn draw_selection(
             painter.circle_stroke(at, 14.0, stroke);
         }
     }
+}
+
+/// The level of detail each mesh with levels is drawn at, from this view.
+fn draw_lod_levels(painter: &egui::Painter, projector: &Projector, editor: &Editor, rect: Rect) {
+    use ab_engine::rendering::MeshLod;
+    let tree = editor.tree();
+    let Some(assets) = tree.world().resource::<RenderAssets>() else {
+        return;
+    };
+    let nodes: Vec<NodeHandle> = tree
+        .world()
+        .query::<(ab_engine::ecs::Entity, &MeshLod)>()
+        .iter()
+        .map(|(e, _)| NodeHandle::from_entity(e))
+        .collect();
+    for node in nodes {
+        let (Some(lod), Some(mesh), Some(global)) = (
+            tree.component::<MeshLod>(node).map(|l| l.clone()),
+            tree.component::<MeshInstance3D>(node).map(|m| *m),
+            tree.global_transform(node),
+        ) else {
+            continue;
+        };
+        let Some(aabb) = assets.mesh_aabb(mesh.mesh) else {
+            continue;
+        };
+        let corners = box_corners(&global, aabb.min, aabb.max);
+        let projected: Vec<Pos2> = corners
+            .iter()
+            .filter_map(|&c| projector.project(c))
+            .collect();
+        if projected.len() < 8 {
+            continue;
+        }
+        // The fraction of the view's height the box covers.
+        let (top, bottom) = projected
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(t, b), p| {
+                (t.min(p.y), b.max(p.y))
+            });
+        let size = (bottom - top) / rect.height().max(1.0);
+        let center = projected.iter().fold(Vec2::ZERO, |a, p| a + p.to_vec2()) / 8.0;
+        let (text, color) = match lod.level(size) {
+            Some(0) => ("LOD 0".to_owned(), theme::PLAY),
+            Some(level) => (
+                format!("LOD {level}"),
+                [theme::ACCENT, theme::WARN, theme::ERROR][(level - 1).min(2)],
+            ),
+            None => ("culled".to_owned(), theme::TEXT_DIM),
+        };
+        painter.text(
+            center.to_pos2(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::monospace(11.0),
+            color,
+        );
+    }
+}
+
+/// The occlusion buffer, small in a corner (near is white, far is dark), with its counts.
+fn draw_occlusion_buffer(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    buffer: &ab_engine::rendering::OcclusionDebug,
+) {
+    let pixels: Vec<Color32> = buffer
+        .depth
+        .iter()
+        .map(|&d| {
+            // Depth is packed near 1: spread it out.
+            let v = ((1.0 - d).clamp(0.0, 1.0).powf(0.25) * 255.0) as u8;
+            Color32::from_gray(v)
+        })
+        .collect();
+    let image = egui::ColorImage::new([buffer.width as usize, buffer.height as usize], pixels);
+    let texture = ui
+        .ctx()
+        .load_texture("occlusion-buffer", image, egui::TextureOptions::NEAREST);
+    let size = Vec2::new(buffer.width as f32, buffer.height as f32) * 1.5;
+    let at = Rect::from_min_size(
+        Pos2::new(rect.right() - size.x - 10.0, rect.top() + 40.0),
+        size,
+    );
+    painter.image(
+        texture.id(),
+        at,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    painter.rect_stroke(
+        at,
+        0.0,
+        Stroke::new(1.0_f32, theme::BORDER),
+        egui::StrokeKind::Outside,
+    );
+    painter.text(
+        at.left_bottom() + Vec2::new(0.0, 4.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{} occluders · {} triangles · {} culled",
+            buffer.occluders, buffer.triangles, buffer.culled
+        ),
+        egui::FontId::monospace(10.5),
+        Color32::from_gray(210),
+    );
 }
 
 /// A thin outline around the object under the pointer.
@@ -2953,7 +3261,7 @@ fn draw_mesh_bounds(painter: &egui::Painter, projector: &Projector, editor: &Edi
 fn draw_collision(painter: &egui::Painter, projector: &Projector, editor: &Editor) {
     let tree = editor.tree();
     let stroke = Stroke::new(1.0_f32, theme::PLAY.gamma_multiply(0.85));
-    for node in tree.subtree(editor.scene_root) {
+    for node in tree.subtree(editor.view_root()) {
         if let (Some(shape), Some(global)) = (
             tree.component::<CollisionShape3D>(node),
             tree.global_transform(node),

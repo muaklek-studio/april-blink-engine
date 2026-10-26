@@ -101,6 +101,17 @@ fn locomotion_node(tree: &mut SceneTree, node: NodeHandle) -> Result<NodeHandle,
     Ok(player)
 }
 
+/// The node with the state machine: `node`, or the first in its subtree.
+fn state_machine_node(tree: &SceneTree, node: NodeHandle) -> Result<NodeHandle, CallError> {
+    tree.subtree(node)
+        .into_iter()
+        .find(|&n| {
+            tree.component::<crate::state_machine::StateMachine>(n)
+                .is_some()
+        })
+        .ok_or_else(|| CallError::Failed(format!("{node} has no state machine")))
+}
+
 fn game_config<'t>(c: &'t Call<'_>) -> Result<std::cell::Ref<'t, GameConfig>, CallError> {
     c.tree.world().resource::<GameConfig>().ok_or_else(|| {
         CallError::failed("the game has no config (config = \"config.toml\" in game.toml)")
@@ -117,6 +128,83 @@ fn path_of<'t>(
 }
 
 pub(super) fn add(b: &mut Builder) {
+    b.add("cutscene.play", |c| {
+        let node = c.node(0)?;
+        if !crate::cutscene::play(c.tree, node) {
+            return Err(CallError::Failed(format!("{node} is not a Cutscene")));
+        }
+        Ok(())
+    });
+    b.add("cutscene.stop", |c| {
+        let node = c.node(0)?;
+        crate::cutscene::stop(c.tree, node);
+        Ok(())
+    });
+    b.add("cutscene.playing", |c| {
+        let node = c.node(0)?;
+        let playing = c
+            .tree
+            .component::<crate::cutscene::CutscenePlayer>(node)
+            .is_some_and(|p| p.playing);
+        c.push_bool(playing);
+        Ok(())
+    });
+    b.add("cutscene.time", |c| {
+        let node = c.node(0)?;
+        let time = c
+            .tree
+            .component::<crate::cutscene::CutscenePlayer>(node)
+            .map_or(0.0, |p| p.time);
+        c.push_f32(time);
+        Ok(())
+    });
+    b.add("state_machine.set", |c| {
+        let node = state_machine_node(c.tree, c.node(0)?)?;
+        let (name, value) = (c.str(1)?, c.f32(2)?);
+        let mut machine = c
+            .tree
+            .component_mut::<crate::state_machine::StateMachine>(node)
+            .expect("found");
+        if !machine.set(name, value) {
+            return Err(CallError::Failed(format!(
+                "the state machine has no parameter `{name}`"
+            )));
+        }
+        Ok(())
+    });
+    b.add("state_machine.get", |c| {
+        let node = state_machine_node(c.tree, c.node(0)?)?;
+        let value = c
+            .tree
+            .component::<crate::state_machine::StateMachine>(node)
+            .and_then(|m| m.get(c.str(1).ok()?));
+        c.push_f32(value.unwrap_or(0.0));
+        Ok(())
+    });
+    b.add("state_machine.state", |c| {
+        let node = state_machine_node(c.tree, c.node(0)?)?;
+        let name = c
+            .tree
+            .component::<crate::state_machine::StateMachine>(node)
+            .and_then(|m| m.state_name().map(str::to_owned))
+            .unwrap_or_default();
+        c.push_str(&name);
+        Ok(())
+    });
+    b.add("ik.enabled", |c| {
+        let (node, on) = (c.node(0)?, c.bool(1)?);
+        let mut ik = c
+            .tree
+            .component_mut::<crate::ik::IkChains>(node)
+            .ok_or_else(|| CallError::Failed(format!("{node} has no IK chains")))?;
+        ik.enabled = on;
+        Ok(())
+    });
+    b.add("ik.debug", |c| {
+        let on = c.bool(0)?;
+        c.tree.world_mut().insert_resource(crate::ik::IkDebug(on));
+        Ok(())
+    });
     b.add("path.length", |c| {
         let node = c.node(0)?;
         let scale = c

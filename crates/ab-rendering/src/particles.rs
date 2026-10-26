@@ -28,10 +28,27 @@ pub struct ParticleInstance {
 #[derive(Debug, Clone, Default)]
 pub struct ParticleDrawList {
     pub instances: Vec<ParticleInstance>,
+    /// Which emitter drew which instances (to draw some emitters alone).
+    pub sources: Vec<(ab_ecs::Entity, std::ops::Range<usize>)>,
 }
 
 impl ParticleDrawList {
     pub fn clear(&mut self) {
         self.instances.clear();
+        self.sources.clear();
+    }
+
+    /// The instances of the emitters `keep` accepts.
+    pub fn filtered(&self, keep: impl Fn(ab_ecs::Entity) -> bool) -> Self {
+        let mut out = Self::default();
+        for (entity, range) in &self.sources {
+            if keep(*entity) {
+                let start = out.instances.len();
+                out.instances
+                    .extend_from_slice(&self.instances[range.clone()]);
+                out.sources.push((*entity, start..out.instances.len()));
+            }
+        }
+        out
     }
 }

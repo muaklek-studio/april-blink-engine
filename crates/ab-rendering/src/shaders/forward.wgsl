@@ -38,6 +38,7 @@ struct Frame {
     inverse_view_proj: mat4x4<f32>,
     background: vec4<f32>,      // rgb
     shafts: vec4<f32>,          // light shafts: intensity, anisotropy, max distance, density
+    time: vec4<f32>,            // seconds since start, unused, unused, unused
 };
 
 // The distance written for the sky and the cleared background.
@@ -58,6 +59,8 @@ struct Material {
     emission: vec4<f32>,
     params: vec4<f32>,          // metallic, roughness, unshaded, alpha cutoff (0 = off)
     extra: vec4<f32>,           // normal scale, has normal map, unused, unused
+    custom0: vec4<f32>,         // a custom shader's parameters 1-4
+    custom1: vec4<f32>,         // and 5-8
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -211,6 +214,35 @@ fn shadow_factor(layer: i32, world_position: vec3<f32>, normal: vec3<f32>, norma
     return lit / 9.0;
 }
 
+// What a surface looks like at a pixel; a custom shader's `surface` function changes it.
+struct Surface {
+    albedo: vec3<f32>,
+    alpha: f32,
+    emission: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    // World space, facing the camera's side.
+    normal: vec3<f32>,
+    unshaded: bool,
+};
+
+// Where the pixel is, for a custom shader.
+struct SurfaceInput {
+    world_position: vec3<f32>,
+    // The mesh's normal (world space, no normal map), facing the camera's side.
+    normal: vec3<f32>,
+    uv: vec2<f32>,
+    // From the surface to the camera (unit length).
+    view: vec3<f32>,
+    // Seconds since the game started.
+    time: f32,
+    front_facing: bool,
+    // The material's values for the shader's `// param` lines.
+    params: Params,
+};
+
+//@SURFACE
+
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     let material = materials[in.material];
@@ -221,31 +253,51 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     let normal_sample = textureSample(normal_texture, normal_sampler, in.uv).xyz;
     let emission_sample = textureSample(emission_texture, emission_sampler, in.uv).rgb;
 
-    let base = material.albedo * albedo_sample;
-    if material.params.w > 0.0 && base.a < material.params.w {
-        discard;
-    }
-    let albedo = base.rgb;
-    let emission = material.emission.rgb * emission_sample;
-
-    if material.params.z > 0.5 {
-        return vec4<f32>(apply_fog(albedo + emission, in.world_position), view_distance(in.world_position));
-    }
-
-    var n = normalize(in.normal);
+    let base_color = material.albedo * albedo_sample;
+    var geometric = normalize(in.normal);
+    var mapped = geometric;
     if material.extra.y > 0.5 {
-        let t = normalize(in.tangent.xyz - n * dot(n, in.tangent.xyz));
-        let b = cross(n, t) * in.tangent.w;
+        let t = normalize(in.tangent.xyz - geometric * dot(geometric, in.tangent.xyz));
+        let b = cross(geometric, t) * in.tangent.w;
         var tn = normal_sample * 2.0 - vec3<f32>(1.0);
         tn = vec3<f32>(tn.xy * material.extra.x, tn.z);
-        n = normalize(mat3x3<f32>(t, b, n) * tn);
+        mapped = normalize(mat3x3<f32>(t, b, geometric) * tn);
     }
     if !front_facing {
-        n = -n;
+        geometric = -geometric;
+        mapped = -mapped;
     }
     let v = normalize(frame.camera_position.xyz - in.world_position);
-    let metallic = clamp(material.params.x * mr_sample.b, 0.0, 1.0);
-    let roughness = clamp(material.params.y * mr_sample.g, 0.045, 1.0);
+
+    var base: Surface;
+    base.albedo = base_color.rgb;
+    base.alpha = base_color.a;
+    base.emission = material.emission.rgb * emission_sample;
+    base.metallic = material.params.x * mr_sample.b;
+    base.roughness = material.params.y * mr_sample.g;
+    base.normal = mapped;
+    base.unshaded = material.params.z > 0.5;
+    var input: SurfaceInput;
+    input.world_position = in.world_position;
+    input.normal = geometric;
+    input.uv = in.uv;
+    input.view = v;
+    input.time = frame.time.x;
+    input.front_facing = front_facing;
+    input.params = shader_params(material);
+    let s = surface(input, base);
+
+    if material.params.w > 0.0 && s.alpha < material.params.w {
+        discard;
+    }
+    let albedo = s.albedo;
+    let emission = s.emission;
+    if s.unshaded {
+        return vec4<f32>(apply_fog(albedo + emission, in.world_position), view_distance(in.world_position));
+    }
+    let n = normalize(s.normal);
+    let metallic = clamp(s.metallic, 0.0, 1.0);
+    let roughness = clamp(s.roughness, 0.045, 1.0);
 
     var color = frame.ambient.rgb * albedo * (1.0 - 0.5 * metallic);
 

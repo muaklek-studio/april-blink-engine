@@ -12,6 +12,7 @@ ab-core.workspace = true
 ab-ecs.workspace = true
 ab-scene.workspace = true
 bytemuck = { version = "1.25", features = ["derive"] }
+naga = { version = "30.0", features = ["wgsl-in"] }
 pollster = "1.0"
 thiserror.workspace = true
 tracing.workspace = true

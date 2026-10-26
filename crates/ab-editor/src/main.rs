@@ -17,6 +17,11 @@
 // editor before its window opens is shown in a message box otherwise.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// Counts the heap for the memory profiler (see `ab_engine::memory`).
+#[global_allocator]
+static ALLOCATOR: ab_engine::core::memory::CountingAllocator =
+    ab_engine::core::memory::CountingAllocator;
+
 mod about;
 mod app;
 mod asset_sync;

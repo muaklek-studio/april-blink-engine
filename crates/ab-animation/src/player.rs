@@ -51,6 +51,21 @@ impl AnimationLibrary {
         self.clips.get(handle.index())
     }
 
+    /// Bytes of every clip's keys (times and values).
+    pub fn memory_bytes(&self) -> usize {
+        self.clips
+            .iter()
+            .flat_map(|c| &c.channels)
+            .map(|ch| {
+                let values = match &ch.keyframes {
+                    crate::Keyframes::Translation(v) | crate::Keyframes::Scale(v) => v.len() * 12,
+                    crate::Keyframes::Rotation(q) => q.len() * 16,
+                };
+                ch.times.len() * 4 + values
+            })
+            .sum()
+    }
+
     pub fn len(&self) -> usize {
         self.clips.len()
     }

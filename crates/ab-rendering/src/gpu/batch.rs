@@ -6,6 +6,7 @@
 
 use crate::assets::{MaterialHandle, MeshHandle};
 use crate::extract::DrawItem;
+use crate::shader::ShaderHandle;
 use std::ops::Range;
 
 /// How a draw item is rendered; `None` from the classifier means "cannot be drawn".
@@ -16,6 +17,8 @@ pub(crate) struct DrawClass {
     /// The model transform has a negative determinant (mirrored), which flips the winding of
     /// its triangles: front faces are clockwise on screen.
     pub mirrored: bool,
+    /// The material's custom surface shader (one that builds), drawn with its own pipeline.
+    pub shader: Option<ShaderHandle>,
 }
 
 /// A run of consecutive objects drawn with one instanced call.
@@ -84,6 +87,7 @@ impl BatchPlan {
                     skinned: class.skinned,
                     double_sided: false,
                     mirrored: false,
+                    shader: None,
                 };
                 push_run(&mut self.shadow, shadow_class, draw, instance, false);
             }
@@ -130,6 +134,7 @@ mod tests {
         skinned: false,
         double_sided: false,
         mirrored: false,
+        shader: None,
     };
 
     fn item(mesh: u32, material: u32, in_view: bool, cast_shadows: bool) -> DrawItem {
@@ -140,6 +145,11 @@ mod tests {
             cast_shadows,
             in_view,
             joints: None,
+            lod: None,
+            hlod: None,
+            lod_level: 0,
+            occluded: false,
+            world_bounds: None,
         }
     }
 
@@ -201,6 +211,7 @@ mod tests {
             skinned: true,
             double_sided: false,
             mirrored: false,
+            shader: None,
         };
         plan.build(&draws, |d| {
             if d.mesh.0 == 9 {

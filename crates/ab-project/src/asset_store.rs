@@ -745,6 +745,7 @@ mod tests {
             config: None,
             package: None,
             lfs: true,
+            export: Default::default(),
         }
     }
 
@@ -985,6 +986,7 @@ mod tests {
         assert!(attributes.contains("/packed-assets/** filter=lfs diff=lfs merge=lfs -text"));
         let plain = Project {
             lfs: false,
+            export: Default::default(),
             ..p.clone()
         };
         assert!(gitattributes_block(&plain).contains("/packed-assets/** binary -delta"));
@@ -996,6 +998,7 @@ mod tests {
         let p = project("commit");
         let plain = Project {
             lfs: false,
+            export: Default::default(),
             ..p.clone()
         };
         assert!(prepare_commit(&plain).is_ok());

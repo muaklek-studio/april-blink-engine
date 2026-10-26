@@ -10,6 +10,8 @@
 //!   nodes, meshes, vertices, triangles, materials, textures, skin and animations.
 //! * Materials: on a sphere, a cube or a plane, under a light you can turn; their color,
 //!   roughness, metallic, emission and textures.
+//! * Custom shaders (`.wgsl`): the code beside a preview of it, checked as you type (the
+//!   error at its line), animated, saved with Ctrl+S; the scene picks up the saved file.
 
 use crate::preview::{Orbit, Previewer, Shape, Subject, SubjectInfo};
 use crate::project::AssetKind;
@@ -59,9 +61,47 @@ struct RenderView {
     texture: Option<egui::TextureId>,
     info: Option<SubjectInfo>,
     material: Option<MaterialDesc>,
+    /// A custom shader's code, being edited.
+    shader: Option<ShaderEdit>,
     /// What the image shows: drawn again only when the subject, the view or the size
     /// changes.
     drawn: Option<(Subject, Orbit, (u32, u32))>,
+}
+
+/// A shader file in the viewer: its code as edited and as saved, and whether it builds.
+struct ShaderEdit {
+    code: String,
+    saved: String,
+    error: Option<ab_engine::rendering::ShaderError>,
+    /// The preview plays `input.time`.
+    animate: bool,
+    started: std::time::Instant,
+}
+
+impl ShaderEdit {
+    fn new(code: String) -> Self {
+        let error = ab_engine::rendering::shader::validate(&code).err();
+        Self {
+            saved: code.clone(),
+            code,
+            error,
+            animate: true,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn dirty(&self) -> bool {
+        self.code != self.saved
+    }
+
+    /// Writes the code to `file`; the preview and the scene read it again.
+    fn save(&mut self, file: &Path) -> Result<(), String> {
+        // Whole or not at all: the scene reloads the file as soon as it changes.
+        ab_engine::core::fs::atomic_write(file, &self.code)
+            .map_err(|e| format!("{}: {e}", file.display()))?;
+        self.saved = self.code.clone();
+        Ok(())
+    }
 }
 
 // The variants' sizes do not matter: a few viewer windows at most.
@@ -120,7 +160,11 @@ const MAX_WINDOWS: usize = 6;
 pub fn can_view(kind: AssetKind) -> bool {
     matches!(
         kind,
-        AssetKind::Image | AssetKind::Model | AssetKind::Material | AssetKind::Scene
+        AssetKind::Image
+            | AssetKind::Model
+            | AssetKind::Material
+            | AssetKind::Shader
+            | AssetKind::Scene
     )
 }
 
@@ -134,6 +178,7 @@ fn body(project: &Path, path: &str, kind: AssetKind) -> Body {
             texture: None,
             info: None,
             material: None,
+            shader: None,
             drawn: None,
         })
     };
@@ -167,6 +212,15 @@ fn body(project: &Path, path: &str, kind: AssetKind) -> Body {
                 view.material = std::fs::read_to_string(&file)
                     .ok()
                     .and_then(|t| MaterialDesc::from_toml(&t).ok());
+            }
+            body
+        }
+        AssetKind::Shader => {
+            let mut body = render(Subject::Material(path.to_owned(), Shape::Sphere));
+            if let Body::Render(view) = &mut body {
+                view.shader = Some(ShaderEdit::new(
+                    std::fs::read_to_string(&file).unwrap_or_default(),
+                ));
             }
             body
         }
@@ -305,6 +359,12 @@ impl ViewerWindow {
                             Body::Render(view) => {
                                 view.info = None;
                                 view.drawn = None;
+                                if view.shader.is_some() {
+                                    view.shader = Some(ShaderEdit::new(
+                                        std::fs::read_to_string(project.join(&self.open.path))
+                                            .unwrap_or_default(),
+                                    ));
+                                }
                             }
                             body @ Body::Image(_) => {
                                 *body = self::body(project, &self.open.path, self.open.kind)
@@ -318,19 +378,32 @@ impl ViewerWindow {
                 }
             }
         });
-        crate::tool_window::side(
-            ui,
-            (&key, "details"),
-            false,
-            250.0,
-            icon::INFO,
-            &crate::i18n::t("viewer.details"),
-            |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| details(ui, &mut self.open));
-            },
-        );
+        let editing_shader = matches!(&self.open.body, Body::Render(v) if v.shader.is_some());
+        if editing_shader {
+            crate::tool_window::side(
+                ui,
+                (&key, "shader"),
+                false,
+                520.0,
+                icon::CODE,
+                &crate::i18n::t("viewer.shader_code"),
+                |ui| shader_editor(ui, &mut self.open, project),
+            );
+        } else {
+            crate::tool_window::side(
+                ui,
+                (&key, "details"),
+                false,
+                250.0,
+                icon::INFO,
+                &crate::i18n::t("viewer.details"),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| details(ui, &mut self.open));
+                },
+            );
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_0))
             .show(ui, |ui| match &mut self.open.body {
@@ -409,6 +482,14 @@ fn toolbar(ui: &mut egui::Ui, open: &mut Open, pinned: &mut bool) -> Option<Tool
                 }
                 ui.separator();
             }
+            if let Some(shader) = &mut view.shader {
+                ui.toggle_value(
+                    &mut shader.animate,
+                    format!("{}  {}", icon::PLAY, t("viewer.animate")),
+                )
+                .on_hover_text(t("viewer.animate_hint"));
+                ui.separator();
+            }
             if ui
                 .button(format!(
                     "{}  {}",
@@ -462,6 +543,107 @@ fn toolbar(ui: &mut egui::Ui, open: &mut Open, pinned: &mut bool) -> Option<Tool
         }
     });
     action
+}
+
+/// The shader's code: checked as it changes, its error shown at its line, saved with the
+/// button or Ctrl+S (the preview then draws the saved code).
+fn shader_editor(ui: &mut egui::Ui, open: &mut Open, project: &Path) {
+    use crate::i18n::t;
+    let Body::Render(view) = &mut open.body else {
+        return;
+    };
+    let Some(shader) = &mut view.shader else {
+        return;
+    };
+    let mut save = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+    ui.horizontal(|ui| {
+        let label = format!(
+            "{}  {}{}",
+            icon::FLOPPY_DISK,
+            t("dialog.save"),
+            if shader.dirty() { " •" } else { "" }
+        );
+        save |= ui
+            .add_enabled(shader.dirty(), egui::Button::new(label))
+            .clicked();
+        match &shader.error {
+            None => {
+                ui.label(
+                    RichText::new(format!("{}  {}", icon::CHECK_CIRCLE, t("viewer.shader_ok")))
+                        .color(theme::PLAY),
+                );
+            }
+            Some(_) => {
+                ui.label(
+                    RichText::new(format!("{}  {}", icon::WARNING, t("viewer.shader_error")))
+                        .color(theme::ERROR),
+                );
+            }
+        }
+    });
+    if let Some(error) = &shader.error {
+        ui.label(
+            RichText::new(error.to_string())
+                .monospace()
+                .color(theme::ERROR),
+        );
+    }
+    ui.label(
+        RichText::new(t("viewer.shader_hint"))
+            .small()
+            .color(theme::TEXT_DIM),
+    );
+    ui.add_space(2.0);
+    let error_line = shader.error.as_ref().and_then(|e| e.line);
+    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+        let mut job = egui::text::LayoutJob::default();
+        let font = egui::FontId::monospace(12.5);
+        for (i, line) in text.as_str().split_inclusive('\n').enumerate() {
+            let comment = line.trim_start().starts_with("//");
+            let mut format = egui::TextFormat::simple(
+                font.clone(),
+                if comment {
+                    theme::TEXT_DIM
+                } else {
+                    theme::TEXT
+                },
+            );
+            if error_line == Some(i as u32 + 1) {
+                format.background = theme::ERROR.gamma_multiply(0.3);
+            }
+            job.append(line, 0.0, format);
+        }
+        job.wrap.max_width = wrap;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    let edited = egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut shader.code)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(30)
+                    .layouter(&mut layouter),
+            )
+            .changed()
+        })
+        .inner;
+    if edited {
+        shader.error = ab_engine::rendering::shader::validate(&shader.code).err();
+    }
+    if save && shader.dirty() {
+        match shader.save(&project.join(&open.path)) {
+            Ok(()) => {
+                open.error = None;
+                // The preview reads the file again.
+                view.info = None;
+                view.drawn = None;
+                open.file_size = Some(shader.code.len() as u64);
+            }
+            Err(err) => open.error = Some(err),
+        }
+    }
 }
 
 fn details(ui: &mut egui::Ui, open: &mut Open) {
@@ -770,7 +952,12 @@ fn render_view(
     }
     if let (Some(target), Some(texture)) = (&view.target, view.texture) {
         let now = (view.subject.clone(), view.orbit, (width, height));
-        if view.drawn.as_ref() != Some(&now) {
+        let animating = view.shader.as_ref().filter(|s| s.animate);
+        if let Some(shader) = animating {
+            previewer.render_at(target, &view.orbit, shader.started.elapsed().as_secs_f64());
+            view.drawn = Some(now);
+            ui.ctx().request_repaint();
+        } else if view.drawn.as_ref() != Some(&now) {
             previewer.render(target, &view.orbit);
             view.drawn = Some(now);
         }

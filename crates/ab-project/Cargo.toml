@@ -16,6 +16,9 @@ toml.workspace = true
 flate2 = "1.1"
 crc32fast = "1.5"
 tar = { version = "0.4.46", default-features = false }
+# Icons and version information in Windows executables (no image decoding: PNG icons are
+# wrapped as they are).
+editpe = { version = "0.2.4", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

@@ -45,6 +45,8 @@ pub struct Project {
     /// Its packed assets go to Git LFS (`asset_lfs` in `game.toml`, on unless `false`; see
     /// [`crate::asset_store`]).
     pub lfs: bool,
+    /// What exports say about the game (`[export]`, see [`crate::export_settings`]).
+    pub export: crate::export_settings::ExportSettings,
 }
 
 impl Project {
@@ -94,6 +96,7 @@ impl Project {
                 .get("asset_lfs")
                 .and_then(toml::Value::as_bool)
                 .unwrap_or(true),
+            export: crate::export_settings::ExportSettings::from_table(&settings),
             package,
             root,
         })
@@ -146,8 +149,12 @@ impl Project {
         self.root.join("src")
     }
 
-    /// The version in `Cargo.toml` (`0.1.0` if it has none).
+    /// The version exports carry: `[export] version`, else the one in `Cargo.toml`
+    /// (`0.1.0` if it has none).
     pub fn version(&self) -> String {
+        if !self.export.version.is_empty() {
+            return self.export.version.clone();
+        }
         read_manifest(&self.root.join("Cargo.toml"))
             .ok()
             .and_then(|manifest| package_field(&manifest, "version"))

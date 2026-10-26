@@ -108,6 +108,17 @@ fn common(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
     if let Some(groups) = tree.component::<Groups>(node) {
         desc.groups = groups.0.clone();
     }
+    super::lod::describe(tree, node, desc);
+    desc.state_machine = tree
+        .component::<crate::state_machine::StateMachine>(node)
+        .map(|m| m.file.clone());
+    desc.rig = tree
+        .component::<crate::rig::Rig>(node)
+        .and_then(|r| r.file.clone());
+    desc.ik = tree
+        .component::<crate::ik::IkChains>(node)
+        .map(|c| c.chains.clone())
+        .unwrap_or_default();
     desc.set_script_list(tree.script_names(node));
     desc.script_properties = desc
         .script_list()
@@ -139,6 +150,15 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
             super::generator::describe(tree, node, desc);
             class
         }
+        crate::cutscene::CUTSCENE => {
+            crate::cutscene::describe(tree, node, desc);
+            class
+        }
+        super::post_volume::POST_VOLUME => {
+            super::post_volume::describe(tree, node, desc);
+            class
+        }
+        super::lod::HLOD => class,
         "Ragdoll" => {
             let active = tree.component::<Ragdoll>(node).is_some_and(|r| r.active);
             let rig = tree

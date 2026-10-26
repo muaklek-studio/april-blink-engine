@@ -27,6 +27,7 @@ pub mod archive;
 pub mod asset_store;
 mod engine;
 pub mod export;
+pub mod export_settings;
 pub mod path;
 mod platform;
 pub mod process;

@@ -727,6 +727,72 @@ impl<'a> Tree<'a> {
             .unwrap_or(0)
     }
 
+    /// Plays a `Cutscene` node from its start: its camera takes over until it ends. The
+    /// node emits `cutscene_event` (with the event's name) for its signal events, and
+    /// `finished` at the end.
+    pub fn play_cutscene(&mut self, cutscene: Node) -> Result<(), Error> {
+        self.run(method!("cutscene.play"), &[cutscene.to_value()])
+    }
+
+    /// Stops a cutscene where it is (a skip): the camera is handed back, `finished` emitted.
+    pub fn stop_cutscene(&mut self, cutscene: Node) -> Result<(), Error> {
+        self.run(method!("cutscene.stop"), &[cutscene.to_value()])
+    }
+
+    pub fn is_cutscene_playing(&self, cutscene: Node) -> bool {
+        self.query::<bool>(method!("cutscene.playing"), &[cutscene.to_value()])
+            .unwrap_or(false)
+    }
+
+    /// Seconds since the cutscene started.
+    pub fn cutscene_time(&self, cutscene: Node) -> f32 {
+        self.query::<f32>(method!("cutscene.time"), &[cutscene.to_value()])
+            .unwrap_or(0.0)
+    }
+
+    /// Sets a parameter of the animation state machine on `node` (or in it): a number, a
+    /// bool as 0/1. The state machine picks its state from them each frame.
+    pub fn set_anim_param(&mut self, node: Node, name: &str, value: f32) -> Result<(), Error> {
+        self.run(
+            method!("state_machine.set"),
+            &[node.to_value(), name.to_value(), value.to_value()],
+        )
+    }
+
+    /// Fires a trigger of the animation state machine (used up by the transition it lets
+    /// through: a jump, an attack).
+    pub fn fire_anim_trigger(&mut self, node: Node, name: &str) -> Result<(), Error> {
+        self.set_anim_param(node, name, 1.0)
+    }
+
+    /// A parameter's value (0 when there is none).
+    pub fn anim_param(&self, node: Node, name: &str) -> f32 {
+        self.query::<f32>(
+            method!("state_machine.get"),
+            &[node.to_value(), name.to_value()],
+        )
+        .unwrap_or(0.0)
+    }
+
+    /// The state the animation state machine is in (empty when none).
+    pub fn anim_state(&self, node: Node) -> String {
+        self.query::<String>(method!("state_machine.state"), &[node.to_value()])
+            .unwrap_or_default()
+    }
+
+    /// Turns the node's IK chains on or off (off: the animation only).
+    pub fn set_ik_enabled(&mut self, node: Node, enabled: bool) -> Result<(), Error> {
+        self.run(
+            method!("ik.enabled"),
+            &[node.to_value(), enabled.to_value()],
+        )
+    }
+
+    /// Draws every IK chain, its target and pole (debugging).
+    pub fn set_ik_debug(&mut self, on: bool) -> Result<(), Error> {
+        self.run(method!("ik.debug"), &[on.to_value()])
+    }
+
     /// The length of a `Path3D` (metres, in the world).
     pub fn path_length(&self, path: Node) -> Result<f32, Error> {
         self.fetch::<f64>(method!("path.length"), &[path.to_value()])?

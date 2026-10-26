@@ -7,6 +7,7 @@ pub mod fs;
 pub mod jobs;
 pub mod logging;
 pub mod math;
+pub mod memory;
 pub mod time;
 pub mod types;
 pub mod utils;

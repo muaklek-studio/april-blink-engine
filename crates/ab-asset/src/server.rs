@@ -107,6 +107,19 @@ impl AssetServer {
             .map_err(|source| AssetError::Io { path, source })
     }
 
+    /// Sounds kept loaded: how many, and their bytes.
+    pub fn audio_memory(&self) -> (usize, usize) {
+        (
+            self.audio.len(),
+            self.audio.values().map(AudioStream::memory_bytes).sum(),
+        )
+    }
+
+    /// Models (glTF scenes) kept loaded.
+    pub fn loaded_models(&self) -> usize {
+        self.scenes.len()
+    }
+
     /// Forgets what was loaded from `path` (its file changed): the next load reads it again.
     pub fn evict(&mut self, path: &str) {
         if let Ok(path) = Self::normalize(path) {

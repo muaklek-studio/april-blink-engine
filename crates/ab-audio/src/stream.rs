@@ -36,6 +36,15 @@ pub(crate) enum StreamData {
 }
 
 impl AudioStream {
+    /// Bytes it holds: the decoded samples, or the encoded file while streaming.
+    pub fn memory_bytes(&self) -> usize {
+        match &self.data {
+            // Stereo f32 frames.
+            StreamData::Decoded(data) => data.frames.len() * 8,
+            StreamData::Streaming { bytes, .. } => bytes.len(),
+        }
+    }
+
     /// Decodes an encoded file held in memory.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, AudioError> {
         let data = StaticSoundData::from_cursor(Cursor::new(bytes.into()))

@@ -54,6 +54,7 @@ enum CreateKind {
     Script,
     Folder,
     Material,
+    Shader,
 }
 
 enum Action {
@@ -429,6 +430,21 @@ impl AssetsPanel {
                 });
                 ui.close();
             }
+            let shader = ui.add_enabled(
+                self.folder != SCRIPTS,
+                egui::Button::new(format!("{}  {}", icon::SPARKLE, t("assets.shader_item"))),
+            );
+            if shader.clicked() {
+                self.create = Some(Create {
+                    kind: CreateKind::Shader,
+                    name: "new_shader".into(),
+                    template: None,
+                    open_after: true,
+                    error: None,
+                    focus: true,
+                });
+                ui.close();
+            }
         }
     }
 
@@ -444,6 +460,7 @@ impl AssetsPanel {
                 CreateKind::Script => (icon::FILE_RS, t("assets.new_script")),
                 CreateKind::Folder => (icon::FOLDER_PLUS, t("assets.new_folder")),
                 CreateKind::Material => (icon::DROP_HALF, t("assets.new_material")),
+                CreateKind::Shader => (icon::SPARKLE, t("assets.new_shader")),
             };
             ui.heading(format!("{glyph}  {title}"));
             ui.add_space(4.0);
@@ -476,6 +493,12 @@ impl AssetsPanel {
                     tf(
                         "assets.material_preview",
                         &[("path", &join(&self.folder, &file))],
+                    )
+                }),
+                CreateKind::Shader => folder_name(&create.name).map(|name| {
+                    tf(
+                        "assets.shader_preview",
+                        &[("path", &join(&self.folder, &format!("{name}.wgsl")))],
                     )
                 }),
             };
@@ -608,6 +631,26 @@ impl AssetsPanel {
                 editor.assets.request_rescan();
                 self.selected = Some(relative.clone());
                 editor.info(tf("assets.material_created", &[("path", &relative)]));
+                Ok(())
+            }
+            CreateKind::Shader => {
+                let name = folder_name(name)?;
+                let relative = join(&self.folder, &format!("{name}.wgsl"));
+                let path = editor.project().join(&relative);
+                if path.exists() {
+                    return Err(tf("assets.exists", &[("path", &relative)]));
+                }
+                editor
+                    .write_project_file(&path, ab_engine::rendering::shader::TEMPLATE)
+                    .map_err(|e| e.to_string())?;
+                editor.assets.request_rescan();
+                self.selected = Some(relative.clone());
+                if open_after {
+                    let _ = self
+                        .viewer
+                        .open(editor.project(), &relative, AssetKind::Shader);
+                }
+                editor.info(tf("assets.shader_created", &[("path", &relative)]));
                 Ok(())
             }
             CreateKind::Folder => {
@@ -1067,6 +1110,9 @@ fn kind_color(kind: AssetKind) -> egui::Color32 {
         AssetKind::Scene => theme::ACCENT,
         AssetKind::Model => egui::Color32::from_rgb(120, 190, 255),
         AssetKind::Material => egui::Color32::from_rgb(110, 220, 190),
+        AssetKind::Shader => egui::Color32::from_rgb(255, 200, 110),
+        AssetKind::StateMachine => egui::Color32::from_rgb(130, 210, 255),
+        AssetKind::Rig => egui::Color32::from_rgb(230, 170, 120),
         AssetKind::Image => egui::Color32::from_rgb(180, 140, 255),
         AssetKind::Audio => egui::Color32::from_rgb(240, 130, 180),
         AssetKind::Font => egui::Color32::from_rgb(200, 200, 200),

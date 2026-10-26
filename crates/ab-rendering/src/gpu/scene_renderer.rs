@@ -13,10 +13,11 @@ use crate::limits::{MAX_OMNI_LIGHTS, MAX_SPOT_LIGHTS, MAX_SPOT_SHADOWS, SHADOW_L
 use crate::material::Material;
 use crate::mesh::{SkinWeights, Vertex};
 use crate::particles::ParticleDrawList;
+use crate::shader::{ShaderCode, ShaderHandle};
 use crate::shadow::{directional_shadow_matrix, spot_shadow_matrix};
 use crate::texture::{ColorSpace, MipLevel, SamplerSettings, Texture, TextureFilter, TextureWrap};
 use crate::ui::UiDrawList;
-use ab_core::{Color, Mat3, Mat4, Time};
+use ab_core::{Color, Mat3, Mat4, Time, Vec3};
 use ab_ecs::World;
 use bytemuck::Zeroable as _;
 use std::collections::HashMap;
@@ -60,6 +61,45 @@ pub struct FrameStats {
     pub particles: u32,
     /// Debug lines drawn.
     pub debug_lines: u32,
+    /// Post-processing volumes that counted at the camera.
+    pub post_volumes: u32,
+    /// Meshes drawn with a simpler level of detail.
+    pub lod_reduced: u32,
+    /// Meshes too small on screen to draw (their LOD's cull size).
+    pub lod_culled: u32,
+    /// Merged HLOD meshes drawn in place of their groups.
+    pub hlod_proxies: u32,
+    /// Meshes hidden behind others (occlusion culling).
+    pub occluded: u32,
+}
+
+/// What a renderer holds on the GPU, in bytes (estimated from sizes and formats).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuMemory {
+    pub textures: u64,
+    pub meshes: u64,
+    /// Shadow maps, frame targets and per-frame buffers.
+    pub other: u64,
+}
+
+impl GpuMemory {
+    pub fn total(&self) -> u64 {
+        self.textures + self.meshes + self.other
+    }
+}
+
+fn texture_bytes(texture: &wgpu::Texture) -> u64 {
+    let format = texture.format();
+    let block = u64::from(format.block_copy_size(None).unwrap_or(4));
+    let (bw, bh) = format.block_dimensions();
+    let size = texture.size();
+    let mut total = 0;
+    for level in 0..texture.mip_level_count() {
+        let w = (size.width >> level).max(1).div_ceil(bw);
+        let h = (size.height >> level).max(1).div_ceil(bh);
+        total += u64::from(w) * u64::from(h) * u64::from(size.depth_or_array_layers) * block;
+    }
+    total * u64::from(texture.sample_count())
 }
 
 struct GpuMesh {
@@ -102,6 +142,15 @@ struct MaterialBinding {
     bind_group: wgpu::BindGroup,
 }
 
+/// A custom surface shader, built for the forward pass.
+struct CustomShader {
+    revision: u64,
+    /// `None`: the code does not build (the standard surface draws instead).
+    module: Option<wgpu::ShaderModule>,
+    /// Indexed by [`forward_variant`], made when first drawn.
+    pipelines: [Option<wgpu::RenderPipeline>; 8],
+}
+
 struct FrameTargets {
     size: (u32, u32),
     hdr_view: wgpu::TextureView,
@@ -128,6 +177,8 @@ pub struct SceneRenderer {
 
     /// Indexed by [`forward_variant`].
     forward_pipelines: [wgpu::RenderPipeline; 8],
+    /// Custom surface shaders, by [`ShaderHandle`] index.
+    custom_shaders: Vec<Option<CustomShader>>,
     /// The background through the fog (drawn when fog is on).
     sky_pipeline: wgpu::RenderPipeline,
     /// Whether this frame draws the fogged sky.
@@ -182,6 +233,10 @@ pub struct SceneRenderer {
     objects: Vec<ObjectGpu>,
     materials: Vec<MaterialGpu>,
     material_flags: Vec<bool>,
+    /// Each material's custom shader, when it builds.
+    material_shaders: Vec<Option<ShaderHandle>>,
+    /// Last frame's view-projection, by render target (motion blur).
+    previous_view_proj: HashMap<usize, Mat4>,
     warned_light_limit: bool,
 }
 
@@ -297,14 +352,7 @@ impl SceneRenderer {
             entries: &[texture_entry(0)],
         });
 
-        let forward_module = shader(
-            device,
-            "forward.wgsl",
-            concat!(
-                include_str!("../shaders/fog.wgsl"),
-                include_str!("../shaders/forward.wgsl")
-            ),
-        );
+        let forward_module = shader(device, "forward.wgsl", &crate::shader::compose(None).0);
         // Indexed by `forward_variant`: skinned, mirrored, double-sided bits.
         let forward_pipelines = std::array::from_fn(|variant| {
             create_forward_pipeline(
@@ -316,6 +364,7 @@ impl SceneRenderer {
                     skinned: variant & 4 != 0,
                     mirrored: variant & 2 != 0,
                     double_sided: variant & 1 != 0,
+                    shader: None,
                 },
             )
         });
@@ -436,6 +485,7 @@ impl SceneRenderer {
             textures_waiting: 0,
             textures_streaming: Vec::new(),
             forward_pipelines,
+            custom_shaders: Vec::new(),
             sky_pipeline,
             sky: false,
             shafts_pipeline,
@@ -484,6 +534,8 @@ impl SceneRenderer {
             objects: Vec::new(),
             materials: Vec::new(),
             material_flags: Vec::new(),
+            material_shaders: Vec::new(),
+            previous_view_proj: HashMap::new(),
             warned_light_limit: false,
         }
     }
@@ -505,6 +557,47 @@ impl SceneRenderer {
     }
 
     /// The render list built for the last frame.
+    /// What this renderer holds on the GPU (see [`GpuMemory`]).
+    pub fn gpu_memory(&self) -> GpuMemory {
+        let textures = self
+            .textures
+            .iter()
+            .chain(&self.default_textures)
+            .map(|t| texture_bytes(&t.texture))
+            .sum();
+        let meshes = self
+            .meshes
+            .iter()
+            .map(|m| m.vertices.size() + m.indices.size() + m.skin.as_ref().map_or(0, |s| s.size()))
+            .sum();
+        let buffers = [
+            &self.frame_buffer,
+            &self.post_buffer,
+            &self.shadow_pass_buffer,
+            &self.object_buffer,
+            &self.material_buffer,
+            &self.joint_buffer,
+        ]
+        .iter()
+        .map(|b| b.size())
+        .sum::<u64>();
+        let shadow = u64::from(self.shadow_map_size).pow(2) * 4 * SHADOW_LAYERS as u64;
+        let targets = self.targets.as_ref().map_or(0, |t| {
+            let pixels = u64::from(t.size.0) * u64::from(t.size.1);
+            let samples = u64::from(self.msaa_samples);
+            // HDR color, depth, the MSAA color, light shafts at a quarter.
+            pixels * 8
+                + pixels * 4 * samples
+                + if samples > 1 { pixels * 8 * samples } else { 0 }
+                + pixels * 2
+        });
+        GpuMemory {
+            textures,
+            meshes,
+            other: buffers + shadow + targets,
+        }
+    }
+
     pub fn last_render_list(&self) -> &RenderList {
         &self.list
     }
@@ -522,10 +615,22 @@ impl SceneRenderer {
         let (width, height) = (width.clamp(1, max), height.clamp(1, max));
         self.ensure_targets(gpu, width, height);
         extract(world, width as f32 / height as f32, &mut self.list);
-        let environment = world
+        let mut environment = world
             .resource::<Environment>()
             .map(|e| e.clone())
             .unwrap_or_default();
+        let mut counted_volumes = 0;
+        if let Some(camera) = &self.list.camera {
+            if !self.list.post_volumes.is_empty() {
+                let (post, counted) = crate::post_volume::blend_post(
+                    &environment.post,
+                    &self.list.post_volumes,
+                    camera.position,
+                );
+                environment.post = post;
+                counted_volumes = counted as u32;
+            }
+        }
 
         let default_material = [Material::default()];
         match world.resource::<RenderAssets>() {
@@ -537,6 +642,7 @@ impl SceneRenderer {
                 } else {
                     assets.materials()
                 };
+                self.prepare_shaders(gpu, assets.shaders());
                 self.prepare_materials(gpu, materials);
             }
             None => self.prepare_materials(gpu, &default_material),
@@ -544,6 +650,7 @@ impl SceneRenderer {
 
         let meshes = &self.meshes;
         let double_sided = &self.material_flags;
+        let shaders = &self.material_shaders;
         self.plan.build(&self.list.draws, |d| {
             let mesh = meshes.get(d.mesh.index())?;
             let double_sided = *double_sided.get(d.material.index())?;
@@ -553,24 +660,44 @@ impl SceneRenderer {
                 double_sided,
                 // Skinned vertices ignore the node transform (joint matrices place them).
                 mirrored: !skinned && d.model.matrix3.determinant() < 0.0,
+                shader: shaders.get(d.material.index()).copied().flatten(),
             })
         });
+        self.prepare_custom_pipelines(gpu);
         self.pack_objects();
         self.upload_scene_buffers(gpu);
 
         let mut stats = FrameStats {
             culled: self.list.draws.iter().filter(|d| !d.in_view).count() as u32,
+            post_volumes: counted_volumes,
+            lod_reduced: self
+                .list
+                .draws
+                .iter()
+                .filter(|d| d.in_view && d.lod_level > 0)
+                .count() as u32,
+            lod_culled: self
+                .list
+                .draws
+                .iter()
+                .filter(|d| d.lod_level == u8::MAX)
+                .count() as u32,
+            hlod_proxies: self
+                .list
+                .draws
+                .iter()
+                .filter(|d| d.in_view && d.hlod.is_some_and(|h| h.proxy))
+                .count() as u32,
+            occluded: self.list.draws.iter().filter(|d| d.occluded).count() as u32,
             ..Default::default()
         };
         let seconds = world.resource::<Time>().map_or(0.0, |t| t.elapsed as f32);
         let (frame, active_layers) = self.build_frame_uniforms(&environment, seconds, &mut stats);
         gpu.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
-        gpu.queue.write_buffer(
-            &self.post_buffer,
-            0,
-            bytemuck::bytes_of(&self.pack_post(&environment, world)),
-        );
+        let post = self.pack_post(&environment, world, target);
+        gpu.queue
+            .write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
         let bloom = environment.post.bloom.is_enabled();
         if bloom {
             self.bloom_pass
@@ -586,11 +713,18 @@ impl SceneRenderer {
         if self.list.camera.is_some() {
             self.record_shadow_passes(&mut encoder, &active_layers, &mut stats);
         }
+        let particles = world.resource::<ParticleDrawList>();
+        // Isolated: only the particles of what is drawn.
+        let own = match (&self.list.isolated, particles.as_deref()) {
+            (Some(set), Some(list)) => Some(list.filtered(|e| set.contains(&e))),
+            _ => None,
+        };
         stats.particles = self.particle_pass.prepare(
             gpu,
-            world.resource::<ParticleDrawList>().as_deref(),
+            own.as_ref().or(particles.as_deref()),
             self.list.camera.as_ref(),
         );
+        drop(particles);
         stats.debug_lines = self
             .line_pass
             .prepare(gpu, world.resource::<DebugDraw>().as_deref());
@@ -855,10 +989,76 @@ impl SceneRenderer {
         }
     }
 
+    /// Builds custom shaders that are new or changed. One that does not build is reported
+    /// once per revision and drawn with the standard surface.
+    fn prepare_shaders(&mut self, gpu: &GpuContext, shaders: &[ShaderCode]) {
+        self.custom_shaders.resize_with(shaders.len(), || None);
+        for (built, code) in self.custom_shaders.iter_mut().zip(shaders) {
+            if built.as_ref().is_some_and(|b| b.revision == code.revision) {
+                continue;
+            }
+            let module = match crate::shader::validate(&code.code) {
+                Ok(()) => Some(shader(
+                    &gpu.device,
+                    &code.name,
+                    &crate::shader::compose(Some(&code.code)).0,
+                )),
+                Err(err) => {
+                    warn!(
+                        "shader {}: {err} (drawn with the standard surface)",
+                        code.name
+                    );
+                    None
+                }
+            };
+            *built = Some(CustomShader {
+                revision: code.revision,
+                module,
+                pipelines: Default::default(),
+            });
+        }
+    }
+
+    /// Makes the custom shaders' pipelines this frame draws with.
+    fn prepare_custom_pipelines(&mut self, gpu: &GpuContext) {
+        for batch in &self.plan.forward {
+            let Some(handle) = batch.class.shader else {
+                continue;
+            };
+            let Some(Some(custom)) = self.custom_shaders.get_mut(handle.index()) else {
+                continue;
+            };
+            let Some(module) = &custom.module else {
+                continue;
+            };
+            let variant = forward_variant(batch.class);
+            if custom.pipelines[variant].is_none() {
+                custom.pipelines[variant] = Some(create_forward_pipeline(
+                    &gpu.device,
+                    module,
+                    &[Some(&self.forward_layout), Some(&self.material_layout)],
+                    self.msaa_samples,
+                    batch.class,
+                ));
+            }
+        }
+    }
+
+    /// The pipeline a batch draws with: its custom shader's, or the standard one.
+    fn forward_pipeline(&self, class: DrawClass) -> &wgpu::RenderPipeline {
+        let variant = forward_variant(class);
+        class
+            .shader
+            .and_then(|h| self.custom_shaders.get(h.index())?.as_ref())
+            .and_then(|c| c.pipelines[variant].as_ref())
+            .unwrap_or(&self.forward_pipelines[variant])
+    }
+
     /// Packs material uniforms and (re)builds material bind groups whose textures changed.
     fn prepare_materials(&mut self, gpu: &GpuContext, materials: &[Material]) {
         self.materials.clear();
         self.material_flags.clear();
+        self.material_shaders.clear();
         self.material_bindings.resize_with(materials.len(), || None);
         let texture_count = self.textures.len();
         for (index, material) in materials.iter().enumerate() {
@@ -869,6 +1069,13 @@ impl SceneRenderer {
             self.materials
                 .push(pack_material(material, key[2].is_some()));
             self.material_flags.push(material.double_sided);
+            let builds = |h: &ShaderHandle| {
+                self.custom_shaders
+                    .get(h.index())
+                    .and_then(Option::as_ref)
+                    .is_some_and(|c| c.module.is_some())
+            };
+            self.material_shaders.push(material.shader.filter(builds));
 
             let up_to_date = self.material_bindings[index]
                 .as_ref()
@@ -1021,6 +1228,7 @@ impl SceneRenderer {
         stats: &mut FrameStats,
     ) -> (FrameGpu, Vec<(usize, Mat4)>) {
         let mut frame = FrameGpu::zeroed();
+        frame.time = [seconds, 0.0, 0.0, 0.0];
         let mut layers = Vec::new();
         let map_size = self.shadow_map_size;
         let shadows = &environment.shadows;
@@ -1146,8 +1354,36 @@ impl SceneRenderer {
         (frame, layers)
     }
 
-    fn pack_post(&self, environment: &Environment, world: &World) -> PostGpu {
+    fn pack_post(
+        &mut self,
+        environment: &Environment,
+        world: &World,
+        target: &wgpu::TextureView,
+    ) -> PostGpu {
         let post = &environment.post;
+        // Motion blur compares with where this target's camera was last frame (several views
+        // can share a renderer).
+        let (camera_position, view_proj) = self
+            .list
+            .camera
+            .as_ref()
+            .map_or((Vec3::ZERO, Mat4::IDENTITY), |c| {
+                (c.position, c.view_projection)
+            });
+        let key = target as *const wgpu::TextureView as usize;
+        let previous = self
+            .previous_view_proj
+            .insert(key, view_proj)
+            .unwrap_or(view_proj);
+        if self.previous_view_proj.len() > 32 {
+            self.previous_view_proj.retain(|&k, _| k == key);
+        }
+        let dof = &post.depth_of_field;
+        let motion = if post.motion_blur.is_finite() {
+            post.motion_blur.clamp(0.0, 4.0)
+        } else {
+            0.0
+        };
         let overlay = world
             .resource::<ScreenOverlay>()
             .map(|o| *o)
@@ -1190,6 +1426,16 @@ impl SceneRenderer {
                 overlay.color.b,
                 finite(overlay.color.a, 0.0).clamp(0.0, 1.0),
             ],
+            dof: [
+                finite(dof.focus_distance, 10.0).max(0.0),
+                finite(dof.focus_range, 8.0).max(0.01),
+                finite(dof.max_blur, 0.0).clamp(0.0, 32.0),
+                dof.is_enabled() as u32 as f32,
+            ],
+            motion: [motion, (motion > 0.0) as u32 as f32, 0.0, 0.0],
+            camera: camera_position.extend(1.0).into(),
+            inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
+            previous_view_proj: previous.to_cols_array_2d(),
         }
     }
 
@@ -1297,10 +1543,10 @@ impl SceneRenderer {
         let mut bound_pipeline = None;
         let mut bound_material = None;
         for batch in &self.plan.forward {
-            let variant = forward_variant(batch.class);
-            if bound_pipeline != Some(variant) {
-                pass.set_pipeline(&self.forward_pipelines[variant]);
-                bound_pipeline = Some(variant);
+            let key = (batch.class.shader, forward_variant(batch.class));
+            if bound_pipeline != Some(key) {
+                pass.set_pipeline(self.forward_pipeline(batch.class));
+                bound_pipeline = Some(key);
             }
             if bound_material != Some(batch.material) {
                 let binding = self.material_bindings[batch.material.index()]
@@ -1419,6 +1665,10 @@ fn pack_material(material: &Material, has_normal_map: bool) -> MaterialGpu {
             has_normal_map as u32 as f32,
             0.0,
             0.0,
+        ],
+        custom: [
+            std::array::from_fn(|i| material.shader_params[i]),
+            std::array::from_fn(|i| material.shader_params[4 + i]),
         ],
     }
 }
@@ -1849,6 +2099,7 @@ fn create_forward_pipeline(
         skinned,
         double_sided,
         mirrored,
+        ..
     } = class;
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("forward pipeline layout"),

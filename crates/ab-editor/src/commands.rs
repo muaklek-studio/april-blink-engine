@@ -49,6 +49,9 @@ pub enum Command {
     OpenAnimationEditor,
     OpenAssetBrowser,
     OpenGit,
+    OpenCutsceneEditor,
+    OpenAnimationGraph,
+    OpenRigging,
 }
 
 /// When a binding's keys count.
@@ -111,6 +114,19 @@ pub const BINDINGS: &[Binding] = &[
         Scope::Editor,
     ),
     bind(Command::OpenGit, CTRL_SHIFT, Key::Num4, Scope::Editor),
+    bind(
+        Command::OpenCutsceneEditor,
+        CTRL_SHIFT,
+        Key::Num5,
+        Scope::Editor,
+    ),
+    bind(
+        Command::OpenAnimationGraph,
+        CTRL_SHIFT,
+        Key::Num6,
+        Scope::Editor,
+    ),
+    bind(Command::OpenRigging, CTRL_SHIFT, Key::Num7, Scope::Editor),
     bind(Command::Save, CTRL, Key::S, Scope::Editor),
     bind(Command::NewScene, CTRL, Key::N, Scope::Editor),
     bind(Command::OpenScene, CTRL, Key::O, Scope::Editor),
@@ -170,6 +186,9 @@ impl Command {
             Command::OpenAnimationEditor => "open_animation_editor",
             Command::OpenAssetBrowser => "open_asset_browser",
             Command::OpenGit => "open_git",
+            Command::OpenCutsceneEditor => "open_cutscene_editor",
+            Command::OpenAnimationGraph => "open_animation_graph",
+            Command::OpenRigging => "open_rigging",
         }
     }
 
@@ -216,6 +235,9 @@ impl Command {
             Command::OpenAnimationEditor => icon::FILM_STRIP,
             Command::OpenAssetBrowser => icon::FOLDERS,
             Command::OpenGit => icon::GIT_BRANCH,
+            Command::OpenCutsceneEditor => icon::FILM_SLATE,
+            Command::OpenAnimationGraph => icon::GRAPH,
+            Command::OpenRigging => icon::PERSON_SIMPLE,
         }
     }
 

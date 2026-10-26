@@ -995,3 +995,380 @@ fn exported_script_properties_reach_the_script_and_save_back() {
     let err = instantiate_scene(tree, &SceneFile::from_toml(bad).unwrap(), "bad").unwrap_err();
     assert!(err.to_string().contains("script_properties"), "{err}");
 }
+
+#[test]
+fn cutscenes_take_the_camera_fire_events_and_give_it_back() {
+    let cut = r##"
+[[camera]]
+time = 0.0
+position = [0.0, 2.0, 10.0]
+fov = 50.0
+
+[[camera]]
+time = 2.0
+position = [8.0, 2.0, 10.0]
+fov = 50.0
+
+[[event]]
+time = 0.5
+kind = "visible"
+target = "Boss"
+visible = true
+
+[[event]]
+time = 1.0
+kind = "subtitle"
+text = "Who is there?"
+duration = 0.5
+
+[[event]]
+time = 1.5
+kind = "fade"
+to = 1.0
+duration = 0.5
+"##;
+    let level = "[[node]]\nname = \"Level\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"Main\"\nparent = \".\"\ntype = \"Camera3D\"\ncamera = { current = true }\n\n\
+                 [[node]]\nname = \"Boss\"\nparent = \".\"\ntype = \"Node3D\"\nvisible = false\n\n\
+                 [[node]]\nname = \"Intro\"\nparent = \".\"\ntype = \"Cutscene\"\ncutscene = { file = \"intro.abcut\", autoplay = true }\n";
+    let (mut engine, _assets) = engine_with(&[("intro.abcut", cut), ("level.abscene", level)]);
+    let tree = engine.tree_mut();
+    let level = load_scene(tree, "level.abscene").unwrap();
+    let root = tree.root();
+    tree.add_child(root, level).unwrap();
+    let current = |engine: &Engine, path: &str| {
+        let tree = engine.tree();
+        let n = tree.get_node(level, path).unwrap();
+        tree.component::<ab_engine::rendering::Camera3D>(n)
+            .unwrap()
+            .current
+    };
+    // Paused frames first (no time passes): the camera to give back is still remembered.
+    for _ in 0..3 {
+        ab_engine::cutscene::update(engine.tree_mut(), 0.0);
+    }
+    for _ in 0..30 {
+        engine.update(1.0 / 30.0); // 1 s
+    }
+    assert!(current(&engine, "Intro/CutsceneCamera") && !current(&engine, "Main"));
+    let tree = engine.tree();
+    assert!(tree.is_visible(tree.get_node(level, "Boss").unwrap()));
+    let camera = tree.get_node(level, "Intro/CutsceneCamera").unwrap();
+    let x = tree.transform(camera).unwrap().translation.x;
+    assert!(x > 2.0 && x < 6.0, "halfway along: {x}");
+    let subtitle = tree
+        .get_node(level, "Intro/CutsceneOverlay/Subtitle")
+        .unwrap();
+    assert_eq!(
+        tree.component::<ab_engine::ui::Label>(subtitle)
+            .unwrap()
+            .text,
+        "Who is there?"
+    );
+    for _ in 0..45 {
+        engine.update(1.0 / 30.0); // to 2.5 s: past the end
+    }
+    assert!(current(&engine, "Main"), "the camera is given back");
+    assert!(!current(&engine, "Intro/CutsceneCamera"));
+    let tree = engine.tree();
+    let intro = tree.get_node(level, "Intro").unwrap();
+    assert!(
+        !tree
+            .component::<ab_engine::cutscene::CutscenePlayer>(intro)
+            .unwrap()
+            .playing
+    );
+    // Saved as its file, not its camera and overlay.
+    let saved = save_scene(tree, level);
+    assert_eq!(saved.nodes.len(), 4);
+    assert_eq!(
+        saved.nodes[3].cutscene.as_ref().unwrap().file,
+        "intro.abcut"
+    );
+}
+
+#[test]
+fn materials_use_custom_shaders_with_their_params_and_reload_them() {
+    let shader = "// param speed = 1.5\n// param glow = 0.25\n\nfn surface(input: SurfaceInput, base: Surface) -> Surface {\n    return base;\n}\n";
+    let water = "shader = \"shaders/water.wgsl\"\nparams = { speed = 3.0 }\n";
+    let scene = "[[node]]\nname = \"Pool\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"A\"\nparent = \".\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\nmaterial = { file = \"materials/water.abmat\" }\n\n\
+                 [[node]]\nname = \"B\"\nparent = \".\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\nmaterial = { file = \"materials/water.abmat\", params = { glow = 1.0 } }\n";
+    let (mut engine, assets) = engine_with(&[
+        ("shaders/water.wgsl", shader),
+        ("materials/water.abmat", water),
+        ("pool.abscene", scene),
+    ]);
+    let tree = engine.tree_mut();
+    let pool = load_scene(tree, "pool.abscene").unwrap();
+    let material = |tree: &SceneTree, name: &str| {
+        let node = tree.get_node(pool, name).unwrap();
+        let handle = tree.component::<MeshInstance3D>(node).unwrap().material;
+        tree.world()
+            .resource::<RenderAssets>()
+            .unwrap()
+            .material(handle)
+            .copied()
+            .unwrap()
+    };
+    let (a, b) = (material(tree, "A"), material(tree, "B"));
+    assert!(
+        a.shader.is_some() && a.shader == b.shader,
+        "one shader, shared"
+    );
+    // The file's value, the default, and a node's own value over the file's.
+    assert_eq!(&a.shader_params[..2], &[3.0, 0.25]);
+    assert_eq!(&b.shader_params[..2], &[3.0, 1.0]);
+    assert_eq!(
+        ab_engine::scene_file::shader_paths(tree),
+        vec!["shaders/water.wgsl"]
+    );
+
+    // The file changes: the shader's code follows.
+    let handle = a.shader.unwrap();
+    let revision = |tree: &SceneTree| {
+        tree.world()
+            .resource::<RenderAssets>()
+            .unwrap()
+            .shader(handle)
+            .unwrap()
+            .revision
+    };
+    let before = revision(tree);
+    assert!(!ab_engine::scene_file::reload_shader(tree, "shaders/water.wgsl").unwrap());
+    std::fs::write(
+        assets.0.join("shaders/water.wgsl"),
+        shader.replace(
+            "return base;",
+            "var s = base;\n    s.alpha = 0.5;\n    return s;",
+        ),
+    )
+    .unwrap();
+    assert!(ab_engine::scene_file::reload_shader(tree, "shaders/water.wgsl").unwrap());
+    assert_eq!(revision(tree), before + 1);
+
+    // A missing shader names itself.
+    let broken = "[[node]]\nname = \"C\"\ntype = \"MeshInstance3D\"\nmesh = { primitive = \"cube\" }\nmaterial = { shader = \"shaders/none.wgsl\" }\n";
+    std::fs::write(assets.0.join("broken.abscene"), broken).unwrap();
+    let err = load_scene(tree, "broken.abscene").unwrap_err().to_string();
+    assert!(err.contains("shaders/none.wgsl"), "{err}");
+}
+
+#[test]
+fn post_volumes_load_and_save_as_written() {
+    let scene = "[environment]\ndepth_of_field = 6.0\nfocus_distance = 4.0\nmotion_blur = 0.5\n\n\
+                 [[node]]\nname = \"Cave\"\ntype = \"PostVolume\"\nposition = [0.0, 0.0, -20.0]\npost_volume = { size = [8.0, 4.0, 8.0], blend = 3.0, exposure = 0.5, tint = \"#a0b8ff\", priority = 2 }\n";
+    let (mut engine, _assets) = engine_with(&[("cave.abscene", scene)]);
+    let tree = engine.tree_mut();
+    let cave = load_scene(tree, "cave.abscene").unwrap();
+    let volume = *tree
+        .component::<ab_engine::rendering::PostVolume>(cave)
+        .unwrap();
+    assert_eq!(volume.half_extents, Vec3::new(4.0, 2.0, 4.0));
+    assert_eq!((volume.priority, volume.overrides.exposure), (2, Some(0.5)));
+    assert!(volume.overrides.tint.is_some());
+    let post = tree
+        .world()
+        .resource::<ab_engine::rendering::Environment>()
+        .unwrap()
+        .post;
+    assert_eq!(post.depth_of_field.max_blur, 6.0);
+    assert_eq!(post.depth_of_field.focus_distance, 4.0);
+    assert_eq!(post.motion_blur, 0.5);
+    let saved = save_scene(tree, cave);
+    let v = saved.nodes[0].post_volume.as_ref().unwrap();
+    assert_eq!(v.size, [8.0, 4.0, 8.0]);
+    assert!(matches!(&v.tint, Some(ab_engine::scene_file::ColorDesc::Hex(h)) if h == "#a0b8ff"));
+    // A bad value names itself.
+    let broken = "[[node]]\nname = \"V\"\ntype = \"PostVolume\"\npost_volume = { size = [-1.0, 1.0, 1.0] }\n";
+    std::fs::write(_assets.0.join("broken.abscene"), broken).unwrap();
+    let err = load_scene(tree, "broken.abscene").unwrap_err().to_string();
+    assert!(err.contains("post_volume.size"), "{err}");
+}
+
+#[test]
+fn ik_chains_reach_their_targets_within_the_rigs_limits() {
+    // A model with an arm: shoulder → elbow → hand, hanging down; a target to its side.
+    let rig = "[[limit]]\nbone = \"Elbow\"\nhinge = { axis = [0.0, 0.0, 1.0], min = -170.0, max = 170.0 }\n\n[[chain]]\nname = \"arm\"\ntip = \"Hand\"\n";
+    let scene = "[[node]]\nname = \"Root\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"Model\"\nparent = \".\"\ntype = \"Node3D\"\nrig = \"rigs/arm.abrig\"\nik = [{ chain = \"arm\", target = \"../Target\" }]\n\n\
+                 [[node]]\nname = \"Shoulder\"\nparent = \"Model\"\ntype = \"Node3D\"\nposition = [0.0, 2.0, 0.0]\n\n\
+                 [[node]]\nname = \"Elbow\"\nparent = \"Model/Shoulder\"\ntype = \"Node3D\"\nposition = [0.0, -1.0, 0.0]\n\n\
+                 [[node]]\nname = \"Hand\"\nparent = \"Model/Shoulder/Elbow\"\ntype = \"Node3D\"\nposition = [0.0, -1.0, 0.0]\n\n\
+                 [[node]]\nname = \"Target\"\nparent = \".\"\ntype = \"Node3D\"\nposition = [1.2, 1.2, 0.0]\n";
+    let (mut engine, _assets) = engine_with(&[("rigs/arm.abrig", rig), ("arm.abscene", scene)]);
+    let tree = engine.tree_mut();
+    let root = load_scene(tree, "arm.abscene").unwrap();
+    let top = tree.root();
+    tree.add_child(top, root).unwrap();
+    ab_engine::ik::update(tree);
+    tree.update_transforms();
+    let hand = tree.get_node(root, "Model/Shoulder/Elbow/Hand").unwrap();
+    let at = tree.global_position(hand).unwrap();
+    assert!(at.distance(Vec3::new(1.2, 1.2, 0.0)) < 0.01, "{at}");
+    // Saved as written.
+    let saved = save_scene(tree, root);
+    let model = &saved.nodes[1];
+    assert_eq!(model.rig.as_deref(), Some("rigs/arm.abrig"));
+    assert_eq!(model.ik[0].chain.as_deref(), Some("arm"));
+
+    // A tight elbow: it cannot bend enough, so the hand falls short.
+    let tight = rig.replace("min = -170.0, max = 170.0", "min = -10.0, max = 10.0");
+    std::fs::write(_assets.0.join("rigs/arm.abrig"), tight).unwrap();
+    let root2 = load_scene(tree, "arm.abscene").unwrap();
+    tree.add_child(top, root2).unwrap();
+    ab_engine::ik::update(tree);
+    tree.update_transforms();
+    let elbow = tree.get_node(root2, "Model/Shoulder/Elbow").unwrap();
+    let bend = tree
+        .rotation(elbow)
+        .unwrap()
+        .angle_between(Quat::IDENTITY)
+        .to_degrees();
+    assert!(bend <= 10.5, "elbow kept within its limit: {bend}");
+}
+
+#[test]
+fn feet_stand_on_the_ground_below_them() {
+    // A leg standing at y = 0 over a step 0.3 m high: the foot goes up onto it.
+    let scene = "[[node]]\nname = \"Root\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"Step\"\nparent = \".\"\ntype = \"StaticBody3D\"\nposition = [0.0, 0.15, 0.0]\n\n\
+                 [[node]]\nname = \"Shape\"\nparent = \"Step\"\ntype = \"CollisionShape3D\"\nshape = { box = [2.0, 0.3, 2.0] }\n\n\
+                 [[node]]\nname = \"Model\"\nparent = \".\"\ntype = \"Node3D\"\nik = [{ tip = \"Foot\", ground = true }]\n\n\
+                 [[node]]\nname = \"Hip\"\nparent = \"Model\"\ntype = \"Node3D\"\nposition = [0.0, 1.0, 0.0]\n\n\
+                 [[node]]\nname = \"Knee\"\nparent = \"Model/Hip\"\ntype = \"Node3D\"\nposition = [0.0, -0.5, 0.05]\n\n\
+                 [[node]]\nname = \"Foot\"\nparent = \"Model/Hip/Knee\"\ntype = \"Node3D\"\nposition = [0.0, -0.45, -0.05]\n";
+    let (mut engine, _assets) = engine_with(&[("leg.abscene", scene)]);
+    let root = load_scene(engine.tree_mut(), "leg.abscene").unwrap();
+    let top = engine.tree().root();
+    engine.tree_mut().add_child(top, root).unwrap();
+    // The physics world learns of the step on the first steps.
+    for _ in 0..3 {
+        engine.update(1.0 / 60.0);
+    }
+    let tree = engine.tree_mut();
+    tree.update_transforms();
+    let foot = tree.get_node(root, "Model/Hip/Knee/Foot").unwrap();
+    let y = tree.global_position(foot).unwrap().y;
+    // At rest it was 0.05 above the model's origin: now as high above the step's top.
+    assert!((y - 0.35).abs() < 0.02, "{y}");
+}
+
+#[test]
+fn state_machines_switch_clips_from_parameters() {
+    let clip = |name: &str, y: f32| {
+        format!("name = \"{name}\"\n\n[[track]]\ntarget = \"Body\"\nproperty = \"position\"\nkeys = [[0.0, [0.0, {y:?}, 0.0]], [1.0, [0.0, {y:?}, 0.0]]]\n")
+    };
+    let machine = "entry = \"Rest\"\nfade = 0.0\n\n[[parameter]]\nname = \"alert\"\nkind = \"bool\"\n\n\
+                   [[state]]\nname = \"Rest\"\nclip = \"Rest\"\n[[state]]\nname = \"Guard\"\nclip = \"Guard\"\n\n\
+                   [[transition]]\nfrom = \"Rest\"\nto = \"Guard\"\nwhen = [{ parameter = \"alert\" }]\n";
+    let scene = "[[node]]\nname = \"Npc\"\ntype = \"Node3D\"\nstate_machine = \"anims/npc.abstate\"\n\n\
+                 [[node]]\nname = \"Body\"\nparent = \".\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"Animator\"\nparent = \".\"\ntype = \"AnimationPlayer\"\nanimation = { clips = [\"anims/rest.toml\", \"anims/guard.toml\"] }\n";
+    let (rest, guard) = (clip("Rest", 1.0), clip("Guard", 3.0));
+    let (mut engine, _assets) = engine_with(&[
+        ("anims/rest.toml", rest.as_str()),
+        ("anims/guard.toml", guard.as_str()),
+        ("anims/npc.abstate", machine),
+        ("npc.abscene", scene),
+    ]);
+    let npc = load_scene(engine.tree_mut(), "npc.abscene").unwrap();
+    let top = engine.tree().root();
+    engine.tree_mut().add_child(top, npc).unwrap();
+    let body = engine.tree().get_node(npc, "Body").unwrap();
+    for _ in 0..5 {
+        engine.update(1.0 / 60.0);
+    }
+    assert!((engine.tree().position(body).unwrap().y - 1.0).abs() < 1e-3);
+    engine
+        .tree_mut()
+        .component_mut::<ab_engine::state_machine::StateMachine>(npc)
+        .unwrap()
+        .set("alert", 1.0);
+    for _ in 0..5 {
+        engine.update(1.0 / 60.0);
+    }
+    assert!((engine.tree().position(body).unwrap().y - 3.0).abs() < 1e-3);
+    let machine = engine
+        .tree()
+        .component::<ab_engine::state_machine::StateMachine>(npc)
+        .unwrap()
+        .clone();
+    assert_eq!(machine.state_name(), Some("Guard"));
+    let saved = save_scene(engine.tree(), npc);
+    assert_eq!(
+        saved.nodes[0].state_machine.as_deref(),
+        Some("anims/npc.abstate")
+    );
+}
+
+#[test]
+fn lods_and_hlod_groups_are_built_on_load_and_saved_as_written() {
+    let cube = |name: &str, x: f32, color: &str| {
+        format!("[[node]]\nname = \"{name}\"\nparent = \"Town\"\ntype = \"MeshInstance3D\"\nposition = [{x:?}, 0.0, 0.0]\nmesh = {{ primitive = \"sphere\" }}\nmaterial = {{ color = \"{color}\" }}\n\n")
+    };
+    let scene = format!(
+        "[environment]\nocclusion_culling = true\n\n\
+         [[node]]\nname = \"Root\"\ntype = \"Node3D\"\nlod = {{ levels = [[0.3, 0.5]], cull = 0.01 }}\n\n\
+         [[node]]\nname = \"Town\"\nparent = \".\"\ntype = \"HLOD\"\nhlod = {{ distance = 60.0, detail = 0.25 }}\n\n{}{}{}",
+        cube("A", 0.0, "#ff0000"),
+        cube("B", 3.0, "#ff0000"),
+        cube("C", 6.0, "#00ff00"),
+    );
+    let (mut engine, _assets) = engine_with(&[("town.abscene", scene.as_str())]);
+    let tree = engine.tree_mut();
+    let root = load_scene(tree, "town.abscene").unwrap();
+    let town = tree.get_node(root, "Town").unwrap();
+    // One merged mesh per material.
+    let proxies: Vec<NodeHandle> = tree
+        .children(town)
+        .into_iter()
+        .filter(|&c| {
+            tree.component::<ab_engine::rendering::HlodProxy>(c)
+                .is_some()
+        })
+        .collect();
+    assert_eq!(proxies.len(), 2);
+    let group = *tree
+        .component::<ab_engine::rendering::HlodGroup>(town)
+        .unwrap();
+    assert_eq!(group.distance, 60.0);
+    assert!((group.center.x - 3.0).abs() < 0.2, "{}", group.center);
+    // The spheres got a simpler level.
+    let a = tree.get_node(town, "A").unwrap();
+    let lod = tree
+        .component::<ab_engine::rendering::MeshLod>(a)
+        .unwrap()
+        .clone();
+    assert_eq!(lod.levels.len(), 1);
+    assert_eq!(lod.cull_below, 0.01);
+    let assets = tree.world().resource::<RenderAssets>().unwrap();
+    let full = assets
+        .mesh(tree.component::<MeshInstance3D>(a).unwrap().mesh)
+        .unwrap()
+        .indices
+        .len();
+    let simple = assets.mesh(lod.levels[0].mesh).unwrap().indices.len();
+    assert!(simple * 2 <= full && simple > 0, "{full} → {simple}");
+    drop(assets);
+    assert!(
+        tree.world()
+            .resource::<ab_engine::rendering::OcclusionCulling>()
+            .unwrap()
+            .enabled
+    );
+    // Saved without the merged meshes.
+    let saved = save_scene(tree, root);
+    assert_eq!(saved.nodes.len(), 5);
+    assert!(saved.nodes[0].lod.is_some());
+    assert_eq!(saved.nodes[1].kind.as_deref(), Some("HLOD"));
+    assert_eq!(saved.nodes[1].hlod.as_ref().unwrap().detail, 0.25);
+    // A bad level names itself.
+    std::fs::write(
+        _assets.0.join("bad.abscene"),
+        "[[node]]\nname = \"X\"\ntype = \"Node3D\"\nlod = { levels = [[0.3, 2.0]] }\n",
+    )
+    .unwrap();
+    let err = load_scene(tree, "bad.abscene").unwrap_err().to_string();
+    assert!(err.contains("lod"), "{err}");
+}

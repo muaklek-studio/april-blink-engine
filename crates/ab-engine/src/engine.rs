@@ -109,6 +109,8 @@ impl Engine {
         world.insert_resource(PhysicsWorld::new());
         world.insert_resource(Audio::new(config.audio_output));
         world.insert_resource(Profiler::new());
+        world.insert_resource(crate::memory::MemoryProfiler::default());
+        world.insert_resource(crate::memory::GpuMemoryReport::default());
         world.insert_resource(DebugOverlay::default());
         world.insert_resource(crate::input_overlay::InputOverlay::default());
         world.insert_resource(ab_input::InputLog::default());
@@ -318,6 +320,8 @@ impl Engine {
         timed(2, fixed_start);
 
         let start = Instant::now();
+        // Before the animations are sampled in Update: the states pick this frame's clips.
+        crate::state_machine::update(&mut self.tree, delta);
         self.schedule
             .run_stage(ScheduleStage::Update, self.tree.world_mut());
         timed(3, start);
@@ -325,6 +329,8 @@ impl Engine {
         self.tree.process(delta);
         // Before PostUpdate: its hit lines join this frame's debug drawing.
         crate::trace::update(&mut self.tree, delta);
+        crate::cutscene::update(&mut self.tree, delta);
+        crate::ik::update(&mut self.tree);
         timed(4, start);
 
         let start = Instant::now();
@@ -337,6 +343,7 @@ impl Engine {
         }
         timed(5, start);
 
+        crate::memory::update(&self.tree);
         self.update_debug_overlay(delta);
         if let Some(mut input) = self.tree.world().resource_mut::<InputState>() {
             input.end_frame();

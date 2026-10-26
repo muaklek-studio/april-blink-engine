@@ -124,6 +124,39 @@ pub struct PostProcess {
     pub chromatic_aberration: f32,
     /// 0 = off. Animated film grain (about 0..1).
     pub grain: f32,
+    /// Blur away from a focus distance.
+    pub depth_of_field: DepthOfField,
+    /// 0 = off. Blur along the camera's motion: 1 blurs over what it moved in one frame
+    /// (the camera's own motion; moving objects are not blurred on their own).
+    pub motion_blur: f32,
+}
+
+/// Depth of field settings of [`PostProcess`]: sharp around `focus_distance`, blurred
+/// further from it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthOfField {
+    /// Metres from the camera that are sharp.
+    pub focus_distance: f32,
+    /// Metres either side of the focus over which the blur grows to its full size.
+    pub focus_range: f32,
+    /// 0 = off. The largest blur, in pixels at 1080 lines (scaled with the image).
+    pub max_blur: f32,
+}
+
+impl Default for DepthOfField {
+    fn default() -> Self {
+        Self {
+            focus_distance: 10.0,
+            focus_range: 8.0,
+            max_blur: 0.0,
+        }
+    }
+}
+
+impl DepthOfField {
+    pub fn is_enabled(&self) -> bool {
+        self.max_blur > 0.0 && self.max_blur.is_finite()
+    }
 }
 
 /// Bloom settings of [`PostProcess`].
@@ -187,6 +220,8 @@ impl Default for PostProcess {
             bloom: Bloom::default(),
             chromatic_aberration: 0.0,
             grain: 0.0,
+            depth_of_field: DepthOfField::default(),
+            motion_blur: 0.0,
         }
     }
 }

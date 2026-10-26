@@ -12,7 +12,7 @@ use ab_physics::{
 };
 use ab_rendering::{
     Camera3D, ColorSpace, DirectionalLight3D, Environment, Material, MaterialHandle, Mesh,
-    MeshHandle, MeshInstance3D, OmniLight3D, RenderAssets, RenderNodes, SpotLight3D,
+    MeshHandle, MeshInstance3D, OmniLight3D, RenderAssets, RenderNodes, ShaderHandle, SpotLight3D,
 };
 use ab_scene::{NodeHandle, SceneError, SceneTree, Timer};
 use std::collections::HashMap;
@@ -50,6 +50,8 @@ pub enum SceneFileError {
 pub struct SceneAssetCache {
     meshes: HashMap<String, MeshHandle>,
     materials: HashMap<String, MaterialHandle>,
+    /// Custom shaders by path.
+    shaders: HashMap<String, ShaderHandle>,
 }
 
 /// Loads the scene file at `path` (through the [`AssetServer`]) and builds it as a detached
@@ -253,6 +255,8 @@ fn instantiate_at_depth(
         // built with it).
         if depth == 0 {
             super::generator::build_all(tree, root);
+            // After the generators: their meshes get levels and join groups too.
+            super::lod::build_all(tree, root);
         }
         Ok(root)
     })();
@@ -644,6 +648,9 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
         }
         super::path::PATH_3D => super::path::create(tree, name, desc)?,
         super::generator::GENERATOR => super::generator::create(tree, name, desc)?,
+        crate::cutscene::CUTSCENE => crate::cutscene::create(tree, name, desc)?,
+        super::post_volume::POST_VOLUME => super::post_volume::create(tree, name, desc)?,
+        super::lod::HLOD => super::lod::create(tree, name, desc)?,
         "Timer" => {
             let t = desc
                 .timer
@@ -708,6 +715,9 @@ fn configure(tree: &mut SceneTree, node: NodeHandle, desc: &NodeDesc) -> Result<
             other => other.to_string(),
         })?;
     }
+    crate::ik::configure(tree, node, desc.rig.as_deref(), &desc.ik)?;
+    super::lod::configure(tree, node, desc)?;
+    crate::state_machine::configure(tree, node, desc.state_machine.as_deref())?;
     for (script, properties) in &desc.script_properties {
         if !tree.set_script_properties(node, script, properties.clone()) {
             return Err(format!(
@@ -939,6 +949,41 @@ pub fn material_handle(
                 ),
                 unshaded: m.unshaded.unwrap_or(false),
                 double_sided: m.double_sided.unwrap_or(false),
+                shader: None,
+                shader_params: [0.0; ab_rendering::shader::MAX_PARAMS],
+            };
+            let built = match m.shader.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                Some(path) => {
+                    let (handle, code) = match cache.shaders.get(path) {
+                        Some(&handle) => {
+                            let code = assets
+                                .shader(handle)
+                                .map(|s| s.code.clone())
+                                .unwrap_or_default();
+                            (handle, code)
+                        }
+                        None => {
+                            let bytes = server
+                                .read(path)
+                                .map_err(|e| format!("shader {path}: {e}"))?;
+                            let code = String::from_utf8_lossy(&bytes).into_owned();
+                            let handle = assets.add_shader(path, code.clone());
+                            cache.shaders.insert(path.to_owned(), handle);
+                            (handle, code)
+                        }
+                    };
+                    let mut built = built;
+                    built.shader = Some(handle);
+                    for (i, p) in ab_rendering::shader::params(&code).iter().enumerate() {
+                        built.shader_params[i] = m
+                            .params
+                            .as_ref()
+                            .and_then(|values| values.get(&p.name).copied())
+                            .unwrap_or(p.default);
+                    }
+                    built
+                }
+                None => built,
             };
             let handle = assets.add_material(built);
             cache.materials.insert(material_key, handle);
@@ -946,6 +991,43 @@ pub fn material_handle(
         }
     };
     Ok(material)
+}
+
+/// The custom shaders materials use, by path.
+pub fn shader_paths(tree: &SceneTree) -> Vec<String> {
+    let mut paths: Vec<String> = tree
+        .world()
+        .resource::<SceneAssetCache>()
+        .map(|c| c.shaders.keys().cloned().collect())
+        .unwrap_or_default();
+    paths.sort();
+    paths
+}
+
+/// Reads the shader at `path` again (its file changed): materials using it draw with the
+/// new code from the next frame. Whether its code changed. Materials made from it keep the
+/// parameter values they were given (new `// param` lines take effect when they are made
+/// again).
+pub fn reload_shader(tree: &mut SceneTree, path: &str) -> Result<bool, String> {
+    let world = tree.world();
+    let Some(handle) = world
+        .resource::<SceneAssetCache>()
+        .and_then(|c| c.shaders.get(path).copied())
+    else {
+        return Ok(false);
+    };
+    let bytes = world
+        .resource::<AssetServer>()
+        .ok_or("the AssetServer resource is missing")?
+        .read(path)
+        .map_err(|e| format!("shader {path}: {e}"))?;
+    let code = String::from_utf8_lossy(&bytes).into_owned();
+    let mut assets = world
+        .resource_mut::<RenderAssets>()
+        .ok_or("the RenderAssets resource is missing")?;
+    let changed = assets.shader(handle).is_some_and(|s| s.code != code);
+    assets.set_shader_code(handle, code);
+    Ok(changed)
 }
 
 /// `material` with its `file` (an `.abmat`) read in under its own keys. A file may not name
@@ -1069,6 +1151,23 @@ pub fn apply_environment(tree: &mut SceneTree, desc: &EnvironmentDesc) -> Result
     }
     if let Some(v) = desc.grain {
         post.grain = finite("grain", v)?;
+    }
+    if let Some(v) = desc.focus_distance {
+        post.depth_of_field.focus_distance = finite("focus_distance", v)?.max(0.0);
+    }
+    if let Some(v) = desc.focus_range {
+        post.depth_of_field.focus_range = finite("focus_range", v)?.max(0.01);
+    }
+    if let Some(v) = desc.depth_of_field {
+        post.depth_of_field.max_blur = finite("depth_of_field", v)?.max(0.0);
+    }
+    if let Some(v) = desc.motion_blur {
+        post.motion_blur = finite("motion_blur", v)?.max(0.0);
+    }
+    if let Some(on) = desc.occlusion_culling {
+        let world = tree.world_mut();
+        let settings = world.resource_or_insert_with(ab_rendering::OcclusionCulling::default);
+        settings.enabled = on;
     }
     Ok(())
 }

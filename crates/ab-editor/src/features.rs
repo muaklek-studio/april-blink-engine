@@ -1,10 +1,11 @@
-//! Nodes with an editor of their own. A UI node (a canvas layer), an AnimationPlayer and an
-//! effect are each worked on in a window made for them, opened by double-clicking the node
+//! Nodes with an editor of their own. A UI node (a canvas layer), an AnimationPlayer, a
+//! cutscene and an effect are each worked on in a window made for them, opened by double-clicking the node
 //! (or from the Window menu): the scene tree shows them as one node, not the controls or
 //! layers inside, which belong to their editor.
 
 use crate::state::Editor;
 use ab_engine::animation::AnimationPlayer;
+use ab_engine::cutscene::CutscenePlayer;
 use ab_engine::scene::NodeHandle;
 
 /// A particle layer's class.
@@ -17,6 +18,10 @@ pub enum Feature {
     Ui,
     /// An AnimationPlayer: the Animation Editor, on its clips.
     Animation,
+    /// A cutscene: the Cutscene Editor, on its timeline.
+    Cutscene,
+    /// A node with an animation state machine: the Animation Graph.
+    AnimationGraph,
     /// Particles, or a node made of particle layers: the Effects Editor.
     Effect,
 }
@@ -31,6 +36,15 @@ impl Feature {
         let class = tree.class_name(node);
         if class == Some(ab_engine::ui::class::CANVAS_LAYER) {
             return Some(Feature::Ui);
+        }
+        if tree.component::<CutscenePlayer>(node).is_some() {
+            return Some(Feature::Cutscene);
+        }
+        if tree
+            .component::<ab_engine::state_machine::StateMachine>(node)
+            .is_some()
+        {
+            return Some(Feature::AnimationGraph);
         }
         if tree.component::<AnimationPlayer>(node).is_some() {
             return Some(Feature::Animation);

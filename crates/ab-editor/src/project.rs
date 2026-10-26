@@ -10,6 +10,12 @@ pub enum AssetKind {
     Scene,
     Model,
     Material,
+    /// A custom surface shader (`.wgsl`).
+    Shader,
+    /// An animation state machine (`.abstate`).
+    StateMachine,
+    /// A rig: humanoid parts, joint limits, IK chains (`.abrig`).
+    Rig,
     Image,
     Audio,
     Font,
@@ -32,6 +38,9 @@ impl AssetKind {
             Some("ttf" | "otf") => Self::Font,
             Some(ab_engine::scene_file::SCENE_EXTENSION) => Self::Scene,
             Some(ab_engine::scene_file::MATERIAL_EXTENSION) => Self::Material,
+            Some("wgsl") => Self::Shader,
+            Some(ab_engine::state_machine::STATE_MACHINE_EXTENSION) => Self::StateMachine,
+            Some(ab_engine::rig::RIG_EXTENSION) => Self::Rig,
             Some("toml" | "json") => Self::Config,
             _ => Self::Other,
         }
@@ -44,6 +53,9 @@ impl AssetKind {
             Self::Scene => icon::FILM_SLATE,
             Self::Model => icon::CUBE,
             Self::Material => icon::DROP_HALF,
+            Self::Shader => icon::SPARKLE,
+            Self::StateMachine => icon::GRAPH,
+            Self::Rig => icon::PERSON_SIMPLE,
             Self::Image => icon::IMAGE,
             Self::Audio => icon::WAVEFORM,
             Self::Font => icon::TEXT_AA,

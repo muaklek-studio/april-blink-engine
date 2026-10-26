@@ -97,7 +97,11 @@ impl std::fmt::Debug for Thumbnails {
 pub fn has_thumbnail(kind: AssetKind) -> bool {
     matches!(
         kind,
-        AssetKind::Image | AssetKind::Model | AssetKind::Material | AssetKind::Scene
+        AssetKind::Image
+            | AssetKind::Model
+            | AssetKind::Material
+            | AssetKind::Shader
+            | AssetKind::Scene
     )
 }
 

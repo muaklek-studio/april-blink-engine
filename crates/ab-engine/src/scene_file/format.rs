@@ -207,6 +207,28 @@ pub struct NodeDesc {
     /// A `Generator`'s kind, seed and parameters (see [`crate::procgen`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generator: Option<GeneratorDesc>,
+    /// A `Cutscene`'s file (see [`crate::cutscene`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutscene: Option<crate::cutscene::CutsceneDesc>,
+    /// An animation state machine driving the model's player (`anims/hero.abstate`, see
+    /// [`crate::state_machine`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_machine: Option<String>,
+    /// Levels of detail for the meshes in the node (see [`super::lod`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lod: Option<super::lod::LodDesc>,
+    /// An `HLOD` group's switch distance and detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hlod: Option<super::lod::HlodDesc>,
+    /// A rig file for the model (`rigs/knight.abrig`, see [`crate::rig`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rig: Option<String>,
+    /// IK chains (see [`crate::ik`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ik: Vec<crate::ik::IkDesc>,
+    /// A `PostVolume`'s box and values (see [`super::post_volume`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_volume: Option<super::post_volume::PostVolumeDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -435,6 +457,12 @@ pub struct MaterialDesc {
     pub unshaded: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub double_sided: Option<bool>,
+    /// A custom surface shader (`shaders/water.wgsl`; see `ab_rendering::shader`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shader: Option<String>,
+    /// Values for the shader's `// param` lines, by name (the others keep their defaults).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<std::collections::BTreeMap<String, f32>>,
 }
 
 impl MaterialDesc {
@@ -470,6 +498,16 @@ impl MaterialDesc {
             emission_energy: pick(&self.emission_energy, &base.emission_energy),
             unshaded: pick(&self.unshaded, &base.unshaded),
             double_sided: pick(&self.double_sided, &base.double_sided),
+            shader: pick(&self.shader, &base.shader),
+            // A node's values over the file's, name by name.
+            params: match (&self.params, &base.params) {
+                (Some(mine), Some(theirs)) => {
+                    let mut all = theirs.clone();
+                    all.extend(mine.iter().map(|(k, v)| (k.clone(), *v)));
+                    Some(all)
+                }
+                (mine, theirs) => pick(mine, theirs),
+            },
         }
     }
 }
@@ -975,6 +1013,21 @@ pub struct EnvironmentDesc {
     /// Film grain (0 = off).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grain: Option<f32>,
+    /// Depth of field: the sharp distance in metres.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_distance: Option<f32>,
+    /// Depth of field: metres either side of the focus to the full blur.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_range: Option<f32>,
+    /// Depth of field: the largest blur in pixels at 1080 lines (0 = off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth_of_field: Option<f32>,
+    /// Camera motion blur (0 = off, 1 = over one frame's motion).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_blur: Option<f32>,
+    /// Skip meshes hidden behind others (see `ab_rendering::OcclusionCulling`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occlusion_culling: Option<bool>,
 }
 
 #[cfg(test)]

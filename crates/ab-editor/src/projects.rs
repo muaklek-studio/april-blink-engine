@@ -237,6 +237,7 @@ mod tests {
             config: None,
             package: None,
             lfs: true,
+            export: Default::default(),
         };
         let mut recent = RecentProjects::load(&store).unwrap();
         assert!(recent.projects.is_empty());

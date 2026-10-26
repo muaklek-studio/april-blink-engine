@@ -84,6 +84,10 @@ pub struct GameSettings {
     /// the editor and its tools (`ab_project::asset_store`); the game ignores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_lfs: Option<bool>,
+    /// What exports say about the game (creator, icon, version...; see
+    /// `ab_project::export_settings`). Read by the exporter; the game ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<toml::Table>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -123,6 +127,7 @@ impl Default for GameSettings {
             worker_threads: None,
             localization: Default::default(),
             asset_lfs: None,
+            export: None,
         }
     }
 }

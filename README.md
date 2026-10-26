@@ -28,7 +28,19 @@ foundation for making games, with a small codebase that one person can read and 
   loader threads, textures reaching the GPU a few per frame) and then built without a
   stall.
 - **Rendering**: a wgpu forward renderer with shadows, bloom, skinned meshes, particles,
-  debug lines and MSDF text (complex scripts such as Thai included).
+  debug lines and MSDF text (complex scripts such as Thai included). Custom surface
+  shaders in WGSL (`fn surface`, numbers a material sets with `// param`), checked with
+  their errors at the file's own lines and reloaded when saved. Depth of field, camera
+  motion blur and post-processing volumes that blend as the camera moves between them.
+  Levels of detail made from the meshes (simpler versions by screen size), HLOD groups
+  merged into one mesh per material far away, and conservative occlusion culling.
+- **Animation**: keyframe clips with curves, state machines (`.abstate`: parameters,
+  states, blended clips, transitions with conditions and exit times), rigs (`.abrig`:
+  humanoid parts, hinge and cone joint limits, named chains) and IK (two-bone and FABRIK
+  chains, poles, feet placed on the ground). Cutscenes (`.abcut`) move the camera and fire
+  animations, sounds, signals, fades and subtitles on a timeline.
+- **Procedural**: paths that build roads, rails, pipes and fences; generators for scatter,
+  terrain, dungeons, buildings and towns, all repeatable by seed.
 - **Physics**: Rapier 3D bodies, joints, ragdolls, areas, scene queries and a kinematic
   character controller; grid navigation baked from the physics world.
 - **Audio**: Kira sounds, 2D/3D players and a listener; long files (music, ambience) stream
@@ -50,16 +62,20 @@ foundation for making games, with a small codebase that one person can read and 
   main window keeps the panels used all the time (scene, inspector, environment, assets,
   console); each feature has a window of its own: double-click a UI node for the UI
   Editor (one interface at a time), an AnimationPlayer for the Animation Editor, an
-  effect for the Effects Editor; Settings → Game Config; Window → Level Builder (levels
-  from pieces on a grid: stack, turn, align, distribute, rows), Profiler, Debug and
-  source control. The engine sources are found again when the checkout moves, or
+  effect for the Effects Editor, a cutscene for the Cutscene Editor, a character's state
+  machine for the Animation Graph; Settings → Game Config; Window → Level Builder (levels
+  from pieces on a grid: stack, turn, align, distribute, rows), Rigging, Profiler (frame
+  times and memory: heap, assets, GPU, growth warnings, baselines), Debug and source
+  control. Shaders are written in the asset viewer beside a live preview. The engine sources are found again when the checkout moves, or
   located once from the loading screen.
 - **Scripting**: Rust scripts built against the `ab-script` SDK and loaded through a stable
   C ABI, so the editor and games never need rebuilding with them; rebuilt and hot reloaded
   while the game or the editor runs.
 - **Shipping**: a prebuilt player plus the game's script library and an `assets/` folder of
   chunks named by hash (one `.abp` pack per top-level asset folder, plus an index), so a
-  patch ships only the chunks that changed; or one pack inside the executable. For Linux,
+  patch ships only the chunks that changed; or one pack inside the executable. The game's
+  title, creator, description, copyright, version and icon (`[export]` in `game.toml`)
+  are checked before the build and written into the Windows executable. For Linux,
   Windows and macOS (a signed `.app` bundle, exported on a Mac); the editor itself ships as
   a standalone download.
 

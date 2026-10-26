@@ -83,7 +83,12 @@ const PARALLEL_PARTICLES: usize = 512;
 
 /// Simulates every emitter in the tree (in parallel over emitters for busy scenes) and
 /// appends the visible particles to `out`.
-fn simulate_particles(world: &World, delta: f32, out: &mut Vec<ParticleInstance>) {
+fn simulate_particles(
+    world: &World,
+    delta: f32,
+    out: &mut Vec<ParticleInstance>,
+    sources: &mut Vec<(Entity, std::ops::Range<usize>)>,
+) {
     let (Some(mut emitters), Some(transforms), Some(infos)) = (
         world.storage_mut::<ParticleEmitter>(),
         world.storage::<Transform>(),
@@ -126,8 +131,13 @@ fn simulate_particles(world: &World, delta: f32, out: &mut Vec<ParticleInstance>
         }
     });
     out.reserve(work.iter().map(|(_, drawn)| drawn.len()).sum());
-    for (_, drawn) in &work {
+    for ((entity, _), drawn) in &work {
+        if drawn.is_empty() {
+            continue;
+        }
+        let start = out.len();
         out.extend_from_slice(drawn);
+        sources.push((*entity, start..out.len()));
     }
 }
 
@@ -146,7 +156,8 @@ pub fn effects_system(world: &mut World) {
 
     if let Some(mut list) = world.resource_mut::<ParticleDrawList>() {
         list.clear();
-        simulate_particles(world, delta, &mut list.instances);
+        let list = &mut *list;
+        simulate_particles(world, delta, &mut list.instances, &mut list.sources);
     }
 
     for (entity, flash, light) in world

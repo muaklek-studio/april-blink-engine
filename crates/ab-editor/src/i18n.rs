@@ -45,6 +45,47 @@ fn with<R>(read: impl FnOnce(&Catalog) -> R) -> R {
     read(guard.get_or_insert_with(build))
 }
 
+/// A field or section name of the panels in the editor's language: looked up as
+/// `field.<its English text, lowercased, other characters as _>`, the text itself when
+/// there is no translation (or it is not English to start with).
+pub fn field(text: &str) -> String {
+    match field_key(text) {
+        Some(key) => {
+            with(|catalog| catalog.get(&key).map(str::to_owned)).unwrap_or_else(|| text.to_owned())
+        }
+        None => text.to_owned(),
+    }
+}
+
+/// The key [`field`] looks `text` up by, if it has English letters to make one of.
+fn field_key(text: &str) -> Option<String> {
+    let mut key = String::from("field.");
+    let mut gap = false;
+    for c in text.chars() {
+        // Degrees count: `Max (°)` is not `Max`.
+        if c == '°' {
+            if !key.ends_with('.') {
+                key.push('_');
+            }
+            key.push_str("deg");
+            gap = true;
+            continue;
+        }
+        if c.is_ascii_alphanumeric() {
+            if gap && !key.ends_with('.') {
+                key.push('_');
+            }
+            key.push(c.to_ascii_lowercase());
+            gap = false;
+        } else {
+            gap = true;
+        }
+    }
+    // Text in another script makes no key: it is shown as it is.
+    let ascii = text.chars().all(|c| c.is_ascii() || c == '°' || c == '→');
+    (key.len() > "field.".len() && ascii).then_some(key)
+}
+
 /// Switches the editor to `code`; an unknown code keeps the current language.
 pub fn set_language(code: &str) -> bool {
     with(|_| ());
@@ -102,6 +143,24 @@ mod tests {
                 catalog.untranslated(code)
             );
         }
+    }
+
+    #[test]
+    fn field_names_are_found_by_their_english_text() {
+        let mut catalog = built_in();
+        catalog.set_language("th").unwrap();
+        let look = |text: &str| {
+            field_key(text)
+                .and_then(|k| catalog.get(&k).map(str::to_owned))
+                .unwrap_or_else(|| text.to_owned())
+        };
+        assert_eq!(look("Field of view"), "มุมมองภาพ");
+        assert_eq!(look("Max (°)"), "สูงสุด (°)");
+        assert_eq!(look("Max"), "สูงสุด");
+        assert_eq!(look("Size start → end"), "ขนาดเริ่ม → จบ");
+        // Unknown, or not English: as it is.
+        assert_eq!(look("Something new"), "Something new");
+        assert_eq!(field_key("ระดับ"), None);
     }
 
     #[test]

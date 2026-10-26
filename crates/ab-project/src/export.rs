@@ -151,9 +151,13 @@ impl Game {
         }
     }
 
-    /// File name stem of the exported executable and its pack.
+    /// File name stem of the exported executable and its pack: `[export] file_name`, else
+    /// the package's name.
     pub fn name(&self) -> String {
         match self {
+            Self::Project(project) if !project.export.file_name.is_empty() => {
+                project.export.file_name.clone()
+            }
             Self::Project(project) => project
                 .package
                 .clone()
@@ -353,6 +357,19 @@ pub fn export(game: &Game, options: &Options, log: Log<'_>) -> Result<Vec<Export
                 project.root.display()
             );
         }
+        // What the game says about itself: errors stop the export before any build.
+        let issues = project.export.check(&project.root, &project.title);
+        for issue in issues.iter().filter(|i| !i.error) {
+            say!(log, "warning: {}: {}", issue.field, issue.message);
+        }
+        let errors: Vec<String> = issues
+            .iter()
+            .filter(|i| i.error)
+            .map(|i| format!("{}: {}", i.field, i.message))
+            .collect();
+        if !errors.is_empty() {
+            bail!("the export settings need fixing: {}", errors.join("; "));
+        }
     }
     let version = game.version();
     // Check every toolchain first: a missing one should not fail after a long build.
@@ -383,6 +400,57 @@ pub fn export(game: &Game, options: &Options, log: Log<'_>) -> Result<Vec<Export
         results.push(export_one(game, &version, build, options, &pack, log)?);
     }
     Ok(results)
+}
+
+/// Writes the game's icon, version information and console choice into the Windows
+/// executable at `exe` (see [`crate::export_settings`]).
+fn windows_metadata(
+    game: &Game,
+    version: &str,
+    exe_name: &str,
+    exe: &Path,
+    log: Log<'_>,
+) -> Result<()> {
+    let settings = match game {
+        Game::Project(project) => project.export.clone(),
+        Game::Engine { .. } => crate::export_settings::ExportSettings::default(),
+    };
+    let icon = match game {
+        Game::Project(project) => settings
+            .icon_path(&project.root)
+            .map(|p| std::fs::read(&p).with_context(|| format!("reading the icon {}", p.display())))
+            .transpose()?,
+        Game::Engine { .. } => None,
+    };
+    let meta = crate::export_settings::WindowsMetadata {
+        title: game.title().to_owned(),
+        version: version.to_owned(),
+        creator: settings.creator.clone(),
+        description: settings.description.clone(),
+        copyright: settings.copyright.clone(),
+        file_name: exe_name.to_owned(),
+        icon,
+        console: settings.console,
+    };
+    crate::export_settings::apply_windows(exe, &meta)
+        .with_context(|| format!("writing the game's details into {exe_name}"))?;
+    say!(
+        log,
+        "windows: {} {version}{}{}{}",
+        meta.title,
+        if meta.creator.is_empty() {
+            String::new()
+        } else {
+            format!(" by {}", meta.creator)
+        },
+        if meta.icon.is_some() {
+            ", with its icon"
+        } else {
+            ", no icon"
+        },
+        if meta.console { ", with a console" } else { "" },
+    );
+    Ok(())
 }
 
 /// Bytes of a file, or of everything in a folder.
@@ -435,15 +503,20 @@ fn export_one(
     if options.single_file && !single_file {
         say!(log, "single file: the app bundle holds the assets on macOS");
     }
+    // The player, with the game's icon and details on Windows (before a pack goes on its end).
+    let player = bin_dir.join(format!("{exe_name}.player"));
+    std::fs::copy(&built.executable, &player)
+        .with_context(|| format!("copying {}", built.executable.display()))?;
+    if platform == Platform::Windows {
+        windows_metadata(game, version, &exe_name, &player, log)?;
+    }
     let (stats, packs, assets) = if single_file {
-        (
-            append_to_executable(&built.executable, pack, &exe)?,
-            1,
-            exe.clone(),
-        )
+        let made = append_to_executable(&player, pack, &exe);
+        let _ = std::fs::remove_file(&player);
+        (made?, 1, exe.clone())
     } else {
-        std::fs::copy(&built.executable, &exe)
-            .with_context(|| format!("copying {}", built.executable.display()))?;
+        std::fs::rename(&player, &exe)
+            .with_context(|| format!("moving {} to {}", player.display(), exe.display()))?;
         let chunks = bin_dir.join(CHUNK_DIR);
         let written = pack
             .write_chunks(&chunks)

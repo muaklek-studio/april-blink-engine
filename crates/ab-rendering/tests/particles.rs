@@ -75,6 +75,7 @@ fn particles_draw_in_front_and_hide_behind_geometry() {
     // A red alpha particle in front of the cube covers it.
     tree.world_mut().insert_resource(ParticleDrawList {
         instances: vec![particle(Vec3::new(0.0, 0.0, 2.0), Color::RED, false)],
+        ..Default::default()
     });
     let (front, count) = render(&gpu, &tree);
     assert_eq!(count, 1);
@@ -84,6 +85,7 @@ fn particles_draw_in_front_and_hide_behind_geometry() {
     // The same particle behind the cube is hidden by it.
     tree.world_mut().insert_resource(ParticleDrawList {
         instances: vec![particle(Vec3::new(0.0, 0.0, -2.0), Color::RED, false)],
+        ..Default::default()
     });
     let (behind, _) = render(&gpu, &tree);
     assert_eq!(center(&behind), base, "depth-tested against the cube");
@@ -95,6 +97,7 @@ fn particles_draw_in_front_and_hide_behind_geometry() {
             Color::rgba(0.0, 0.6, 0.0, 1.0),
             true,
         )],
+        ..Default::default()
     });
     let (glow, _) = render(&gpu, &tree);
     let g = center(&glow);
@@ -106,6 +109,7 @@ fn particles_draw_in_front_and_hide_behind_geometry() {
     // Behind the camera: culled.
     tree.world_mut().insert_resource(ParticleDrawList {
         instances: vec![particle(Vec3::new(0.0, 0.0, 9.0), Color::RED, false)],
+        ..Default::default()
     });
     assert_eq!(render(&gpu, &tree).1, 0);
 }
@@ -120,6 +124,7 @@ fn nearer_alpha_particles_draw_on_top() {
             particle(Vec3::new(0.0, 0.0, 3.0), Color::BLUE, false),
             particle(Vec3::new(0.0, 0.0, 2.0), Color::RED, false),
         ],
+        ..Default::default()
     });
     let c = center(&render(&gpu, &tree).0);
     assert!(

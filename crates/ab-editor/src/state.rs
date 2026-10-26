@@ -94,6 +94,8 @@ pub struct Editor {
     /// The open scene's file as last read or written (size, time): a change by something
     /// else (a git switch, pull or discard, another editor) is noticed.
     scene_stamp: Option<(u64, std::time::SystemTime)>,
+    /// The custom shaders' files as last read, by path (see [`Editor::check_shaders_on_disk`]).
+    shader_stamps: std::collections::HashMap<String, Option<(u64, std::time::SystemTime)>>,
     /// The scene as last opened or saved: undoing back to it leaves nothing unsaved.
     saved_scene: Option<SceneFile>,
     /// Counts edits and scene replacements: views drawn in the background redraw when it
@@ -104,6 +106,15 @@ pub struct Editor {
     /// Particles and other effects animate while editing.
     pub preview_effects: bool,
     pub status: Option<Status>,
+    /// Set by a view while it shows one subject alone (see [`Editor::view_root`]).
+    pub view_scope: Option<NodeHandle>,
+    /// The floor such a view stands its subject on: its mesh and material, made once per
+    /// set of render assets (whose id comes first).
+    pub studio_floor: Option<(
+        u64,
+        ab_engine::rendering::MeshHandle,
+        ab_engine::rendering::MaterialHandle,
+    )>,
     /// The game's script library, for Play mode.
     pub scripts_library: Option<PathBuf>,
     /// The game's script files (`src/scripts`), when the project is a game crate.
@@ -258,12 +269,15 @@ impl Editor {
             selected: Vec::new(),
             modified: false,
             scene_stamp: None,
+            shader_stamps: Default::default(),
             saved_scene: None,
             revision: 0,
             history: History::default(),
             mode: Mode::Edit,
             preview_effects: true,
             status: None,
+            view_scope: None,
+            studio_floor: None,
             scripts_library: scripts,
             scripts: game_scripts,
             input_map,
@@ -317,6 +331,14 @@ impl Editor {
             Some(backup) => ab_engine::core::fs::write_with_backup(full, contents, backup),
             None => ab_engine::core::fs::atomic_write(full, contents),
         }
+    }
+
+    /// The node a view shows (and picks from): its isolated subject while one is drawn
+    /// (see [`crate::viewport::Viewport::isolate`]), else the scene.
+    pub fn view_root(&self) -> NodeHandle {
+        self.view_scope
+            .filter(|&n| self.tree().is_valid(n))
+            .unwrap_or(self.scene_root)
     }
 
     pub fn project(&self) -> &Path {
@@ -530,6 +552,33 @@ impl Editor {
             self.info(format!(
                 "Reloaded {path}: it was changed outside the editor"
             ));
+        }
+    }
+
+    /// Reads custom shaders whose files changed (saved in the shader viewer or another
+    /// program) again: the scene draws the new code at once, in Play too. One that does not
+    /// build is reported, and drawn with the standard surface until it does.
+    pub fn check_shaders_on_disk(&mut self) {
+        for path in ab_engine::scene_file::shader_paths(self.tree()) {
+            let now = self.disk_stamp(&path);
+            match self.shader_stamps.insert(path.clone(), now) {
+                // First seen: as loaded.
+                None => continue,
+                Some(before) if before == now => continue,
+                Some(_) => {}
+            }
+            match ab_engine::scene_file::reload_shader(self.tree_mut(), &path) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let code =
+                        std::fs::read_to_string(self.project().join(&path)).unwrap_or_default();
+                    match ab_engine::rendering::shader::validate(&code) {
+                        Ok(()) => self.info(format!("Reloaded shader {path}")),
+                        Err(err) => self.fail(format!("Shader {path}: {err}")),
+                    }
+                }
+                Err(err) => self.fail(err),
+            }
         }
     }
 
@@ -1534,13 +1583,22 @@ impl Editor {
             .find(|&c| tree.component::<Generated>(c).is_some())
             .ok_or("the generator made nothing")?;
         let made = tree.children(built);
+        // A mesh made in code (not a primitive, not part of an instanced model or prefab).
+        let in_instance = |n: NodeHandle| {
+            std::iter::successors(Some(n), |&x| tree.parent(x))
+                .take_while(|&x| x != built)
+                .any(|x| {
+                    tree.component::<ab_engine::scene_file::SceneInstance>(x)
+                        .is_some()
+                })
+        };
         let generated_mesh = made.iter().any(|&m| {
             tree.subtree(m).into_iter().any(|n| {
                 tree.component::<MeshInstance3D>(n).is_some()
                     && tree
                         .component::<SceneOrigin>(n)
                         .is_none_or(|o| o.mesh.is_none())
-                    && self.instance_owner(n) == Some(n)
+                    && !in_instance(n)
             })
         });
         if generated_mesh {
@@ -2400,6 +2458,153 @@ mod tests {
         assert_eq!(editor.selected.len(), 3);
         let last = editor.selection.unwrap();
         assert!((at(&editor, last).z - (start.z + 4.5)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lods_set_in_the_inspector_are_built() {
+        let mut editor = editor();
+        editor.select(None);
+        editor.add_scene(crate::create::MESHES[1].scene(), Some(Vec3::ZERO));
+        let node = editor.selection.unwrap();
+        let old = editor.describe_node(node).unwrap();
+        let mut new = old.clone();
+        new.lod = Some(ab_engine::scene_file::lod::LodDesc {
+            levels: vec![[0.3, 0.5]],
+            cull: Some(0.01),
+        });
+        editor.apply_desc(node, &old, new);
+        editor.end_gesture();
+        let node = editor.selection.unwrap();
+        let tree = editor.tree();
+        let mesh = tree
+            .subtree(node)
+            .into_iter()
+            .find(|&n| {
+                tree.component::<ab_engine::rendering::MeshInstance3D>(n)
+                    .is_some()
+            })
+            .unwrap();
+        let lod = tree
+            .component::<ab_engine::rendering::MeshLod>(mesh)
+            .map(|l| l.clone());
+        assert!(
+            lod.is_some_and(|l| l.levels.len() == 1),
+            "levels built on apply"
+        );
+    }
+
+    #[test]
+    fn changed_shader_files_are_drawn_at_once() {
+        let project = std::env::temp_dir().join(format!("ab-shader-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join("shaders")).unwrap();
+        let file = project.join("shaders/glow.wgsl");
+        std::fs::write(&file, ab_engine::rendering::shader::TEMPLATE).unwrap();
+        let mut editor = Editor::new(project.clone(), None, ab_engine::audio::AudioOutput::Silent);
+        editor.select(None);
+        let mut cube: ab_engine::scene_file::SceneFile = crate::create::MESHES[0].scene();
+        cube.nodes[0].material = Some(ab_engine::scene_file::MaterialDesc {
+            shader: Some("shaders/glow.wgsl".into()),
+            ..Default::default()
+        });
+        editor.add_scene(cube, None);
+        let node = editor.selection.unwrap();
+        let shader = {
+            let handle = editor
+                .tree()
+                .component::<ab_engine::rendering::MeshInstance3D>(node)
+                .unwrap()
+                .material;
+            let assets = editor
+                .tree()
+                .world()
+                .resource::<ab_engine::rendering::RenderAssets>()
+                .unwrap();
+            assets.material(handle).unwrap().shader.unwrap()
+        };
+        let code = |editor: &Editor| {
+            let assets = editor
+                .tree()
+                .world()
+                .resource::<ab_engine::rendering::RenderAssets>()
+                .unwrap();
+            assets.shader(shader).unwrap().code.clone()
+        };
+        editor.check_shaders_on_disk();
+        let changed = ab_engine::rendering::shader::TEMPLATE.replace("4.0", "8.0 * 1.0");
+        std::fs::write(&file, &changed).unwrap();
+        editor.check_shaders_on_disk();
+        assert_eq!(code(&editor), changed);
+        assert!(
+            editor.status.as_ref().is_some_and(|s| !s.error),
+            "it builds"
+        );
+        // A broken file is reported (and the renderer falls back to the standard surface).
+        std::fs::write(
+            &file,
+            "fn surface(input: SurfaceInput, base: Surface) -> Surface { nope }",
+        )
+        .unwrap();
+        editor.check_shaders_on_disk();
+        assert!(editor.status.as_ref().is_some_and(|s| s.error));
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn generators_rebuild_on_change_and_bake_into_nodes() {
+        let mut editor = editor();
+        editor.select(None);
+        let building = crate::create::PROCEDURAL
+            .iter()
+            .find(|t| t.toml.contains("building"))
+            .unwrap();
+        editor.add_scene(building.scene(), Some(Vec3::ZERO));
+        let node = editor.selection.unwrap();
+        let roofs =
+            |editor: &Editor, n: NodeHandle| editor.tree().get_node(n, "Built/Roof").is_some();
+        assert!(roofs(&editor, node));
+        let walls = |editor: &Editor, n: NodeHandle| {
+            let built = editor.tree().get_node(n, "Built").unwrap();
+            editor.tree().children(built).len()
+        };
+        let before = walls(&editor, node);
+        // One more floor: rebuilt with more walls.
+        let old = editor.describe_node(node).unwrap();
+        let mut new = old.clone();
+        new.generator
+            .as_mut()
+            .unwrap()
+            .params
+            .insert("floors".into(), 5.into());
+        editor.apply_desc(node, &old, new);
+        editor.end_gesture();
+        let node = editor.selection.unwrap();
+        assert!(walls(&editor, node) > before);
+        // What it made is not part of the scene file, and cannot be selected on its own.
+        let roof = editor.tree().get_node(node, "Built/Roof").unwrap();
+        assert!(!editor.is_editable(roof));
+        assert_eq!(editor.instance_owner(roof), Some(node));
+
+        // Bake: ordinary nodes in a group; Undo brings the generator back.
+        let group = editor.bake_generator(node).unwrap();
+        assert!(editor.tree().get_node(group, "Roof").is_some());
+        assert!(editor.is_editable(editor.tree().get_node(group, "Roof").unwrap()));
+        editor.undo();
+        let back = editor.node_at("Building").unwrap();
+        assert_eq!(editor.tree().class_name(back), Some("Generator"));
+
+        // A terrain makes a mesh only it can make: not baked.
+        editor.select(None);
+        let terrain = crate::create::PROCEDURAL
+            .iter()
+            .find(|t| t.toml.contains("terrain"))
+            .unwrap();
+        editor.add_scene(terrain.scene(), None);
+        let t = editor.selection.unwrap();
+        assert!(editor
+            .bake_generator(t)
+            .unwrap_err()
+            .contains("cannot be baked"));
     }
 
     #[test]

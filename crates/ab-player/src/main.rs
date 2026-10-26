@@ -24,6 +24,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use ab_project::{Platform, GAME_FILE};
+
+/// Counts the heap for the memory profiler (see `ab_engine::memory`).
+#[global_allocator]
+static ALLOCATOR: ab_engine::core::memory::CountingAllocator =
+    ab_engine::core::memory::CountingAllocator;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {

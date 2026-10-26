@@ -19,5 +19,5 @@ pub use context::{
     DEFAULT_TEXTURE_UPLOAD_BUDGET,
 };
 pub use offscreen::OffscreenTarget;
-pub use scene_renderer::{FrameStats, SceneRenderer};
+pub use scene_renderer::{FrameStats, GpuMemory, SceneRenderer};
 pub use window::WindowRenderer;

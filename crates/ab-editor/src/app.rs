@@ -167,6 +167,13 @@ enum ToolWindow {
     UiDesigner,
     /// The Git client: graph, branches, merges, diffs (only in a window).
     Git,
+    /// The Cutscene Editor: a view through the shot over the cutscene's timeline (only in a
+    /// window).
+    Cutscene,
+    /// The Animation Graph: a state machine's states and transitions (only in a window).
+    AnimationGraph,
+    /// The Rigging editor: a character's skeleton over a view of it (only in a window).
+    Rigging,
 }
 
 impl ToolWindow {
@@ -176,6 +183,9 @@ impl ToolWindow {
             ToolWindow::Panel(tab) => tab.name(),
             ToolWindow::UiDesigner => "ui_designer",
             ToolWindow::Git => "git",
+            ToolWindow::Cutscene => "cutscene_editor",
+            ToolWindow::AnimationGraph => "animation_graph",
+            ToolWindow::Rigging => "rigging",
         }
     }
 
@@ -185,6 +195,15 @@ impl ToolWindow {
         }
         if key == "git" {
             return Some(ToolWindow::Git);
+        }
+        if key == "cutscene_editor" {
+            return Some(ToolWindow::Cutscene);
+        }
+        if key == "animation_graph" {
+            return Some(ToolWindow::AnimationGraph);
+        }
+        if key == "rigging" {
+            return Some(ToolWindow::Rigging);
         }
         Tab::ALL
             .into_iter()
@@ -242,6 +261,24 @@ impl ToolWindow {
                 [1500.0, 920.0],
                 [1000.0, 600.0],
             ),
+            ToolWindow::Cutscene => (
+                icon::FILM_SLATE,
+                t("window.cutscene_editor"),
+                [1400.0, 900.0],
+                [900.0, 560.0],
+            ),
+            ToolWindow::AnimationGraph => (
+                icon::GRAPH,
+                t("window.animation_graph"),
+                [1400.0, 860.0],
+                [900.0, 520.0],
+            ),
+            ToolWindow::Rigging => (
+                icon::PERSON_SIMPLE,
+                t("window.rigging"),
+                [1400.0, 900.0],
+                [900.0, 560.0],
+            ),
         };
         crate::tool_window::Spec {
             key: self.key().to_owned(),
@@ -256,6 +293,31 @@ impl ToolWindow {
     }
 }
 
+/// What the selected AnimationPlayer animates: the lowest node holding it and all its
+/// targets (a model instance, or the parent of a player and the nodes beside it).
+fn animated_root(editor: &Editor) -> Option<ab_engine::scene::NodeHandle> {
+    let tree = editor.tree();
+    let selected = editor.selection?;
+    let player = std::iter::successors(Some(selected), |&n| tree.parent(n))
+        .chain(tree.subtree(selected))
+        .find(|&n| {
+            tree.component::<ab_engine::animation::AnimationPlayer>(n)
+                .is_some()
+        })?;
+    let targets = tree
+        .component::<ab_engine::animation::AnimationPlayer>(player)
+        .map(|p| p.targets.clone())
+        .unwrap_or_default();
+    let holds_all = |n: ab_engine::scene::NodeHandle| {
+        targets
+            .iter()
+            .all(|&t| std::iter::successors(Some(t), |&a| tree.parent(a)).any(|a| a == n))
+    };
+    let root = std::iter::successors(Some(player), |&n| tree.parent(n)).find(|&n| holds_all(n))?;
+    // Holding everything in the scene: nothing to isolate.
+    (root != editor.scene_root).then_some(root)
+}
+
 /// The animation workspace's own panels (the timeline is the Animation panel's).
 #[derive(Default)]
 struct AnimationWorkspace {
@@ -264,6 +326,9 @@ struct AnimationWorkspace {
     redraw: crate::tool_window::Redraw,
     scene_tree: SceneTreePanel,
     inspector: InspectorPanel,
+    /// What is animated (see [`animated_root`]): kept while the selection moves inside it
+    /// (to a bone, which is beside the player, not above or below it).
+    subject: Option<ab_engine::scene::NodeHandle>,
 }
 
 impl AnimationWorkspace {
@@ -280,6 +345,19 @@ impl AnimationWorkspace {
             view.frame_selection(editor);
             view
         });
+        // The animated model alone: the node holding the player and everything it moves.
+        self.subject = match animated_root(editor) {
+            Some(root) => Some(root),
+            None => self.subject.filter(|&s| {
+                let tree = editor.tree();
+                tree.is_valid(s)
+                    && editor.selection.is_none_or(|n| {
+                        std::iter::successors(Some(n), |&a| tree.parent(a)).any(|a| a == s)
+                    })
+            }),
+        };
+        view.isolate = self.subject;
+        self.scene_tree.root = self.subject;
         let focus = view.camera.pivot;
         // Every frame while in use or playing a clip; a few times a second otherwise.
         let active = crate::tool_window::in_use(ui.ctx()) || animation.is_playing();
@@ -332,6 +410,115 @@ impl AnimationWorkspace {
     }
 }
 
+/// The Rigging editor's window: the bones on the left, a view with the skeleton drawn over
+/// it, the bone's limits, the humanoid parts and the chains on the right.
+#[derive(Default)]
+struct RiggingWorkspace {
+    view: Option<crate::viewport::Viewport>,
+    redraw: crate::tool_window::Redraw,
+    panel: crate::panels::rigging::RiggingPanel,
+    /// The model the view was framed on.
+    framed: Option<ab_engine::scene::NodeHandle>,
+}
+
+impl RiggingWorkspace {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        editor: &mut Editor,
+        main: &ViewportArea,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        self.panel.follow(editor);
+        let view = self
+            .view
+            .get_or_insert_with(|| main.sharing(crate::viewport::ViewKind::Perspective));
+        if self.panel.model() != self.framed {
+            self.framed = self.panel.model();
+            view.frame_selection(editor);
+        }
+        let active = crate::tool_window::in_use(ui.ctx());
+        view.redraw = self.redraw.due(active, editor.revision());
+        crate::tool_window::toolbar(ui, "rigging", |ui| self.panel.toolbar(ui, editor));
+        crate::tool_window::side(
+            ui,
+            "rigging-bones",
+            true,
+            260.0,
+            icon::BONE,
+            &t("rigging.bones"),
+            |ui| {
+                self.panel.bones_ui(ui, editor);
+            },
+        );
+        crate::tool_window::side(
+            ui,
+            "rigging-details",
+            false,
+            340.0,
+            icon::SLIDERS,
+            &t("rigging.details"),
+            |ui| {
+                self.panel.details_ui(ui, editor);
+            },
+        );
+        view.overlay = self.panel.overlay(editor);
+        // The character alone, its bones not hidden behind selection boxes.
+        view.isolate = self.panel.model();
+        view.options.highlight_selection = false;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::BG_0))
+            .show(ui, |ui| {
+                keeping_camera(editor, |editor| view.show(ui, editor, render_state));
+            });
+    }
+}
+
+/// The Cutscene Editor's window: a view of the scene, through the cutscene's camera while
+/// Look Through is on, above the timeline.
+#[derive(Default)]
+struct CutsceneWorkspace {
+    /// A view with its own camera, made on first show.
+    view: Option<crate::viewport::Viewport>,
+    redraw: crate::tool_window::Redraw,
+    panel: crate::panels::cutscene::CutscenePanel,
+}
+
+impl CutsceneWorkspace {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        editor: &mut Editor,
+        main: &ViewportArea,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) {
+        let view = self
+            .view
+            .get_or_insert_with(|| main.sharing(crate::viewport::ViewKind::Perspective));
+        let active = crate::tool_window::in_use(ui.ctx()) || self.panel.is_playing();
+        view.redraw = self.redraw.due(active, editor.revision());
+        // Key Camera records where the free view is.
+        let free = (view.look_through.is_none()).then(|| (view.view_global(), view.camera.fov));
+        egui::Panel::bottom("cutscene-timeline")
+            .resizable(true)
+            .default_size(300.0)
+            .size_range(160.0..=800.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::BG_1)
+                    .inner_margin(egui::Margin::same(6))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER)),
+            )
+            .show(ui, |ui| self.panel.show(ui, editor, free));
+        view.look_through = self.panel.preview_camera(editor);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::BG_0))
+            .show(ui, |ui| {
+                keeping_camera(editor, |editor| view.show(ui, editor, render_state));
+            });
+    }
+}
+
 /// The Effects Editor's window: a view of the effect, framed on it, beside the effect's
 /// layers and settings.
 #[derive(Default)]
@@ -363,6 +550,8 @@ impl EffectsWorkspace {
             self.framed = effect;
             view.frame_selection(editor);
         }
+        // The effect alone, not the scene around it.
+        view.isolate = effect;
         // Particles move: drawn every frame while previewed.
         let active = crate::tool_window::in_use(ui.ctx()) || editor.preview_effects;
         view.redraw = self.redraw.due(active, editor.revision());
@@ -525,6 +714,9 @@ pub struct EditorApp {
     ui_designer: crate::ui_designer::UiDesigner,
     animation_workspace: AnimationWorkspace,
     effects_workspace: EffectsWorkspace,
+    cutscene_workspace: CutsceneWorkspace,
+    state_graph: crate::panels::state_graph::StateGraphPanel,
+    rigging_workspace: RiggingWorkspace,
     /// Help → About (the machine is read the first time it opens).
     about: crate::about::About,
     git_window: crate::git_window::GitWindow,
@@ -758,7 +950,12 @@ impl EditorApp {
                 &project_dir,
             ),
             console: ConsolePanel::new(logs),
-            profiler: ProfilerPanel::default(),
+            // `--show memory`: the profiler's memory view (screenshots of it).
+            profiler: {
+                let mut panel = ProfilerPanel::default();
+                panel.memory = options.show.iter().any(|name| name == "memory");
+                panel
+            },
             git_panel: GitPanel::default(),
             git: None,
             dialog,
@@ -781,6 +978,9 @@ impl EditorApp {
             ui_designer: Default::default(),
             animation_workspace: Default::default(),
             effects_workspace: Default::default(),
+            cutscene_workspace: Default::default(),
+            state_graph: Default::default(),
+            rigging_workspace: Default::default(),
             about: crate::about::About::new(render_state.map(|s| s.adapter.get_info())),
             git_window: Default::default(),
             placements,
@@ -884,6 +1084,14 @@ impl EditorApp {
                 self.editor.select(Some(node));
                 self.open_window(ctx, ToolWindow::Panel(Tab::Effects));
             }
+            Some(Feature::Cutscene) => {
+                self.editor.select(Some(node));
+                self.open_window(ctx, ToolWindow::Cutscene);
+            }
+            Some(Feature::AnimationGraph) => {
+                self.editor.select(Some(node));
+                self.open_window(ctx, ToolWindow::AnimationGraph);
+            }
             None => {}
         }
     }
@@ -968,6 +1176,37 @@ impl EditorApp {
                     let (window, git) = (&mut self.git_window, self.git.as_mut());
                     let project = self.editor.project().to_path_buf();
                     host.show(ctx, &spec, |ui| window.show(ui, git, &project))
+                }
+                ToolWindow::Cutscene => {
+                    let (workspace, editor, viewport) = (
+                        &mut self.cutscene_workspace,
+                        &mut self.editor,
+                        &self.viewport,
+                    );
+                    host.show(ctx, &spec, |ui| {
+                        workspace.show(ui, editor, viewport, render_state)
+                    })
+                }
+                ToolWindow::AnimationGraph => {
+                    let (graph, editor) = (&mut self.state_graph, &mut self.editor);
+                    host.show(ctx, &spec, |ui| {
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.set_min_size(ui.available_size());
+                                graph.show(ui, editor);
+                            });
+                    })
+                }
+                ToolWindow::Rigging => {
+                    let (workspace, editor, viewport) = (
+                        &mut self.rigging_workspace,
+                        &mut self.editor,
+                        &self.viewport,
+                    );
+                    host.show(ctx, &spec, |ui| {
+                        workspace.show(ui, editor, viewport, render_state)
+                    })
                 }
                 ToolWindow::Panel(Tab::Animation) => {
                     let (workspace, animation, editor, viewport) = (
@@ -1315,6 +1554,9 @@ impl EditorApp {
             }
             Command::OpenAssetBrowser => self.open_window(ctx, ToolWindow::Panel(Tab::Assets)),
             Command::OpenGit => self.open_window(ctx, ToolWindow::Git),
+            Command::OpenCutsceneEditor => self.open_window(ctx, ToolWindow::Cutscene),
+            Command::OpenAnimationGraph => self.open_window(ctx, ToolWindow::AnimationGraph),
+            Command::OpenRigging => self.open_window(ctx, ToolWindow::Rigging),
             // Not while playing.
             Command::NewScene | Command::OpenScene | Command::SaveAs | Command::SelectNone => {}
         }
@@ -1544,6 +1786,9 @@ impl EditorApp {
                 ),
                 (ToolWindow::Panel(Tab::Assets), Command::OpenAssetBrowser),
                 (ToolWindow::Git, Command::OpenGit),
+                (ToolWindow::Cutscene, Command::OpenCutsceneEditor),
+                (ToolWindow::AnimationGraph, Command::OpenAnimationGraph),
+                (ToolWindow::Rigging, Command::OpenRigging),
             ] {
                 let open = self.windows.contains(&window);
                 let text = format!("{}  {}", command.icon(), command.label());
@@ -2321,6 +2566,7 @@ impl EditorApp {
         if self.dialog.is_none() && self.disk_checked.elapsed() >= Duration::from_secs(1) {
             self.disk_checked = now;
             self.editor.check_scene_on_disk();
+            self.editor.check_shaders_on_disk();
         }
 
         let title = self.editor.title();

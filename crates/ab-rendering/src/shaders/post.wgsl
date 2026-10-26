@@ -1,5 +1,5 @@
-// Full-screen post-process: light shafts (upsampled), chromatic aberration, bloom, exposure,
-// ACES tonemap,
+// Full-screen post-process: camera motion blur or depth of field, light shafts (upsampled),
+// chromatic aberration, bloom, exposure, ACES tonemap,
 // saturation/contrast/tint, vignette, film grain, a screen overlay (flashes, fades), and sRGB
 // encoding when the target format does not do it in hardware.
 
@@ -9,6 +9,11 @@ struct Post {
     vignette: vec4<f32>,  // intensity, smoothness, encode sRGB (0/1), light shafts (0/1)
     effects: vec4<f32>,   // chromatic aberration, grain, bloom intensity, seconds
     overlay: vec4<f32>,   // rgb, amount
+    dof: vec4<f32>,       // focus distance, focus range, max blur (px at 1080 lines), on
+    motion: vec4<f32>,    // strength, on
+    camera: vec4<f32>,    // camera position
+    inverse_view_proj: mat4x4<f32>,
+    previous_view_proj: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var hdr_texture: texture_2d<f32>;
@@ -40,6 +45,76 @@ fn shafts_at(pixel: vec2<f32>, distance: f32) -> vec3<f32> {
         }
     }
     return sum / total;
+}
+
+// The HDR color and distance at `uv`, without derivatives (usable in any control flow).
+fn hdr_at(uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(hdr_texture, hdr_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0);
+}
+
+// Blur radius in pixels for something `distance` metres away.
+fn circle_of_confusion(distance: f32, scale: f32) -> f32 {
+    let away = abs(distance - post.dof.x);
+    return clamp(away / post.dof.y, 0.0, 1.0) * post.dof.z * scale;
+}
+
+const DOF_TAPS: i32 = 24;
+const GOLDEN_ANGLE: f32 = 2.39996323;
+
+// Depth of field: a disc of taps as wide as this pixel's blur, each counting as far as its
+// own blur reaches (a sharp thing in front is not smeared over by the blurred background).
+fn depth_of_field(uv: vec2<f32>, centre: vec4<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(hdr_texture));
+    let scale = size.y / 1080.0;
+    let radius = circle_of_confusion(centre.a, scale);
+    if radius < 0.5 {
+        return centre.rgb;
+    }
+    var sum = centre.rgb;
+    var total = 1.0;
+    for (var i = 1; i <= DOF_TAPS; i++) {
+        let r = sqrt(f32(i) / f32(DOF_TAPS)) * radius;
+        let a = f32(i) * GOLDEN_ANGLE;
+        let tap = hdr_at(uv + vec2<f32>(cos(a), sin(a)) * r / size);
+        let reach = circle_of_confusion(tap.a, scale);
+        let w = clamp(reach - r + 1.0, 0.0, 1.0);
+        sum += tap.rgb * w;
+        total += w;
+    }
+    return sum / total;
+}
+
+const MOTION_TAPS: i32 = 10;
+
+// Camera motion blur: where this pixel's point was on screen last frame, and the colors
+// along the way.
+fn motion_blur(uv: vec2<f32>, centre: vec4<f32>) -> vec4<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let far = post.inverse_view_proj * vec4<f32>(ndc, 1.0, 1.0);
+    let dir = normalize(far.xyz / far.w - post.camera.xyz);
+    let world = post.camera.xyz + dir * centre.a;
+    let before = post.previous_view_proj * vec4<f32>(world, 1.0);
+    if before.w <= 1e-4 {
+        return vec4<f32>(centre.rgb, 0.0);
+    }
+    let before_uv = before.xy / before.w * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    var velocity = (uv - before_uv) * post.motion.x;
+    // A cut or a jump is not motion.
+    let speed = length(velocity);
+    if speed > 0.25 {
+        return vec4<f32>(centre.rgb, 0.0);
+    }
+    velocity = velocity * min(1.0, 0.06 / max(speed, 1e-6));
+    let size = vec2<f32>(textureDimensions(hdr_texture));
+    if length(velocity * size) < 1.0 {
+        return vec4<f32>(centre.rgb, 0.0);
+    }
+    var sum = vec3<f32>(0.0);
+    for (var i = 0; i < MOTION_TAPS; i++) {
+        let t = f32(i) / f32(MOTION_TAPS - 1) - 0.5;
+        sum += hdr_at(uv + velocity * t).rgb;
+    }
+    return vec4<f32>(sum / f32(MOTION_TAPS), 1.0);
 }
 
 struct VsOut {
@@ -89,6 +164,19 @@ fn fs_post(in: VsOut) -> @location(0) vec4<f32> {
         textureSample(hdr_texture, hdr_sampler, in.uv).g,
         textureSample(hdr_texture, hdr_sampler, in.uv + offset).b,
     );
+    // Motion blur while the camera moves, else depth of field (both replace the sharp
+    // color; chromatic aberration is kept only on a sharp image).
+    var blurred = false;
+    if post.motion.y > 0.5 {
+        let moved = motion_blur(in.uv, hdr_at(in.uv));
+        if moved.a > 0.5 {
+            color = moved.rgb;
+            blurred = true;
+        }
+    }
+    if !blurred && post.dof.w > 0.5 {
+        color = depth_of_field(in.uv, hdr_at(in.uv));
+    }
     if post.vignette.w > 0.5 {
         let full = vec2<i32>(textureDimensions(hdr_texture));
         let pixel = min(vec2<i32>(in.clip.xy), full - vec2<i32>(1));

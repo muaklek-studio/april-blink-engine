@@ -130,6 +130,26 @@ impl InspectorPanel {
                 }
                 self.node_section(ui, editor, node, &mut desc);
                 class_sections(ui, editor, node, &class, &mut desc);
+                if is_3d {
+                    rig_section(ui, editor, node, &mut desc);
+                    lod_section(ui, editor, node, &class, &mut desc);
+                }
+                if let Some(rebuild) = ui.ctx().data_mut(|d| {
+                    d.remove_temp::<Option<NodeHandle>>(egui::Id::new(LOD_REBUILD))
+                        .flatten()
+                }) {
+                    ab_engine::scene_file::lod::build_all(editor.tree_mut(), rebuild);
+                    editor.info("Levels of detail rebuilt");
+                }
+                if let Some(bake) = ui.ctx().data_mut(|d| {
+                    d.remove_temp::<Option<NodeHandle>>(egui::Id::new(BAKE_REQUEST))
+                        .flatten()
+                }) {
+                    match editor.bake_generator(bake) {
+                        Ok(_) => return,
+                        Err(err) => editor.fail(err),
+                    }
+                }
                 if let Some(missing) = editor
                     .tree()
                     .component::<ab_engine::scene_file::prefab::MissingInstance>(node)
@@ -265,15 +285,21 @@ impl InspectorPanel {
                     ui.end_row();
                 });
                 ui.horizontal(|ui| {
-                    if ui.small_button("Reset position").clicked() {
+                    if ui
+                        .small_button(crate::i18n::field("Reset position"))
+                        .clicked()
+                    {
                         position = [0.0; 3];
                         changed = true;
                     }
-                    if ui.small_button("Reset rotation").clicked() {
+                    if ui
+                        .small_button(crate::i18n::field("Reset rotation"))
+                        .clicked()
+                    {
                         rotation = [0.0; 3];
                         changed = true;
                     }
-                    if ui.small_button("Reset scale").clicked() {
+                    if ui.small_button(crate::i18n::field("Reset scale")).clicked() {
                         scale = [1.0; 3];
                         changed = true;
                     }
@@ -394,8 +420,12 @@ impl InspectorPanel {
                         .collect();
                     egui::ComboBox::from_id_salt("add_script")
                         .selected_text(
-                            RichText::new(format!("{}  Add script…", icon::PLUS))
-                                .color(theme::TEXT_DIM),
+                            RichText::new(format!(
+                                "{}  {}",
+                                icon::PLUS,
+                                crate::i18n::field("Add script…")
+                            ))
+                            .color(theme::TEXT_DIM),
                         )
                         .width(ui.available_width() - 16.0)
                         .show_ui(ui, |ui| {
@@ -637,6 +667,21 @@ fn class_sections(
                 });
             });
         }
+        ab_engine::scene_file::post_volume::POST_VOLUME => {
+            let mut v = desc.post_volume.clone().unwrap_or_default();
+            post_volume_section(ui, &mut v);
+            if desc.post_volume.clone().unwrap_or_default() != v {
+                desc.post_volume = Some(v);
+            }
+        }
+        ab_engine::scene_file::generator::GENERATOR => {
+            if let Some(mut g) = desc.generator.clone() {
+                generator_section(ui, editor, node, &mut g);
+                if desc.generator.as_ref() != Some(&g) {
+                    desc.generator = Some(g);
+                }
+            }
+        }
         ab_engine::scene_file::path::PATH_3D => {
             let mut path = desc.path.clone().unwrap_or_default();
             path_section(ui, editor, &mut path);
@@ -776,13 +821,16 @@ fn joint_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, j: &mut J
                 label(ui, title);
                 egui::ComboBox::from_id_salt(id)
                     .selected_text(if path.is_empty() {
-                        "None"
+                        crate::i18n::field("None")
                     } else {
-                        path.as_str()
+                        path.clone()
                     })
                     .width(ui.available_width() - 4.0)
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(path.is_empty(), "None").clicked() {
+                        if ui
+                            .selectable_label(path.is_empty(), crate::i18n::field("None"))
+                            .clicked()
+                        {
                             path.clear();
                         }
                         for body in &bodies {
@@ -991,7 +1039,10 @@ fn ragdoll_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, r: &mut
                             r.bones.remove(slot.key());
                         }
                         if ui
-                            .selectable_label(set_by_hand.as_deref() == Some(""), "None")
+                            .selectable_label(
+                                set_by_hand.as_deref() == Some(""),
+                                crate::i18n::field("None"),
+                            )
                             .clicked()
                         {
                             r.bones.insert(slot.key().into(), String::new());
@@ -1121,12 +1172,15 @@ fn asset_choice(
     kind: AssetKind,
     value: &mut Option<String>,
 ) {
-    let shown = value.clone().unwrap_or_else(|| "None".into());
+    let shown = value.clone().unwrap_or_else(|| crate::i18n::field("None"));
     egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .width(ui.available_width() - 4.0)
         .show_ui(ui, |ui| {
-            if ui.selectable_label(value.is_none(), "None").clicked() {
+            if ui
+                .selectable_label(value.is_none(), crate::i18n::field("None"))
+                .clicked()
+            {
                 *value = None;
             }
             for asset in editor.assets.of_kind(kind) {
@@ -1212,8 +1266,791 @@ fn material_section(ui: &mut egui::Ui, editor: &Editor, m: &mut MaterialDesc) {
             label(ui, "Double sided");
             opt_bool(ui, &mut m.double_sided, false);
             ui.end_row();
+            label(ui, "Shader");
+            asset_choice(
+                ui,
+                editor,
+                "material_shader",
+                AssetKind::Shader,
+                &mut m.shader,
+            );
+            ui.end_row();
+            if let Some(path) = m.shader.clone().filter(|p| !p.is_empty()) {
+                shader_params(ui, editor, &path, m);
+            }
         });
     });
+}
+
+/// What a shader file declares, read again when it changes: its `// param` lines and
+/// whether it builds.
+#[derive(Clone)]
+struct ShaderInfo {
+    modified: Option<std::time::SystemTime>,
+    params: Vec<ab_engine::rendering::ShaderParam>,
+    error: Option<String>,
+}
+
+fn shader_info(ui: &egui::Ui, editor: &Editor, path: &str) -> ShaderInfo {
+    let file = editor.project().join(path);
+    let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+    let id = egui::Id::new(("shader-info", path));
+    if let Some(info) = ui
+        .data(|d| d.get_temp::<ShaderInfo>(id))
+        .filter(|i| i.modified == modified)
+    {
+        return info;
+    }
+    let info = match std::fs::read_to_string(&file) {
+        Ok(code) => ShaderInfo {
+            modified,
+            params: ab_engine::rendering::shader::params(&code),
+            error: ab_engine::rendering::shader::validate(&code)
+                .err()
+                .map(|e| e.to_string()),
+        },
+        Err(err) => ShaderInfo {
+            modified,
+            params: Vec::new(),
+            error: Some(format!("{path}: {err}")),
+        },
+    };
+    ui.data_mut(|d| d.insert_temp(id, info.clone()));
+    info
+}
+
+/// The shader's parameters (a value left at the default is not written).
+fn shader_params(ui: &mut egui::Ui, editor: &Editor, path: &str, m: &mut MaterialDesc) {
+    let info = shader_info(ui, editor, path);
+    if let Some(error) = &info.error {
+        label(ui, "");
+        ui.label(
+            RichText::new(format!("{}  {error}", icon::WARNING))
+                .small()
+                .color(theme::ERROR),
+        )
+        .on_hover_text("Drawn with the standard surface until the shader builds");
+        ui.end_row();
+    }
+    for p in &info.params {
+        label(ui, &p.name);
+        let current = m.params.as_ref().and_then(|v| v.get(&p.name).copied());
+        let mut value = current.unwrap_or(p.default);
+        let changed = ui
+            .add(egui::DragValue::new(&mut value).speed(0.01))
+            .on_hover_text(format!("Default {}", p.default))
+            .changed();
+        if changed {
+            let params = m.params.get_or_insert_with(Default::default);
+            params.insert(p.name.clone(), value);
+        }
+        ui.end_row();
+    }
+    if m.params.as_ref().is_some_and(|v| v.is_empty()) {
+        m.params = None;
+    }
+}
+
+/// A character's rig, animation state machine and IK chains: shown for models with a
+/// skeleton and nodes that have any of them.
+fn rig_section(ui: &mut egui::Ui, editor: &Editor, node: NodeHandle, desc: &mut NodeDesc) {
+    let tree = editor.tree();
+    let skinned = tree
+        .subtree(node)
+        .into_iter()
+        .any(|n| tree.component::<ab_engine::rendering::Skin>(n).is_some());
+    let has_any = desc.rig.is_some() || desc.state_machine.is_some() || !desc.ik.is_empty();
+    if !skinned && !has_any {
+        return;
+    }
+    section(
+        ui,
+        "rig",
+        icon::PERSON_SIMPLE_WALK,
+        "Animation and IK",
+        |ui| {
+            grid(ui, "rig_grid", |ui| {
+                label(ui, "State machine");
+                asset_choice(
+                    ui,
+                    editor,
+                    "state_machine",
+                    AssetKind::StateMachine,
+                    &mut desc.state_machine,
+                );
+                ui.end_row();
+                label(ui, "Rig");
+                asset_choice(ui, editor, "rig_file", AssetKind::Rig, &mut desc.rig);
+                ui.end_row();
+            });
+            if let Some(machine) = tree.component::<ab_engine::state_machine::StateMachine>(node) {
+                if editor.is_playing() {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  {}",
+                            icon::PLAY,
+                            machine.state_name().unwrap_or("—")
+                        ))
+                        .color(theme::PLAY),
+                    );
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("IK chains").color(theme::TEXT_DIM));
+            let mut remove = None;
+            for (i, ik) in desc.ik.iter_mut().enumerate() {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    grid(ui, &format!("ik_grid_{i}"), |ui| {
+                        label(ui, "Tip bone");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut ik.tip)
+                                    .hint_text("left_foot / bone name")
+                                    .desired_width(120.0),
+                            );
+                            egui::ComboBox::from_id_salt(("ik_part", i))
+                                .selected_text(icon::PERSON)
+                                .width(24.0)
+                                .show_ui(ui, |ui| {
+                                    for part in ab_engine::physics::HumanBone::ALL {
+                                        if ui
+                                            .selectable_label(ik.tip == part.key(), part.key())
+                                            .clicked()
+                                        {
+                                            ik.tip = part.key().to_owned();
+                                            ik.chain = None;
+                                        }
+                                    }
+                                });
+                        });
+                        ui.end_row();
+                        label(ui, "Bones");
+                        ui.add(egui::DragValue::new(&mut ik.bones).range(1..=32));
+                        ui.end_row();
+                        let path = |ui: &mut egui::Ui,
+                                    name: &str,
+                                    value: &mut Option<String>,
+                                    hint: &str| {
+                            label(ui, name);
+                            let mut text = value.clone().unwrap_or_default();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut text)
+                                        .hint_text(hint)
+                                        .desired_width(150.0),
+                                )
+                                .changed()
+                            {
+                                *value = (!text.trim().is_empty()).then(|| text.trim().to_owned());
+                            }
+                            ui.end_row();
+                        };
+                        path(ui, "Target", &mut ik.target, "../HandTarget");
+                        path(ui, "Pole", &mut ik.pole, "../ElbowHint");
+                        path(ui, "Rig chain", &mut ik.chain, "left_leg");
+                        label(ui, "On the ground");
+                        ui.checkbox(&mut ik.ground, "").on_hover_text(
+                            "Foot placement: the tip stands on the colliders below it",
+                        );
+                        ui.end_row();
+                        label(ui, "Turn to target");
+                        ui.checkbox(&mut ik.align, "");
+                        ui.end_row();
+                        label(ui, "Solver");
+                        let mut solver = ik.solver.unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut solver,
+                                ab_engine::ik::Solver::TwoBone,
+                                "Two bone",
+                            );
+                            ui.selectable_value(
+                                &mut solver,
+                                ab_engine::ik::Solver::Fabrik,
+                                "FABRIK",
+                            );
+                        });
+                        ik.solver = (solver != ab_engine::ik::Solver::default()
+                            || ik.solver.is_some())
+                        .then_some(solver);
+                        ui.end_row();
+                        label(ui, "Weight");
+                        ui.add(egui::Slider::new(&mut ik.weight, 0.0..=1.0));
+                        ui.end_row();
+                    });
+                    if ui
+                        .button(
+                            RichText::new(format!("{}  Remove", icon::TRASH)).color(theme::ERROR),
+                        )
+                        .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                desc.ik.remove(i);
+            }
+            ui.horizontal(|ui| {
+                if ui.button(format!("{}  IK chain", icon::PLUS)).clicked() {
+                    desc.ik.push(ab_engine::ik::IkDesc {
+                        tip: ab_engine::physics::HumanBone::RightHand.key().into(),
+                        ..Default::default()
+                    });
+                }
+                if ui
+                    .button(format!("{}  Feet on the ground", icon::FOOTPRINTS))
+                    .on_hover_text("Two chains that keep the feet on slopes and steps")
+                    .clicked()
+                {
+                    for part in [
+                        ab_engine::physics::HumanBone::LeftFoot,
+                        ab_engine::physics::HumanBone::RightFoot,
+                    ] {
+                        if !desc.ik.iter().any(|c| c.tip == part.key()) {
+                            desc.ik.push(ab_engine::ik::IkDesc {
+                                tip: part.key().into(),
+                                ground: true,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            });
+            if let Some(chains) = tree.component::<ab_engine::ik::IkChains>(node) {
+                for error in &chains.errors {
+                    ui.label(
+                        RichText::new(format!("{}  {error}", icon::WARNING))
+                            .small()
+                            .color(theme::WARN),
+                    );
+                }
+            }
+        },
+    );
+}
+
+/// Asks the inspector to build a node's levels of detail again.
+const LOD_REBUILD: &str = "ab-editor.lod-rebuild";
+
+/// Levels of detail of the meshes in a node, and an HLOD group's settings, with their
+/// triangle counts and what is wrong with them.
+fn lod_section(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    node: NodeHandle,
+    class: &str,
+    desc: &mut NodeDesc,
+) {
+    use ab_engine::rendering::{HlodProxy, MeshInstance3D, MeshLod};
+    use ab_engine::scene_file::lod::{HlodDesc, LodDesc, HLOD};
+    let tree = editor.tree();
+    let meshes: Vec<NodeHandle> = tree
+        .subtree(node)
+        .into_iter()
+        .filter(|&n| {
+            tree.component::<MeshInstance3D>(n).is_some()
+                && tree.component::<HlodProxy>(n).is_none()
+        })
+        .collect();
+    if meshes.is_empty() && class != HLOD {
+        return;
+    }
+    let Some(assets) = tree
+        .world()
+        .resource::<ab_engine::rendering::RenderAssets>()
+    else {
+        return;
+    };
+    let triangles = |mesh| assets.mesh(mesh).map_or(0, |m| m.indices.len() / 3);
+    section(ui, "lod", icon::STACK, "Level of detail", |ui| {
+        if class == HLOD {
+            let h = desc.hlod.get_or_insert_with(HlodDesc::default);
+            grid(ui, "hlod_grid", |ui| {
+                label(ui, "Switch distance (m)");
+                ui.add(
+                    egui::DragValue::new(&mut h.distance)
+                        .range(1.0..=10_000.0)
+                        .speed(0.5),
+                );
+                ui.end_row();
+                label(ui, "Merged detail");
+                ui.add(egui::Slider::new(&mut h.detail, 0.01..=1.0));
+                ui.end_row();
+            });
+            let proxies: Vec<usize> = tree
+                .children(node)
+                .into_iter()
+                .filter(|&c| tree.component::<HlodProxy>(c).is_some())
+                .filter_map(|c| {
+                    tree.component::<MeshInstance3D>(c)
+                        .map(|m| triangles(m.mesh))
+                })
+                .collect();
+            let original: usize = meshes
+                .iter()
+                .filter_map(|&n| {
+                    tree.component::<MeshInstance3D>(n)
+                        .map(|m| triangles(m.mesh))
+                })
+                .sum();
+            ui.label(
+                RichText::new(format!(
+                    "{} meshes, {original} triangles → {} merged meshes, {} triangles far away",
+                    meshes.len(),
+                    proxies.len(),
+                    proxies.iter().sum::<usize>()
+                ))
+                .small()
+                .color(theme::TEXT_DIM),
+            );
+        }
+        let mut on = desc.lod.is_some();
+        if ui
+            .checkbox(&mut on, "Simpler meshes when small on screen")
+            .changed()
+        {
+            desc.lod = on.then(|| LodDesc {
+                levels: vec![[0.3, 0.5], [0.1, 0.2]],
+                cull: Some(0.01),
+            });
+        }
+        if let Some(lod) = &mut desc.lod {
+            let mut remove = None;
+            grid(ui, "lod_grid", |ui| {
+                label(ui, "Below screen size");
+                ui.label(RichText::new("Detail").color(theme::TEXT_DIM));
+                ui.end_row();
+                for (i, level) in lod.levels.iter_mut().enumerate() {
+                    ui.add(
+                        egui::DragValue::new(&mut level[0])
+                            .range(0.001..=2.0)
+                            .speed(0.005),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Slider::new(&mut level[1], 0.01..=1.0));
+                        if ui.small_button(icon::X).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    ui.end_row();
+                }
+                label(ui, "Hide below");
+                super::opt_f32(ui, &mut lod.cull, 0.01, 0.0..=1.0, 0.001);
+                ui.end_row();
+            });
+            if let Some(i) = remove {
+                lod.levels.remove(i);
+            }
+            if lod.levels.len() < ab_engine::rendering::MAX_LOD_LEVELS
+                && ui.small_button(format!("{}  Level", icon::PLUS)).clicked()
+            {
+                let last = lod.levels.last().copied().unwrap_or([0.5, 1.0]);
+                lod.levels.push([last[0] * 0.5, last[1] * 0.5]);
+            }
+            match lod.check() {
+                Err(err) => {
+                    ui.label(RichText::new(format!("{}  {err}", icon::WARNING)).color(theme::WARN));
+                }
+                Ok(()) => {
+                    // What the levels made, for the first mesh.
+                    let made = meshes.iter().find_map(|&n| {
+                        Some((
+                            tree.component::<MeshInstance3D>(n)?.mesh,
+                            tree.component::<MeshLod>(n)?.clone(),
+                        ))
+                    });
+                    if let Some((base, made)) = made {
+                        let mut counts = vec![triangles(base)];
+                        counts.extend(made.levels.iter().map(|l| triangles(l.mesh)));
+                        ui.label(
+                            RichText::new(format!(
+                                "Triangles per level: {}",
+                                counts
+                                    .iter()
+                                    .map(|c| c.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" → ")
+                            ))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                        );
+                    }
+                }
+            }
+            ui.label(
+                RichText::new("Screen size: the part of the view's height the mesh covers (1 = all of it). View → LOD levels shows the level each mesh is drawn at.")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        }
+        if ui
+            .button(format!("{}  Rebuild", icon::ARROWS_CLOCKWISE))
+            .on_hover_text(
+                "Makes the simpler and merged meshes again (after moving the group's meshes)",
+            )
+            .clicked()
+        {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::new(LOD_REBUILD), Some(node)));
+        }
+    });
+}
+
+/// A post-processing volume: its box, how it blends, and the values it sets (unset values
+/// keep the scene's).
+fn post_volume_section(
+    ui: &mut egui::Ui,
+    v: &mut ab_engine::scene_file::post_volume::PostVolumeDesc,
+) {
+    let post = ab_engine::rendering::PostProcess::default();
+    section(
+        ui,
+        "post_volume",
+        icon::APERTURE,
+        "Post-Process Volume",
+        |ui| {
+            grid(ui, "post_volume_grid", |ui| {
+                label(ui, "Everywhere");
+                ui.checkbox(&mut v.global, "")
+                    .on_hover_text("Counts wherever the camera is, not only in the box");
+                ui.end_row();
+                if !v.global {
+                    label(ui, "Size (m)");
+                    vec3(ui, &mut v.size, 0.05, "");
+                    for s in &mut v.size {
+                        *s = s.max(0.0);
+                    }
+                    ui.end_row();
+                    label(ui, "Blend distance (m)");
+                    ui.add(
+                        egui::DragValue::new(&mut v.blend)
+                            .range(0.0..=100.0)
+                            .speed(0.05),
+                    )
+                    .on_hover_text("Outside the box it fades out over this distance");
+                    ui.end_row();
+                }
+                label(ui, "Priority");
+                ui.add(egui::DragValue::new(&mut v.priority).range(-100..=100))
+                    .on_hover_text("Higher applies over lower where volumes overlap");
+                ui.end_row();
+                label(ui, "Weight");
+                ui.add(egui::Slider::new(&mut v.weight, 0.0..=1.0));
+                ui.end_row();
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Values (unset: the scene's)")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            grid(ui, "post_volume_values", |ui| {
+                let dof = post.depth_of_field;
+                let rows: [(&str, &mut Option<f32>, f32, f32, f64); 12] = [
+                    ("Exposure", &mut v.exposure, post.exposure, 8.0, 0.01),
+                    ("Contrast", &mut v.contrast, post.contrast, 4.0, 0.01),
+                    ("Saturation", &mut v.saturation, post.saturation, 4.0, 0.01),
+                    (
+                        "Vignette",
+                        &mut v.vignette,
+                        post.vignette_intensity,
+                        1.0,
+                        0.01,
+                    ),
+                    ("Bloom", &mut v.bloom, post.bloom.intensity, 2.0, 0.005),
+                    (
+                        "Bloom threshold",
+                        &mut v.bloom_threshold,
+                        post.bloom.threshold,
+                        16.0,
+                        0.01,
+                    ),
+                    (
+                        "Chromatic aberration",
+                        &mut v.chromatic_aberration,
+                        0.0,
+                        4.0,
+                        0.01,
+                    ),
+                    ("Film grain", &mut v.grain, 0.0, 4.0, 0.01),
+                    ("Depth of field (px)", &mut v.depth_of_field, 0.0, 32.0, 0.1),
+                    (
+                        "Focus distance (m)",
+                        &mut v.focus_distance,
+                        dof.focus_distance,
+                        500.0,
+                        0.05,
+                    ),
+                    (
+                        "Focus range (m)",
+                        &mut v.focus_range,
+                        dof.focus_range,
+                        200.0,
+                        0.05,
+                    ),
+                    ("Motion blur", &mut v.motion_blur, 0.0, 4.0, 0.01),
+                ];
+                for (name, value, default, max, speed) in rows {
+                    label(ui, name);
+                    opt_f32(ui, value, default, 0.0..=max, speed);
+                    ui.end_row();
+                }
+                label(ui, "Tint");
+                opt_color(ui, &mut v.tint, post.tint, false);
+                ui.end_row();
+            });
+        },
+    );
+}
+
+/// Asks the inspector to bake a generator (the sections only read the editor).
+const BAKE_REQUEST: &str = "ab-editor.bake-generator";
+
+/// A generator: its kind, seed, and its parameters as the generator describes them.
+fn generator_section(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    node: NodeHandle,
+    g: &mut ab_engine::scene_file::GeneratorDesc,
+) {
+    use ab_engine::procgen;
+    let Some(generator) = procgen::generator(&g.kind) else {
+        ui.label(RichText::new(format!("Unknown generator `{}`", g.kind)).color(theme::ERROR));
+        return;
+    };
+    section(ui, "generator", icon::DICE_FIVE, generator.title(), |ui| {
+        grid(ui, "generator_grid", |ui| {
+            label(ui, "Generator");
+            egui::ComboBox::from_id_salt("generator_kind")
+                .selected_text(generator.title())
+                .show_ui(ui, |ui| {
+                    for other in procgen::GENERATORS {
+                        if ui
+                            .selectable_label(other.kind() == g.kind, other.title())
+                            .clicked()
+                            && other.kind() != g.kind
+                        {
+                            // Another generator: its own parameters, from their defaults.
+                            g.kind = other.kind().to_owned();
+                            g.params.clear();
+                        }
+                    }
+                });
+            ui.end_row();
+            label(ui, "Seed");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut g.seed).speed(1.0));
+                if ui
+                    .button(icon::DICE_FIVE)
+                    .on_hover_text("Another seed: a new result from the same settings")
+                    .clicked()
+                {
+                    let time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.subsec_nanos() as u64);
+                    g.seed =
+                        (g.seed.wrapping_mul(6364136223846793005).wrapping_add(time)) % 1_000_000;
+                }
+            });
+            ui.end_row();
+            for param in generator.params() {
+                let key = param.key;
+                let current = g
+                    .params
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| param.default.to_toml());
+                let mut value = current.clone();
+                label(ui, param.label);
+                let response = param_field(ui, editor, key, param.kind, &mut value);
+                response.on_hover_text(param.help);
+                ui.end_row();
+                if value != current {
+                    // Back at the default: not written.
+                    if value == param.default.to_toml() {
+                        g.params.remove(key);
+                    } else {
+                        g.params.insert(key.to_owned(), value);
+                    }
+                }
+            }
+        });
+        let error = editor
+            .tree()
+            .component::<ab_engine::scene_file::generator::GeneratorNode>(node)
+            .and_then(|state| state.error.clone());
+        if let Some(error) = error {
+            ui.label(RichText::new(format!("{}  {error}", icon::WARNING)).color(theme::WARN));
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{}  Bake", icon::CUBE))
+                .on_hover_text(
+                    "Turn what it made into ordinary nodes, to change them by hand (the \
+                     generator is replaced; Undo brings it back)",
+                )
+                .clicked()
+            {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(egui::Id::new(BAKE_REQUEST), Some(node)));
+            }
+            ui.label(
+                RichText::new("Rebuilt on every change; saved as its settings only.")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        });
+    });
+}
+
+/// An editor for one generator parameter's value.
+fn param_field(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    key: &str,
+    kind: ab_engine::procgen::ParamKind,
+    value: &mut toml::Value,
+) -> egui::Response {
+    use ab_engine::procgen::ParamKind;
+    let pieces = || {
+        editor
+            .assets
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, AssetKind::Model | AssetKind::Scene))
+            .map(|e| e.path.clone())
+            .collect::<Vec<_>>()
+    };
+    match kind {
+        ParamKind::Int { min, max } => {
+            let mut v = value.as_integer().unwrap_or(min);
+            let r = ui.add(egui::DragValue::new(&mut v).range(min..=max).speed(0.2));
+            *value = toml::Value::Integer(v);
+            r
+        }
+        ParamKind::Float { min, max } => {
+            let mut v = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|i| i as f64))
+                .unwrap_or(f64::from(min)) as f32;
+            let speed = ((max - min) / 500.0).clamp(0.001, 1.0);
+            let r = ui.add(
+                egui::DragValue::new(&mut v)
+                    .range(min..=max)
+                    .speed(speed)
+                    .max_decimals(3),
+            );
+            *value = toml::Value::Float(f64::from(v));
+            r
+        }
+        ParamKind::Bool => {
+            let mut v = value.as_bool().unwrap_or(false);
+            let r = ui.checkbox(&mut v, "");
+            *value = toml::Value::Boolean(v);
+            r
+        }
+        ParamKind::Text | ParamKind::Node => {
+            let mut v = value.as_str().unwrap_or_default().to_owned();
+            let hint = if kind == ParamKind::Node {
+                "../Road"
+            } else {
+                ""
+            };
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut v)
+                    .hint_text(hint)
+                    .desired_width(ui.available_width() - 4.0),
+            );
+            *value = toml::Value::String(v);
+            r
+        }
+        ParamKind::Color => {
+            let text = value.as_str().unwrap_or("#ffffff").to_owned();
+            let mut color = ab_engine::scene_file::ColorDesc::Hex(text.clone())
+                .to_color()
+                .map(super::to_rgba)
+                .unwrap_or(egui::Rgba::WHITE);
+            let r = egui::color_picker::color_edit_button_rgba(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::Opaque,
+            );
+            if r.changed() {
+                let c: egui::Color32 = color.into();
+                *value = toml::Value::String(format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()));
+            }
+            r
+        }
+        ParamKind::Choice(options) => {
+            let mut v = value.as_str().unwrap_or_default().to_owned();
+            let r = egui::ComboBox::from_id_salt(("gen_choice", key))
+                .selected_text(v.clone())
+                .show_ui(ui, |ui| {
+                    for option in options {
+                        ui.selectable_value(&mut v, (*option).to_owned(), *option);
+                    }
+                })
+                .response;
+            *value = toml::Value::String(v);
+            r
+        }
+        ParamKind::Piece => {
+            let mut v = value.as_str().unwrap_or_default().to_owned();
+            let r = egui::ComboBox::from_id_salt(("gen_piece", key))
+                .selected_text(if v.is_empty() {
+                    "None (blocks)".to_owned()
+                } else {
+                    v.clone()
+                })
+                .width(ui.available_width() - 4.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut v, String::new(), "None (blocks)");
+                    for path in pieces() {
+                        ui.selectable_value(&mut v, path.clone(), path);
+                    }
+                })
+                .response;
+            *value = toml::Value::String(v);
+            r
+        }
+        ParamKind::Pieces => {
+            let mut list: Vec<String> = value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let r = ui
+                .vertical(|ui| {
+                    let mut remove = None;
+                    for (i, item) in list.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(item).small());
+                            if ui.small_button(icon::X).clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        list.remove(i);
+                    }
+                    ui.menu_button(format!("{}  Add piece", icon::PLUS), |ui| {
+                        for path in pieces() {
+                            if ui.button(&path).clicked() {
+                                list.push(path);
+                                ui.close();
+                            }
+                        }
+                    });
+                })
+                .response;
+            *value = toml::Value::Array(list.into_iter().map(toml::Value::String).collect());
+            r
+        }
+    }
 }
 
 /// A path: what it builds, its settings, and its points.
@@ -1255,7 +2092,10 @@ fn path_section(ui: &mut egui::Ui, editor: &Editor, p: &mut ab_engine::scene_fil
                 }
                 PathMode::Instances => {
                     label(ui, "Piece");
-                    let shown = p.piece.clone().unwrap_or_else(|| "None".into());
+                    let shown = p
+                        .piece
+                        .clone()
+                        .unwrap_or_else(|| crate::i18n::field("None"));
                     egui::ComboBox::from_id_salt("path_piece")
                         .selected_text(shown)
                         .width(ui.available_width() - 4.0)
@@ -1553,9 +2393,9 @@ fn audio_section(ui: &mut egui::Ui, editor: &Editor, class: &str, a: &mut AudioD
             label(ui, "Stream");
             egui::ComboBox::from_id_salt("stream")
                 .selected_text(if a.stream.is_empty() {
-                    "None"
+                    crate::i18n::field("None")
                 } else {
-                    &a.stream
+                    a.stream.clone()
                 })
                 .width(ui.available_width() - 4.0)
                 .show_ui(ui, |ui| {
@@ -1894,7 +2734,7 @@ pub fn environment(ui: &mut egui::Ui, editor: &mut Editor) {
             section(ui, "post", icon::APERTURE, "Post-processing", |ui| {
                 let post = defaults.post;
                 grid(ui, "post_grid", |ui| {
-                    let rows: [(&str, &mut Option<f32>, f32, f32, f64); 8] = [
+                    let rows: [(&str, &mut Option<f32>, f32, f32, f64); 12] = [
                         ("Bloom", &mut desc.bloom, post.bloom.intensity, 2.0, 0.005),
                         (
                             "Bloom threshold",
@@ -1933,7 +2773,32 @@ pub fn environment(ui: &mut egui::Ui, editor: &mut Editor) {
                             0.01,
                         ),
                         ("Film grain", &mut desc.grain, post.grain, 4.0, 0.01),
+                        (
+                            "Depth of field (px)",
+                            &mut desc.depth_of_field,
+                            post.depth_of_field.max_blur,
+                            32.0,
+                            0.1,
+                        ),
+                        (
+                            "Focus distance (m)",
+                            &mut desc.focus_distance,
+                            post.depth_of_field.focus_distance,
+                            500.0,
+                            0.05,
+                        ),
+                        (
+                            "Focus range (m)",
+                            &mut desc.focus_range,
+                            post.depth_of_field.focus_range,
+                            200.0,
+                            0.05,
+                        ),
+                        ("Motion blur", &mut desc.motion_blur, post.motion_blur, 4.0, 0.01),
                     ];
+                    label(ui, "Occlusion culling");
+                    opt_bool(ui, &mut desc.occlusion_culling, false);
+                    ui.end_row();
                     for (name, value, default, max, speed) in rows {
                         label(ui, name);
                         opt_f32(ui, value, default, 0.0..=max, speed);

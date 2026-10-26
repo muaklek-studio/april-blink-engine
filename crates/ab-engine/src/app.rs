@@ -196,6 +196,9 @@ where
                     if let Some(mut slot) = world.resource_mut::<RenderStats>() {
                         slot.0 = stats;
                     }
+                    if let Some(mut gpu) = world.resource_mut::<crate::memory::GpuMemoryReport>() {
+                        gpu.0 = renderer.scene_renderer().gpu_memory();
+                    }
                 }
                 Ok(None) => {}
                 Err(RenderError::DeviceLost) if self.device_resets < MAX_DEVICE_RESETS => {

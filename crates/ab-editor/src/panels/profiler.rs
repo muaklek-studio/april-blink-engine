@@ -30,10 +30,28 @@ fn series(sample: &FrameSample, index: usize) -> f32 {
 #[derive(Default)]
 pub struct ProfilerPanel {
     filter: String,
+    /// The memory view instead of frame times.
+    pub memory: bool,
 }
 
 impl ProfilerPanel {
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.memory,
+                false,
+                format!("{}  {}", icon::TIMER, t("profiler.frames")),
+            );
+            ui.selectable_value(
+                &mut self.memory,
+                true,
+                format!("{}  {}", icon::MEMORY, t("profiler.memory")),
+            );
+        });
+        if self.memory {
+            super::memory::show(ui, editor);
+            return;
+        }
         let world = editor.tree().world();
         let Some(mut profiler) = world.resource_mut::<Profiler>() else {
             return;

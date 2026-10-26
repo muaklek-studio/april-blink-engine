@@ -9,6 +9,8 @@ use crate::camera::{CameraView, Frustum};
 use crate::components::{
     Camera3D, DirectionalLight3D, MeshInstance3D, OmniLight3D, Skin, SpotLight3D,
 };
+use crate::lod::{screen_size, HlodGroup, HlodProxy, HlodSwitch, LodPick, MeshLod};
+use crate::post_volume::PostVolume;
 use ab_core::{jobs, Affine3A, Mat4, Vec3};
 use ab_ecs::{Entity, SparseSet, Without, World};
 use ab_scene::{Children, NodeInfo, Parent, Transform};
@@ -25,6 +27,16 @@ pub struct DrawItem {
     /// For skinned instances: this instance's joint matrices in
     /// [`RenderList::joint_matrices`].
     pub joints: Option<Range<u32>>,
+    /// Levels of detail ([`crate::MeshLod`]).
+    pub lod: Option<LodPick>,
+    /// Inside an [`crate::HlodGroup`].
+    pub hlod: Option<HlodSwitch>,
+    /// The level drawn this frame (0: the mesh itself).
+    pub lod_level: u8,
+    /// Hidden behind other geometry (occlusion culling).
+    pub occluded: bool,
+    /// Its box in the world, as culled (set by the culling).
+    pub world_bounds: Option<crate::mesh::Aabb>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +80,12 @@ pub struct RenderList {
     pub spot_lights: Vec<SpotLightData>,
     /// Skinning palettes of every skinned instance: `joint global × inverse bind`.
     pub joint_matrices: Vec<Mat4>,
+    /// Post-processing volumes and where they are.
+    pub post_volumes: Vec<(Affine3A, PostVolume)>,
+    /// The occlusion buffer of the frame (with [`crate::OcclusionCulling::debug`]).
+    pub occlusion: Option<crate::occlusion::OcclusionDebug>,
+    /// With a [`RenderIsolation`]: every node drawn from (its particles are drawn too).
+    pub isolated: Option<std::collections::HashSet<Entity>>,
 }
 
 impl RenderList {
@@ -78,6 +96,9 @@ impl RenderList {
         self.omni_lights.clear();
         self.spot_lights.clear();
         self.joint_matrices.clear();
+        self.post_volumes.clear();
+        self.occlusion = None;
+        self.isolated = None;
     }
 
     pub fn visible_draw_count(&self) -> usize {
@@ -104,6 +125,18 @@ pub struct CameraOverride {
     pub global: ab_core::Affine3A,
     /// An orthographic view this many world units tall instead of a perspective one.
     pub ortho_height: Option<f32>,
+}
+
+/// ECS resource: draw only `root` and what is under it, as if it were alone (an editor's
+/// close look at one model or effect). The scene's other lights are left out too; with
+/// `studio_light`, a key light from over the camera's shoulder lights it instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderIsolation {
+    pub root: Entity,
+    pub studio_light: bool,
+    /// A floor to stand it on: drawn with this mesh and material, placed by the transform
+    /// (it takes shadows; it is not part of the scene).
+    pub floor: Option<(MeshHandle, MaterialHandle, Affine3A)>,
 }
 
 /// Draws culled per worker job: culling one is a handful of multiplies.
@@ -162,31 +195,75 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
     let suns = world.storage::<DirectionalLight3D>();
     let omnis = world.storage::<OmniLight3D>();
     let spots = world.storage::<SpotLight3D>();
+    let volumes = world.storage::<PostVolume>();
+    let lods = world.storage::<MeshLod>();
+    let hlods = world.storage::<HlodGroup>();
+    let proxies = world.storage::<HlodProxy>();
 
     // Tree roots: in-tree nodes without a parent (normally just the SceneTree root).
-    let roots: Vec<Entity> = world
-        .query_filtered::<(Entity, &NodeInfo), Without<Parent>>()
-        .iter()
-        .filter(|(_, info)| info.in_tree)
-        .map(|(e, _)| e)
-        .collect();
+    let isolation = world
+        .resource::<RenderIsolation>()
+        .map(|i| *i)
+        .filter(|i| infos.get(i.root).is_some_and(|info| info.in_tree));
+    let roots: Vec<Entity> = match isolation {
+        Some(i) => vec![i.root],
+        None => world
+            .query_filtered::<(Entity, &NodeInfo), Without<Parent>>()
+            .iter()
+            .filter(|(_, info)| info.in_tree)
+            .map(|(e, _)| e)
+            .collect(),
+    };
+    let mut isolated = isolation.map(|_| std::collections::HashSet::new());
+    if let Some((mesh, material, model)) = isolation.and_then(|i| i.floor) {
+        out.draws.push(DrawItem {
+            model,
+            mesh,
+            material,
+            cast_shadows: false,
+            in_view: true,
+            joints: None,
+            lod: None,
+            hlod: None,
+            lod_level: 0,
+            occluded: false,
+            world_bounds: None,
+        });
+    }
 
     let mut fallback_camera = None;
     let mut chosen_camera = None;
     // Skinned instances, in the order of their palettes in `out.joint_matrices`.
     let mut skinned: Vec<(Entity, usize)> = Vec::new();
     let assets = world.resource::<RenderAssets>();
-    let mut stack: Vec<Entity> = roots.into_iter().rev().collect();
-    while let Some(entity) = stack.pop() {
+    // Each node with the HLOD group it is in (and whether under a proxy).
+    let mut stack: Vec<(Entity, Option<HlodSwitch>)> =
+        roots.into_iter().rev().map(|r| (r, None)).collect();
+    while let Some((entity, mut hlod)) = stack.pop() {
         let Some(info) = infos.get(entity) else {
             continue;
         };
-        // Hidden nodes hide their whole subtree.
-        if !info.visible {
+        // Hidden nodes hide their whole subtree (an isolated root shows, hidden or not).
+        if !info.visible && isolation.is_none_or(|i| i.root != entity) {
             continue;
         }
+        if let Some(set) = &mut isolated {
+            set.insert(entity);
+        }
+        if let Some(group) = hlods.as_ref().and_then(|h| h.get(entity)) {
+            hlod = Some(HlodSwitch {
+                center: group.center,
+                distance: group.distance,
+                proxy: false,
+            });
+        }
+        if proxies.as_ref().is_some_and(|p| p.get(entity).is_some()) {
+            if let Some(h) = &mut hlod {
+                h.proxy = true;
+            }
+        }
         if let Some(Children(kids)) = children.get(entity) {
-            stack.extend(kids.iter().rev().map(|k| k.entity()));
+            stack.extend(kids.iter().rev().map(|k| (k.entity(), hlod)));
         }
         let Some(transform) = transforms.get(entity) else {
             continue;
@@ -220,8 +297,21 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
                 material: instance.material,
                 cast_shadows: instance.cast_shadows,
                 in_view: true,
+                // Skinned meshes keep their mesh: their bounds follow its joints.
+                lod: lods
+                    .as_ref()
+                    .and_then(|l| l.get(entity))
+                    .filter(|_| joints.is_none())
+                    .map(LodPick::of),
+                hlod,
+                lod_level: 0,
+                occluded: false,
+                world_bounds: None,
                 joints,
             });
+        }
+        if let Some(volume) = volumes.as_ref().and_then(|v| v.get(entity)) {
+            out.post_volumes.push((global, *volume));
         }
         if let Some(sun) = suns.as_ref().and_then(|s| s.get(entity)) {
             out.directional.get_or_insert(DirectionalLightData {
@@ -257,6 +347,24 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
         fill_palettes(skins, &transforms, &skinned, &mut out.joint_matrices);
     }
 
+    // Isolated, the walk did not pass the scene's cameras.
+    if isolation.is_some() && chosen_camera.is_none() {
+        if let Some(cameras) = &cameras {
+            for (entity, camera) in cameras.iter() {
+                let in_tree = infos.get(entity).is_some_and(|i| i.in_tree);
+                let Some(global) = transforms.get(entity).map(|t| t.global) else {
+                    continue;
+                };
+                if !in_tree {
+                    continue;
+                }
+                if camera.current && chosen_camera.is_none() {
+                    chosen_camera = Some((*camera, global));
+                }
+                fallback_camera.get_or_insert((*camera, global));
+            }
+        }
+    }
     let forced = world
         .resource::<CameraOverride>()
         .map(|o| (o.camera, o.global, o.ortho_height));
@@ -281,7 +389,35 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
         let frustum = Frustum::from_view_projection(&view.view_projection);
         let assets = &*assets;
         let palettes = &out.joint_matrices;
+        let view_ref = &view;
         jobs::par_for_each_mut(&mut out.draws, CULL_PER_JOB, |draw| {
+            // Near or far from its HLOD group: the other half is not drawn at all.
+            if let Some(h) = draw.hlod {
+                let far = view_ref.position.distance(h.center) > h.distance;
+                if far != h.proxy {
+                    draw.in_view = false;
+                    draw.cast_shadows = false;
+                    return;
+                }
+            }
+            // The level for its size on screen (its own mesh's bounds decide).
+            if let Some(lod) = draw.lod {
+                let size = assets.mesh_aabb(draw.mesh).map_or(1.0, |aabb| {
+                    screen_size(&aabb.transformed(&draw.model), view_ref)
+                });
+                match lod.pick(draw.mesh, size) {
+                    Some((mesh, level)) => {
+                        draw.mesh = mesh;
+                        draw.lod_level = level;
+                    }
+                    None => {
+                        draw.in_view = false;
+                        draw.cast_shadows = false;
+                        draw.lod_level = u8::MAX;
+                        return;
+                    }
+                }
+            }
             let bounds = match &draw.joints {
                 // Skinned meshes move with their joints: bounds of the posed joints.
                 Some(range) => {
@@ -297,8 +433,30 @@ pub fn extract(world: &World, aspect: f32, out: &mut RenderList) {
                     .map(|aabb| aabb.transformed(&draw.model)),
             };
             draw.in_view = bounds.is_some_and(|b| frustum.intersects_aabb(&b));
+            draw.world_bounds = bounds;
+        });
+        let occlusion = world
+            .resource::<crate::occlusion::OcclusionCulling>()
+            .map(|o| *o)
+            .filter(|o| o.enabled);
+        if let Some(settings) = occlusion {
+            let bounds: Vec<_> = out.draws.iter().map(|d| d.world_bounds).collect();
+            out.occlusion =
+                crate::occlusion::cull(&settings, &view, assets, &mut out.draws, &bounds);
+        }
+    }
+    if isolation.is_some_and(|i| i.studio_light) {
+        // Over the camera's right shoulder, from above.
+        let direction = (view.forward * 0.55 - Vec3::Y * 0.75
+            + view.forward.cross(Vec3::Y).normalize_or_zero() * -0.35)
+            .normalize_or(Vec3::NEG_Y);
+        out.directional = Some(DirectionalLightData {
+            direction,
+            radiance: Vec3::splat(2.6),
+            shadow: true,
         });
     }
+    out.isolated = isolated;
     let eye = view.position;
     out.omni_lights.sort_by(|a, b| {
         a.position
@@ -335,6 +493,175 @@ mod tests {
         let mut list = RenderList::default();
         extract(tree.world(), 1.0, &mut list);
         list
+    }
+
+    #[test]
+    fn walls_hide_what_is_behind_lods_simplify_and_hlods_switch() {
+        use crate::lod::{HlodGroup, HlodProxy, LodLevel, MeshLod};
+        use crate::occlusion::OcclusionCulling;
+        let (mut tree, mesh, material) = scene();
+        let root = tree.root();
+        let camera = tree.create_camera3d("Camera", Camera3D::default());
+        tree.set_position(camera, Vec3::new(0.0, 0.0, 10.0))
+            .unwrap();
+        tree.add_child(root, camera).unwrap();
+        // A wall 6 × 6 m at z = 0, a box behind it and one beside it.
+        let wall = tree.create_mesh_instance3d("Wall", MeshInstance3D::new(mesh, material));
+        tree.set_scale(wall, Vec3::new(6.0, 6.0, 0.2)).unwrap();
+        let behind = tree.create_mesh_instance3d("Behind", MeshInstance3D::new(mesh, material));
+        tree.set_position(behind, Vec3::new(0.0, 0.0, -10.0))
+            .unwrap();
+        let beside = tree.create_mesh_instance3d("Beside", MeshInstance3D::new(mesh, material));
+        tree.set_position(beside, Vec3::new(8.0, 0.0, -10.0))
+            .unwrap();
+        for n in [wall, behind, beside] {
+            tree.add_child(root, n).unwrap();
+        }
+        let list = run(&mut tree);
+        assert_eq!(list.visible_draw_count(), 3, "off by default");
+        tree.world_mut().insert_resource(OcclusionCulling {
+            enabled: true,
+            debug: true,
+            ..Default::default()
+        });
+        let list = run(&mut tree);
+        let names: Vec<bool> = list.draws.iter().map(|d| d.in_view).collect();
+        assert_eq!(
+            names,
+            [true, false, true],
+            "only the box behind the wall is culled"
+        );
+        assert!(list.draws[1].occluded);
+        let debug = list.occlusion.unwrap();
+        assert_eq!((debug.occluders, debug.culled), (1, 1));
+        tree.world_mut().remove_resource::<OcclusionCulling>();
+
+        // A far box with levels: drawn simpler, then not at all.
+        let simple = {
+            let mut assets = tree.world_mut().resource_mut::<RenderAssets>().unwrap();
+            assets.add_mesh(Mesh::cube(0.5)).unwrap()
+        };
+        tree.insert_component(
+            beside,
+            MeshLod {
+                levels: vec![LodLevel {
+                    screen_size: 0.5,
+                    mesh: simple,
+                }],
+                cull_below: 0.0,
+            },
+        )
+        .unwrap();
+        let list = run(&mut tree);
+        assert_eq!((list.draws[2].mesh, list.draws[2].lod_level), (simple, 1));
+        tree.insert_component(
+            beside,
+            MeshLod {
+                levels: Vec::new(),
+                cull_below: 0.5,
+            },
+        )
+        .unwrap();
+        let list = run(&mut tree);
+        assert!(!list.draws[2].in_view && !list.draws[2].cast_shadows);
+
+        // An HLOD group far away draws its proxy, near its own meshes.
+        let group = tree.create_node3d("Group");
+        tree.insert_component(
+            group,
+            HlodGroup {
+                distance: 50.0,
+                center: Vec3::new(0.0, 0.0, -100.0),
+            },
+        )
+        .unwrap();
+        let part = tree.create_mesh_instance3d("Part", MeshInstance3D::new(mesh, material));
+        let proxy = tree.create_mesh_instance3d("Proxy", MeshInstance3D::new(mesh, material));
+        tree.insert_component(proxy, HlodProxy).unwrap();
+        tree.add_child(root, group).unwrap();
+        tree.add_child(group, part).unwrap();
+        tree.add_child(group, proxy).unwrap();
+        tree.set_position(group, Vec3::new(0.0, 0.0, -100.0))
+            .unwrap();
+        tree.insert_component(beside, MeshLod::default()).unwrap();
+        let list = run(&mut tree);
+        let (part_drawn, proxy_drawn) = (list.draws[3].in_view, list.draws[4].in_view);
+        assert_eq!((part_drawn, proxy_drawn), (false, true));
+        tree.set_position(camera, Vec3::new(0.0, 0.0, -80.0))
+            .unwrap();
+        let list = run(&mut tree);
+        assert!(list.draws[3].in_view && !list.draws[4].in_view);
+    }
+
+    #[test]
+    fn an_isolated_node_is_drawn_alone_under_a_studio_light() {
+        let (mut tree, mesh, material) = scene();
+        let root = tree.root();
+        let camera = tree.create_camera3d("Camera", Camera3D::default());
+        tree.set_position(camera, Vec3::new(0.0, 0.0, 5.0)).unwrap();
+        let sun = tree.create_directional_light3d("Sun", DirectionalLight3D::default());
+        let lamp = tree.create_omni_light3d("Lamp", OmniLight3D::default());
+        let subject = tree.create_node3d("Subject");
+        let part = tree.create_mesh_instance3d("Part", MeshInstance3D::new(mesh, material));
+        let other = tree.create_mesh_instance3d("Other", MeshInstance3D::new(mesh, material));
+        for n in [camera, sun, lamp, subject, other] {
+            tree.add_child(root, n).unwrap();
+        }
+        tree.add_child(subject, part).unwrap();
+        // Hidden in the scene, still shown alone.
+        tree.set_visible(subject, false).unwrap();
+        let list = run(&mut tree);
+        assert_eq!(
+            list.draws.len(),
+            1,
+            "the hidden subject is not drawn in the scene"
+        );
+        tree.world_mut().insert_resource(RenderIsolation {
+            root: subject.entity(),
+            studio_light: true,
+            floor: None,
+        });
+        let list = run(&mut tree);
+        assert_eq!(list.draws.len(), 1);
+        assert!(list.camera.is_some(), "the scene's camera still frames it");
+        assert!(
+            list.omni_lights.is_empty(),
+            "the scene's lights are left out"
+        );
+        let light = list.directional.unwrap();
+        assert!(
+            light.direction.y < 0.0 && light.shadow,
+            "a key light from above"
+        );
+        let set = list.isolated.unwrap();
+        assert!(set.contains(&part.entity()) && !set.contains(&other.entity()));
+        // Its particles only.
+        let particles = crate::ParticleDrawList {
+            instances: vec![
+                crate::ParticleInstance {
+                    position: Vec3::ZERO,
+                    size: 1.0,
+                    color: ab_core::Color::WHITE,
+                    velocity: Vec3::ZERO,
+                    stretch: 0.0,
+                    rotation: 0.0,
+                    hardness: 0.5,
+                    additive: false,
+                };
+                2
+            ],
+            sources: vec![(part.entity(), 0..1), (other.entity(), 1..2)],
+        };
+        assert_eq!(particles.filtered(|e| set.contains(&e)).instances.len(), 1);
+        // A floor to stand it on: drawn, taking shadows, casting none.
+        tree.world_mut().insert_resource(RenderIsolation {
+            root: subject.entity(),
+            studio_light: true,
+            floor: Some((mesh, material, Affine3A::IDENTITY)),
+        });
+        let list = run(&mut tree);
+        assert_eq!(list.draws.len(), 2);
+        assert!(!list.draws[0].cast_shadows);
     }
 
     #[test]

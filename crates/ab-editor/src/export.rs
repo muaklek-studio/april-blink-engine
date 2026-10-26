@@ -1,5 +1,11 @@
 //! File → Export Game: builds shippable copies of the open game for Windows and Linux.
 //!
+//! Above the platforms, the game's details: title, creator, description, copyright,
+//! version, icon, the executable's name, a console on Windows, where exports go
+//! (`[export]` in `game.toml`, see [`ab_project::export_settings`]). They are checked as
+//! they are typed (errors stop the export) and saved to `game.toml` before it starts; on
+//! Windows they go into the executable.
+//!
 //! The window runs the exporter ([`ab_project::export`]) in a background process of the
 //! editor itself (`ab-editor --export …`, so Cancel can stop it and the builds it started),
 //! shows its progress, and lists the folders and archives it made. Editing goes on while it
@@ -423,6 +429,230 @@ pub struct ExportWindow {
     pub job: Option<ExportJob>,
     show_log: bool,
     start_error: Option<String>,
+    details: Option<GameDetails>,
+}
+
+/// The game's details as edited in the window.
+struct GameDetails {
+    root: PathBuf,
+    title: String,
+    settings: ab_project::export_settings::ExportSettings,
+    /// As in `game.toml`.
+    saved: (String, ab_project::export_settings::ExportSettings),
+    /// Shown in the field's hint.
+    cargo_version: String,
+    package: String,
+    /// The icon's preview, for its path.
+    preview: Option<(String, Option<egui::TextureHandle>)>,
+    picking: Option<Receiver<Option<PathBuf>>>,
+    error: Option<String>,
+}
+
+impl std::fmt::Debug for GameDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GameDetails")
+            .field("root", &self.root)
+            .field("title", &self.title)
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GameDetails {
+    fn open(root: &Path) -> Option<Self> {
+        let project = ab_project::Project::open(root).ok()?;
+        let cargo_version = {
+            let mut p = project.clone();
+            p.export.version.clear();
+            p.version()
+        };
+        Some(Self {
+            root: project.root.clone(),
+            title: project.title.clone(),
+            saved: (project.title.clone(), project.export.clone()),
+            settings: project.export.clone(),
+            cargo_version,
+            package: project.package.clone().unwrap_or_default(),
+            preview: None,
+            picking: None,
+            error: None,
+        })
+    }
+
+    fn dirty(&self) -> bool {
+        (self.title.clone(), self.settings.clone()) != self.saved
+    }
+
+    fn save(&mut self) -> Result<(), String> {
+        self.settings
+            .save(&self.root, &self.title)
+            .map_err(|e| format!("{e:#}"))?;
+        self.saved = (self.title.clone(), self.settings.clone());
+        Ok(())
+    }
+
+    /// The icon, decoded for the preview (PNG only; again when the path changes).
+    fn preview(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let path = self.settings.icon.clone();
+        if self.preview.as_ref().map(|p| &p.0) != Some(&path) {
+            let texture = self.settings.icon_path(&self.root).and_then(|file| {
+                let image = image::open(file).ok()?.to_rgba8();
+                let size = [image.width() as usize, image.height() as usize];
+                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+                Some(ctx.load_texture("export-icon", pixels, egui::TextureOptions::LINEAR))
+            });
+            self.preview = Some((path, texture));
+        }
+        self.preview.as_ref().and_then(|p| p.1.clone())
+    }
+
+    /// The fields and what is wrong with them; whether an error stops the export.
+    fn show(&mut self, ui: &mut egui::Ui) -> bool {
+        if let Some(picked) = self.picking.as_ref().and_then(|r| r.try_recv().ok()) {
+            self.picking = None;
+            if let Some(file) = picked {
+                match file.strip_prefix(&self.root) {
+                    Ok(relative) => {
+                        self.settings.icon = relative.to_string_lossy().replace('\\', "/")
+                    }
+                    Err(_) => self.error = Some("Choose an icon inside the project folder".into()),
+                }
+            }
+        }
+        let issues = self.settings.check(&self.root, &self.title);
+        let issue = |field: &str| issues.iter().find(|i| i.field == field);
+        let field =
+            |ui: &mut egui::Ui, name: &str, key: &'static str, value: &mut String, hint: &str| {
+                ui.label(name);
+                let edit = egui::TextEdit::singleline(value)
+                    .hint_text(hint)
+                    .desired_width(f32::INFINITY);
+                let response = ui.add(edit);
+                if let Some(i) = issue(key) {
+                    let color = if i.error { theme::ERROR } else { theme::WARN };
+                    response.on_hover_text(RichText::new(&i.message).color(color));
+                }
+                ui.end_row();
+            };
+        egui::Grid::new("export_details")
+            .num_columns(2)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                field(ui, "Title", "title", &mut self.title, "The game's name");
+                field(
+                    ui,
+                    "Creator",
+                    "creator",
+                    &mut self.settings.creator,
+                    "You or your studio",
+                );
+                field(
+                    ui,
+                    "Description",
+                    "description",
+                    &mut self.settings.description,
+                    "One line about the game",
+                );
+                field(
+                    ui,
+                    "Copyright",
+                    "copyright",
+                    &mut self.settings.copyright,
+                    "© 2026 …",
+                );
+                let cargo = self.cargo_version.clone();
+                field(ui, "Version", "version", &mut self.settings.version, &cargo);
+                let package = self.package.clone();
+                field(
+                    ui,
+                    "File name",
+                    "file_name",
+                    &mut self.settings.file_name,
+                    &package,
+                );
+                ui.label("Icon");
+                ui.horizontal(|ui| {
+                    if let Some(texture) = self.preview(ui.ctx()) {
+                        ui.add(
+                            egui::Image::new(&texture).fit_to_exact_size(egui::vec2(32.0, 32.0)),
+                        );
+                    } else {
+                        ui.label(RichText::new(icon::IMAGE).size(24.0).color(theme::TEXT_DIM));
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings.icon)
+                            .hint_text("assets/icon.png (256 × 256)")
+                            .desired_width(220.0),
+                    );
+                    if ui
+                        .add_enabled(
+                            self.picking.is_none(),
+                            egui::Button::new(format!("{}  Choose…", icon::FOLDER_OPEN)),
+                        )
+                        .clicked()
+                    {
+                        let (send, receive) = mpsc::channel();
+                        let picker = rfd::FileDialog::new()
+                            .set_title("Choose the game's icon")
+                            .add_filter("Icons", &["png", "ico"])
+                            .set_directory(&self.root);
+                        let ctx = ui.ctx().clone();
+                        std::thread::spawn(move || {
+                            let _ = send.send(picker.pick_file());
+                            ctx.request_repaint();
+                        });
+                        self.picking = Some(receive);
+                    }
+                });
+                ui.end_row();
+                ui.label("Windows");
+                ui.checkbox(
+                    &mut self.settings.console,
+                    "Console window (shows the game's log)",
+                );
+                ui.end_row();
+            });
+        for i in &issues {
+            let (glyph, color) = if i.error {
+                (icon::X_CIRCLE, theme::ERROR)
+            } else {
+                (icon::WARNING, theme::WARN)
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{glyph}  {}: {}",
+                    i.field.replace('_', " "),
+                    i.message
+                ))
+                .small()
+                .color(color),
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    self.dirty(),
+                    egui::Button::new(format!("{}  Save to game.toml", icon::FLOPPY_DISK)),
+                )
+                .clicked()
+            {
+                if let Err(err) = self.save() {
+                    self.error = Some(err);
+                }
+            }
+            if self.dirty() {
+                ui.label(
+                    RichText::new("Saved when the export starts")
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+            }
+        });
+        if let Some(err) = &self.error {
+            ui.label(RichText::new(err).color(theme::ERROR));
+        }
+        issues.iter().any(|i| i.error)
+    }
 }
 
 impl ExportWindow {
@@ -508,6 +738,33 @@ impl ExportWindow {
             ui.label(RichText::new(format!("({})", target.name)).color(theme::TEXT_DIM));
         });
         ui.add_space(4.0);
+        let root = Path::new(&target.spec);
+        if self
+            .details
+            .as_ref()
+            .is_none_or(|d| d.root != ab_project::path::canonicalize_lossy(root))
+        {
+            self.details = GameDetails::open(root);
+            // The output folder the game names.
+            if let Some(out) = self
+                .details
+                .as_ref()
+                .and_then(|d| d.settings.out_dir(&d.root))
+            {
+                options.out = out.to_string_lossy().into_owned();
+            }
+        }
+        let mut details_error = false;
+        if let Some(details) = &mut self.details {
+            ui.add_enabled_ui(!running, |ui| {
+                egui::CollapsingHeader::new(
+                    RichText::new(format!("{}  Game details", icon::IDENTIFICATION_CARD)).strong(),
+                )
+                .default_open(true)
+                .show(ui, |ui| details_error = details.show(ui));
+            });
+            ui.add_space(4.0);
+        }
 
         ui.add_enabled_ui(!running, |ui| {
             egui::Grid::new("export_options")
@@ -558,6 +815,9 @@ impl ExportWindow {
 
         // What could stop it before it starts.
         let mut blocked = None;
+        if details_error {
+            blocked = Some("Fix the game details marked in red first.".to_owned());
+        }
         if options.platforms() == 0 {
             blocked = Some("Pick at least one platform.".to_owned());
         }
@@ -655,7 +915,15 @@ impl ExportWindow {
                     .on_disabled_hover_text(blocked.clone().unwrap_or_else(|| "Checking…".into()));
                 if export.clicked() {
                     self.start_error = None;
-                    match ExportJob::start(target, options) {
+                    // The exporter reads game.toml: the details go there first.
+                    let saved = match self.details.as_mut().filter(|d| d.dirty()) {
+                        Some(details) => details.save(),
+                        None => Ok(()),
+                    };
+                    let started = saved
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|()| ExportJob::start(target, options));
+                    match started {
                         Ok(job) => self.job = Some(job),
                         Err(err) => self.start_error = Some(format!("{err:#}")),
                     }
@@ -778,6 +1046,48 @@ impl ExportWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_details_are_read_checked_and_saved_to_game_toml() {
+        let root = std::env::temp_dir().join(format!("ab-export-details-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("game.toml"), "title = \"Relics\"\n").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"relics\"\nversion = \"0.3.0\"\n",
+        )
+        .unwrap();
+        let mut details = GameDetails::open(&root).unwrap();
+        assert_eq!(
+            (details.cargo_version.as_str(), details.package.as_str()),
+            ("0.3.0", "relics")
+        );
+        assert!(!details.dirty());
+        details.settings.creator = "Moonlit".into();
+        details.settings.version = "1.0.0".into();
+        details.settings.file_name = "con".into();
+        assert!(details.dirty());
+        let issues = details.settings.check(&details.root, &details.title);
+        assert!(issues.iter().any(|i| i.field == "file_name" && i.error));
+        details.settings.file_name = "NightRelics".into();
+        details.title = "Night Relics".into();
+        details.save().unwrap();
+        assert!(!details.dirty());
+        let project = ab_project::Project::open(&root).unwrap();
+        assert_eq!(project.title, "Night Relics");
+        assert_eq!(project.export.creator, "Moonlit");
+        assert_eq!(
+            project.version(),
+            "1.0.0",
+            "the export version wins over Cargo's"
+        );
+        assert_eq!(
+            ab_project::export::Game::Project(project).name(),
+            "NightRelics"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn finds_the_game_of_a_project() {

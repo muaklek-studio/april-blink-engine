@@ -1,0 +1,406 @@
+Role and Objective
+
+You are a senior game engine developer, software architect, and editor UX engineer. Your task is to improve and expand my existing game engine into a professional, feature-rich game development environment.
+
+You must work directly with the existing codebase, understand its architecture, identify bugs, and implement the requested features incrementally.
+
+The primary objective is to improve the existing engine, not rewrite it from scratch.
+
+Preserve the current architecture, coding conventions, rendering pipeline, asset formats, and existing functionality wherever possible. Refactor only when necessary and ensure that every change integrates properly with the current codebase.
+
+1. Mandatory Development Rules
+
+Before implementing anything:
+
+Inspect the project structure and identify the programming languages, frameworks, rendering backend, editor architecture, asset pipeline, and build system.
+Read the relevant source files and understand how existing systems interact.
+Identify broken, incomplete, or placeholder implementations.
+Create an implementation plan based on dependencies and technical complexity.
+Prioritize bug fixes and foundational systems before advanced features.
+Reuse existing code and infrastructure whenever possible.
+Do not create duplicate systems when an equivalent implementation already exists.
+Do not replace working functionality with mockups, placeholders, or hardcoded demonstrations.
+Do not claim a feature is complete unless its implementation has been verified.
+Build and run the project, execute relevant tests, and fix regressions after each meaningful change.
+
+If a feature depends on missing infrastructure, implement the necessary foundation first. If a requirement is ambiguous, inspect the codebase and choose the most consistent solution rather than making unnecessary architectural changes.
+
+Keep changes modular, maintainable, documented, and compatible with the existing project.
+
+2. Phase One — Bug Fixes and Editor UX
+
+Start by fixing existing problems and improving the editor's usability.
+
+2.1 Fix Shape Collection
+
+Investigate the broken shape collection system. Identify the root cause, repair the implementation, and verify that shapes can be created, selected, edited, and used correctly.
+
+2.2 Right-Click Context Menus
+
+Support right-clicking both objects and empty editor space.
+
+Display context-sensitive menus containing appropriate actions, such as creating objects, pasting content, selecting items, and accessing editor commands.
+
+Ensure menus appear at the correct cursor position and do not interfere with viewport navigation or object selection.
+
+2.3 Editor Visual Improvements
+
+Improve the editor's colors, contrast, typography, spacing, icons, panel organization, and overall visual consistency.
+
+Create a polished, professional interface while preserving the existing workflow.
+
+2.4 Font Integration
+
+Implement proper font loading and rendering support for the editor UI. Ensure text remains readable and support appropriate font fallback behavior.
+
+2.5 Fix the Unsaved Changes Dialog
+
+Investigate the unsaved changes dialog, especially its excessive width. Correct its sizing, layout, responsiveness, and button alignment.
+
+Preserve the expected Save, Discard, and Cancel behavior.
+
+2.6 Automatic Engine Source Detection
+
+Fix the issue where the engine reports "Engine Sources is missing" every time it cannot locate the previous source directory.
+
+Implement a robust source-directory discovery and recovery mechanism. Reuse a previously valid path when appropriate, validate candidate directories, and request user input only when automatic recovery fails or confirmation is necessary.
+
+Never silently select an invalid directory or modify unrelated files.
+
+2.7 Toggleable Object Highlighting
+
+Allow users to enable or disable selection highlights and related editor highlighting through an accessible setting.
+
+Ensure disabling highlights does not break selection, gizmos, or object interaction.
+
+2.8 Scene File Extension
+
+Change the scene file extension from .toml to .abscene while preserving the existing TOML-based internal data format.
+
+Update scene loading, saving, file dialogs, project references, and relevant serialization logic.
+
+Provide backward compatibility for existing .toml scene files where practical. Do not change the internal serialization format unless explicitly required.
+
+3. Phase Two — Core Editor Productivity
+3.1 Keyboard Shortcut System
+
+Implement a centralized, extensible keyboard shortcut manager.
+
+Support familiar shortcuts, including:
+
+Ctrl+C: Copy.
+Ctrl+V: Paste.
+Ctrl+X: Cut.
+Ctrl+Z: Undo.
+Ctrl+Y or the platform-appropriate alternative: Redo.
+Ctrl+S: Save.
+Ctrl+A: Select all.
+Delete: Delete selected objects.
+
+Make shortcuts context-aware so they work correctly across the viewport, asset browser, text fields, and other panels.
+
+Prevent duplicate command execution and avoid intercepting standard text-editing shortcuts when a text input has focus.
+
+3.2 Grid Snapping
+
+Implement configurable snapping for object translation, rotation, and scaling.
+
+Allow users to enable or disable snapping and configure grid intervals or snap increments.
+
+Provide consistent snapping behavior in the viewport and relevant transformation tools.
+
+3.3 Localization and Multilingual Support
+
+Implement a localization system for both the editor and supported in-game UI.
+
+Requirements:
+
+Centralized translation resources.
+Language selection.
+Runtime language switching where practical.
+Fallback behavior for missing translations.
+Unicode support and appropriate font fallback.
+A structure that makes adding new languages straightforward.
+
+Avoid hardcoding user-facing strings throughout the codebase.
+
+3.4 Centralized Game Configuration
+
+Implement a centralized configuration system for reusable engine and gameplay values.
+
+Support named constants, configurable settings, gameplay parameters, and status values that can be referenced by other systems.
+
+For example:
+
+Player.MaxHealth, Player.MoveSpeed, Game.Gravity, and Game.DefaultLanguage.
+
+Use a suitable configuration representation that fits the existing architecture.
+
+Provide validation, default values, clear error messages, and a way to access configuration values safely from game systems.
+
+Distinguish immutable constants from runtime-adjustable settings.
+
+3.5 Joystick and Gamepad Support
+
+Add controller input support, including buttons, analog axes, dead zones, configurable bindings, and input mappings.
+
+Integrate controller input with the existing input system instead of creating a disconnected implementation.
+
+3.6 Multi-Viewport Editor
+
+Support multiple simultaneous scene views, including Top, Front, Side, and Perspective.
+
+Allow users to navigate each viewport independently while sharing scene selection and appropriate editing state.
+
+4. Phase Three — Asset Management and Reusable Content
+4.1 Asset Preview System
+
+Display useful previews directly in the asset browser.
+
+Support appropriate previews for:
+
+Images and textures.
+3D models.
+Materials.
+Normal maps.
+
+Generate thumbnails when needed and cache them efficiently.
+
+4.2 Double-Click Asset Viewer
+
+Open a dedicated viewer when a user double-clicks a supported asset.
+
+Provide suitable visualization and relevant metadata based on asset type.
+
+For 3D models, support orbiting, zooming, and rotating the preview when practical. For textures and normal maps, provide appropriate image inspection tools.
+
+For materials, preview the material on a suitable object with lighting and texture information.
+
+4.3 Reusable GameObject Prefabs
+
+Implement a prefab or reusable GameObject system.
+
+Allow users to create, save, instantiate, edit, and reuse GameObjects across multiple scenes.
+
+Preserve object hierarchies, component data, asset references, and supported properties.
+
+Provide a reliable workflow for updating prefab instances without unintentionally overwriting independent instance changes.
+
+Handle missing assets and invalid references gracefully.
+
+4.4 LEGO-Style Map Building
+
+Create a map-building workflow that allows users to construct levels by combining reusable objects, modules, and building pieces.
+
+Support grid-based placement, snapping, duplication, rotation, and alignment.
+
+Make it easy to assemble buildings, rooms, environments, and modular levels, similar to LEGO-style construction or object placement in The Sims.
+
+5. Phase Four — Creative Tools and Procedural Systems
+5.1 Animation Editor
+
+Allow users to create, edit, preview, and save animations inside the engine.
+
+Support keyframes, timelines, playback controls, interpolation, and animation curves where appropriate.
+
+Design the editor to work with the engine's existing object and component systems.
+
+5.2 Cutscene Editor
+
+Implement a cutscene authoring system with a timeline-based workflow.
+
+Support camera movements, timed events, character animation, audio cues, transitions, and event triggers where supported by the engine.
+
+Allow cutscenes to be saved, previewed, and triggered during gameplay.
+
+5.3 Shader System
+
+Provide a workflow for creating, editing, compiling, assigning, and previewing shaders.
+
+Integrate with the existing rendering backend and material system.
+
+Provide useful compilation diagnostics and error messages. Support hot reloading when feasible.
+
+Do not assume a particular graphics API before inspecting the project.
+
+5.4 Spline Editor
+
+Create an editor for spline-based paths using editable control points and curves.
+
+Support practical use cases such as roads, rivers, railway tracks, pipes, electrical cables, and fences.
+
+Provide point insertion, deletion, movement, curve editing, and configurable spline settings.
+
+5.5 Procedural Object Placement
+
+Allow users to place objects automatically according to configurable rules.
+
+Examples include:
+
+Trees distributed across terrain.
+Streetlights placed at fixed intervals.
+Rocks scattered within defined regions.
+Houses positioned along roads.
+Objects placed using random seeds and density settings.
+
+Support spacing constraints, orientation rules, terrain alignment where available, and reproducible random generation.
+
+5.6 Procedural Generation
+
+Build a procedural generation framework for generating mountains, buildings, roads, dungeons, and larger game worlds.
+
+Use configurable parameters, rules, algorithms, and random seeds.
+
+Design the system to support reproducible generation, user control, and future extensions.
+
+Avoid implementing every generator as an isolated tool; reuse shared generation infrastructure where practical.
+
+6. Phase Five — Advanced Animation and Scene Systems
+6.1 Animation State Machine
+
+Implement a state machine for managing animation states and transitions.
+
+Support workflows such as:
+
+Idle → Walk → Run → Jump
+
+Allow transitions to be driven by parameters, conditions, triggers, and gameplay events.
+
+Provide a visual graph editor and debugging tools where feasible.
+
+6.2 Rigging Editor
+
+Create tools for defining and editing skeletons, bones, and joints.
+
+Integrate the rigging workflow with supported character models and animation assets.
+
+Provide appropriate hierarchy editing and visualization tools.
+
+6.3 Inverse Kinematics
+
+Implement an IK system that calculates joint configurations from target positions.
+
+Support common use cases such as hand targets, foot placement, and two-bone limb solving.
+
+Integrate with the rigging and animation systems, including joint constraints and appropriate debugging visualization.
+
+6.4 Post-Processing Volumes
+
+Implement configurable post-processing volumes for visual effects such as:
+
+Bloom.
+Motion blur.
+Depth of field.
+Color grading.
+
+Support adjustable parameters, volume boundaries, and blending between overlapping volumes where appropriate.
+
+Ensure the implementation matches the capabilities of the existing rendering pipeline.
+
+7. Phase Six — Rendering Optimization and Profiling
+7.1 LOD / HLOD Editor
+
+Implement tools for configuring Levels of Detail and Hierarchical Levels of Detail.
+
+Allow distant objects to use less detailed representations and combine suitable distant objects into larger rendering groups.
+
+Provide configurable transition distances or screen-size thresholds, visual previews, and validation tools.
+
+7.2 Occlusion Culling
+
+Implement occlusion culling to reduce rendering work for objects hidden behind opaque geometry.
+
+Integrate it with the existing visibility and rendering systems.
+
+Prioritize correctness: visible objects must not disappear unexpectedly. Include appropriate fallback behavior and debugging visualization.
+
+7.3 Memory Profiler
+
+Build a memory profiling tool that helps developers understand engine memory usage.
+
+Where supported by the architecture, display:
+
+Total memory usage.
+Allocation statistics.
+Resource and asset memory usage.
+Allocation trends over time.
+Potential memory leaks and suspicious growth.
+Relevant profiling information for debugging.
+
+Make the profiler useful during development without introducing excessive runtime overhead.
+
+8. Phase Seven — Windows Game Exporter
+Enhanced Windows Export Configuration
+
+Improve the Windows game export workflow.
+
+Allow developers to configure:
+
+Game title.
+Creator or developer name.
+Game description and relevant metadata.
+Application icon.
+Executable and package settings supported by the build system.
+Output directory.
+Relevant version information.
+
+Validate user-provided values and assets before export.
+
+Ensure the selected icon and metadata are correctly applied to the generated Windows build wherever supported.
+
+Provide clear build logs, error messages, and export status information.
+
+9. Implementation Strategy
+
+Implement features incrementally in dependency order.
+
+For every feature:
+
+Inspect the relevant existing implementation.
+Identify root causes, dependencies, and potential regressions.
+Define the expected behavior and acceptance criteria.
+Implement the actual functionality.
+Integrate it with existing systems and UI.
+Add or update automated tests where practical.
+Build and run the project.
+Test important user workflows.
+Fix regressions before moving to the next feature.
+Document changed files, implementation details, limitations, and verification results.
+
+Do not attempt to implement the entire roadmap in one uncontrolled change.
+
+Break large features into small, reviewable milestones. Complete and verify foundational systems before building dependent features.
+
+If the project cannot be built or run in the current environment, clearly identify the limitation and perform all other available verification.
+
+10. Definition of Done
+
+A feature is complete only when:
+
+It is implemented in the actual codebase.
+It integrates with the existing architecture.
+Its core functionality works as intended.
+Relevant error cases are handled.
+Existing functionality remains intact.
+Appropriate tests or verification steps have been completed.
+Any remaining limitations are documented.
+
+Do not report unimplemented functionality as complete.
+
+11. Final Reporting
+
+After each milestone, provide a concise report containing:
+
+Features completed.
+Bugs fixed and their root causes.
+Files and systems modified.
+Tests and build results.
+Known issues or limitations.
+Recommended next steps.
+Starting Instruction
+
+Begin by inspecting the existing repository and diagnosing the current problems. Do not immediately rewrite the engine or implement every feature at once.
+
+First, fix the broken Shape Collection, improve the editor's context menus and unsaved changes dialog, correct the Engine Sources path recovery issue, and implement the .abscene extension while preserving the existing TOML-based internal format.
+
+Once these foundational fixes are verified, proceed through the roadmap in dependency order, maintaining a working and testable engine at every milestone.

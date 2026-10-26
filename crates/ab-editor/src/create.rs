@@ -92,6 +92,35 @@ pub const PATHS: &[Template] = &[
     ),
 ];
 
+/// Procedural generators (their settings are in the Inspector).
+pub const PROCEDURAL: &[Template] = &[
+    t(
+        "Scatter (trees, rocks…)",
+        "Generator",
+        "[[node]]\nname = \"Scatter\"\ntype = \"Generator\"\ngenerator = { kind = \"scatter\", seed = 1 }\n",
+    ),
+    t(
+        "Terrain (hills, mountains)",
+        "Generator",
+        "[[node]]\nname = \"Terrain\"\ntype = \"Generator\"\ngenerator = { kind = \"terrain\", seed = 1 }\n",
+    ),
+    t(
+        "Dungeon",
+        "Generator",
+        "[[node]]\nname = \"Dungeon\"\ntype = \"Generator\"\ngenerator = { kind = \"dungeon\", seed = 1 }\n",
+    ),
+    t(
+        "Building",
+        "Generator",
+        "[[node]]\nname = \"Building\"\ntype = \"Generator\"\ngenerator = { kind = \"building\", seed = 1 }\n",
+    ),
+    t(
+        "Town",
+        "Generator",
+        "[[node]]\nname = \"Town\"\ntype = \"Generator\"\ngenerator = { kind = \"town\", seed = 1 }\n",
+    ),
+];
+
 pub const LIGHTS: &[Template] = &[
     t(
         "Directional Light",
@@ -125,6 +154,16 @@ pub const CAMERAS: &[Template] = &[
         "Audio Listener",
         "AudioListener3D",
         "[[node]]\nname = \"Listener\"\ntype = \"AudioListener3D\"\n",
+    ),
+    t(
+        "HLOD Group",
+        "HLOD",
+        "[[node]]\nname = \"HLOD\"\ntype = \"HLOD\"\nhlod = { distance = 80.0, detail = 0.3 }\n",
+    ),
+    t(
+        "Post-Process Volume",
+        "PostVolume",
+        "[[node]]\nname = \"PostVolume\"\ntype = \"PostVolume\"\npost_volume = { size = [10.0, 6.0, 10.0], blend = 3.0, saturation = 0.6, vignette = 0.35 }\n",
     ),
 ];
 
@@ -474,6 +513,7 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
     section(ui, &tr("create.node"), BASIC);
     section(ui, &tr("create.mesh"), MESHES);
     section(ui, &tr("create.path"), PATHS);
+    section(ui, &tr("create.procedural"), PROCEDURAL);
     section(ui, &tr("create.light"), LIGHTS);
     section(ui, &tr("create.camera"), CAMERAS);
     section(ui, &tr("create.physics"), PHYSICS);
@@ -481,6 +521,18 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
         chosen = Some(SceneFile {
             environment: None,
             nodes: vec![crate::panels::animation::new_player()],
+        });
+        ui.close();
+    }
+    if entry(ui, ab_engine::cutscene::CUTSCENE, &tr("create.cutscene")) {
+        chosen = Some(SceneFile {
+            environment: None,
+            nodes: vec![ab_engine::scene_file::NodeDesc {
+                name: "Cutscene".into(),
+                kind: Some(ab_engine::cutscene::CUTSCENE.into()),
+                cutscene: Some(Default::default()),
+                ..Default::default()
+            }],
         });
         ui.close();
     }
@@ -557,7 +609,7 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
     }
     if let Some(scene) = chosen {
         editor.add_scene(scene, Some(at));
-        // An AnimationPlayer or an effect opens in its editor, ready to work on.
+        // An AnimationPlayer, a cutscene or an effect opens in its editor, ready to work on.
         if let Some(node) = editor
             .selection
             .filter(|&n| crate::features::Feature::of(editor, n).is_some())
@@ -577,7 +629,7 @@ mod tests {
             std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets"));
         let mut editor = Editor::new(project, None, ab_engine::audio::AudioOutput::Silent);
         let all: Vec<&Template> = [
-            BASIC, MESHES, PATHS, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS,
+            BASIC, MESHES, PATHS, PROCEDURAL, LIGHTS, CAMERAS, PHYSICS, UI, UI_SCREENS,
         ]
         .iter()
         .flat_map(|group| group.iter())

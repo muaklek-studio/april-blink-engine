@@ -47,6 +47,8 @@ pub(crate) struct FrameGpu {
     pub background: [f32; 4],
     /// Light shafts: intensity, anisotropy, max distance, density
     pub shafts: [f32; 4],
+    /// seconds since start (custom shaders), unused, unused, unused
+    pub time: [f32; 4],
 }
 
 #[repr(C)]
@@ -67,6 +69,8 @@ pub(crate) struct MaterialGpu {
     pub params: [f32; 4],
     /// normal scale, has normal map (0/1), unused, unused
     pub extra: [f32; 4],
+    /// A custom shader's parameters.
+    pub custom: [[f32; 4]; 2],
 }
 
 #[repr(C)]
@@ -81,6 +85,16 @@ pub(crate) struct PostGpu {
     pub effects: [f32; 4],
     /// Full-screen color mixed over the image (rgb, amount).
     pub overlay: [f32; 4],
+    /// Depth of field: focus distance, focus range, max blur in pixels, on (0/1)
+    pub dof: [f32; 4],
+    /// Motion blur: strength, on (0/1), unused, unused
+    pub motion: [f32; 4],
+    /// This frame's camera position (xyz).
+    pub camera: [f32; 4],
+    /// Clip space back to the world, this frame.
+    pub inverse_view_proj: Mat4,
+    /// The world to clip space, last frame (motion blur).
+    pub previous_view_proj: Mat4,
 }
 
 #[repr(C)]
@@ -100,8 +114,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<OmniGpu>(), 32);
         assert_eq!(std::mem::size_of::<SpotGpu>(), 64);
         assert_eq!(std::mem::size_of::<ObjectGpu>(), 144);
-        assert_eq!(std::mem::size_of::<MaterialGpu>(), 64);
-        assert_eq!(std::mem::size_of::<PostGpu>(), 80);
+        assert_eq!(std::mem::size_of::<MaterialGpu>(), 96);
+        assert_eq!(std::mem::size_of::<PostGpu>(), 80 + 48 + 128);
         assert_eq!(std::mem::size_of::<BloomGpu>(), 16);
         let header = 64 + 16 * 10;
         let expected = header
@@ -109,6 +123,7 @@ mod tests {
             + 32 * MAX_OMNI_LIGHTS
             + 64 * MAX_SPOT_LIGHTS
             + 64
+            + 16
             + 16
             + 16;
         assert_eq!(std::mem::size_of::<FrameGpu>(), expected);

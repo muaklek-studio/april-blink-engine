@@ -24,7 +24,7 @@ pub enum Subject {
     Model(String),
     /// A scene file, as an instance.
     Scene(String),
-    /// A material file on a shape.
+    /// A material file, or a custom shader (`.wgsl`) on a plain material, on a shape.
     Material(String, Shape),
 }
 
@@ -169,6 +169,9 @@ impl Previewer {
             if let Some(mut assets) = tree.world().resource_mut::<ab_engine::asset::AssetServer>() {
                 assets.evict(subject.path());
             }
+            if is_shader(subject.path()) {
+                ab_engine::scene_file::reload_shader(tree, subject.path())?;
+            }
         }
         let scene = SceneFile {
             environment: None,
@@ -205,8 +208,17 @@ impl Previewer {
 
     /// Draws the loaded subject into `target`.
     pub fn render(&mut self, target: &OffscreenTarget, orbit: &Orbit) {
+        self.render_at(target, orbit, 0.0);
+    }
+
+    /// Draws the loaded subject into `target`, `seconds` into its animation (custom shaders'
+    /// `input.time`).
+    pub fn render_at(&mut self, target: &OffscreenTarget, orbit: &Orbit, seconds: f64) {
         let (width, height) = target.size();
         let tree = self.engine.tree_mut();
+        if let Some(mut time) = tree.world().resource_mut::<ab_engine::core::Time>() {
+            time.elapsed = seconds;
+        }
         let bounds = self
             .root
             .and_then(|r| tree.subtree_bounds(r))
@@ -267,6 +279,10 @@ impl Previewer {
 }
 
 /// The preview scene of `subject`: its root first.
+fn is_shader(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".wgsl")
+}
+
 fn subject_nodes(subject: &Subject) -> Vec<NodeDesc> {
     let root = NodeDesc {
         name: "Preview".into(),
@@ -299,9 +315,16 @@ fn subject_nodes(subject: &Subject) -> Vec<NodeDesc> {
                 },
             }),
             rotation: matches!(shape, Shape::Plane).then_some([60.0, 0.0, 0.0]),
-            material: Some(MaterialDesc {
-                file: Some(path.clone()),
-                ..Default::default()
+            material: Some(if is_shader(path) {
+                MaterialDesc {
+                    shader: Some(path.clone()),
+                    ..Default::default()
+                }
+            } else {
+                MaterialDesc {
+                    file: Some(path.clone()),
+                    ..Default::default()
+                }
             }),
             ..Default::default()
         },

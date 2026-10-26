@@ -22,10 +22,14 @@ mod debug_draw;
 mod environment;
 mod extract;
 mod gpu;
+mod lod;
 mod material;
 mod mesh;
 mod nodes;
+mod occlusion;
 mod particles;
+mod post_volume;
+pub mod shader;
 mod shadow;
 mod texture;
 mod ui;
@@ -38,21 +42,27 @@ pub use components::{
 };
 pub use debug_draw::{debug_draw_system, DebugBrush, DebugDraw, DebugLine, MAX_DEBUG_LINES};
 pub use environment::{
-    Bloom, Environment, Fog, LightShafts, PostProcess, ScreenOverlay, ShadowSettings,
+    Bloom, DepthOfField, Environment, Fog, LightShafts, PostProcess, ScreenOverlay, ShadowSettings,
 };
 pub use extract::{
-    extract, CameraOverride, DirectionalLightData, DrawItem, OmniLightData, RenderList,
-    SpotLightData,
+    extract, CameraOverride, DirectionalLightData, DrawItem, OmniLightData, RenderIsolation,
+    RenderList, SpotLightData,
 };
 pub use gpu::{
     backend_name, instance_flags, test_gpu_context, AdapterCandidate, FrameStats, GpuContext,
-    OffscreenTarget, RenderError, RendererConfig, SceneRenderer, WindowRenderer,
+    GpuMemory, OffscreenTarget, RenderError, RendererConfig, SceneRenderer, WindowRenderer,
     DEFAULT_TEXTURE_UPLOAD_BUDGET,
+};
+pub use lod::{
+    merge, screen_size, simplify, HlodGroup, HlodProxy, LodLevel, MeshLod, MAX_LOD_LEVELS,
 };
 pub use material::Material;
 pub use mesh::{Aabb, Mesh, MeshError, SkinWeights, Vertex};
 pub use nodes::{class, RenderNodes};
+pub use occlusion::{OcclusionCulling, OcclusionDebug};
 pub use particles::{ParticleDrawList, ParticleInstance};
+pub use post_volume::{blend_post, PostOverrides, PostVolume};
+pub use shader::{ShaderCode, ShaderError, ShaderHandle, ShaderParam};
 pub use shadow::{directional_shadow_matrix, spot_shadow_matrix};
 pub use texture::{
     ColorSpace, MipLevel, SamplerSettings, Texture, TextureError, TextureFilter, TextureWrap,

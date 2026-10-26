@@ -2,6 +2,7 @@
 
 use crate::material::Material;
 use crate::mesh::{Aabb, Mesh, MeshError};
+use crate::shader::{ShaderCode, ShaderHandle};
 use crate::texture::{Texture, TextureError};
 
 /// Reference to a mesh in [`RenderAssets`].
@@ -46,6 +47,7 @@ pub struct RenderAssets {
     meshes: Vec<MeshEntry>,
     textures: Vec<Texture>,
     materials: Vec<Material>,
+    shaders: Vec<ShaderCode>,
 }
 
 impl Default for RenderAssets {
@@ -56,6 +58,7 @@ impl Default for RenderAssets {
             meshes: Vec::new(),
             textures: Vec::new(),
             materials: Vec::new(),
+            shaders: Vec::new(),
         }
     }
 }
@@ -99,6 +102,40 @@ impl RenderAssets {
         handle
     }
 
+    /// Registers a custom surface shader's code (see [`crate::shader`]). It is checked when
+    /// the renderer builds it.
+    pub fn add_shader(&mut self, name: impl Into<String>, code: impl Into<String>) -> ShaderHandle {
+        let handle = ShaderHandle(self.shaders.len() as u32);
+        self.shaders.push(ShaderCode {
+            name: name.into(),
+            code: code.into(),
+            revision: 1,
+        });
+        handle
+    }
+
+    /// Replaces a shader's code (hot reload): materials using it are drawn with the new
+    /// code from the next frame. Whether there was such a shader.
+    pub fn set_shader_code(&mut self, handle: ShaderHandle, code: impl Into<String>) -> bool {
+        let Some(shader) = self.shaders.get_mut(handle.index()) else {
+            return false;
+        };
+        let code = code.into();
+        if shader.code != code {
+            shader.code = code;
+            shader.revision += 1;
+        }
+        true
+    }
+
+    pub fn shader(&self, handle: ShaderHandle) -> Option<&ShaderCode> {
+        self.shaders.get(handle.index())
+    }
+
+    pub fn shader_count(&self) -> usize {
+        self.shaders.len()
+    }
+
     pub fn mesh(&self, handle: MeshHandle) -> Option<&Mesh> {
         self.meshes.get(handle.index()).map(|e| &e.mesh)
     }
@@ -129,6 +166,31 @@ impl RenderAssets {
         self.materials.get_mut(handle.index())
     }
 
+    /// Bytes of the meshes' vertices, indices and skin weights (CPU copies).
+    pub fn mesh_bytes(&self) -> usize {
+        self.meshes
+            .iter()
+            .map(|e| {
+                let m = &e.mesh;
+                m.vertices.len() * std::mem::size_of::<crate::mesh::Vertex>()
+                    + m.indices.len() * 4
+                    + m.skin.as_ref().map_or(0, |s| {
+                        s.len() * std::mem::size_of::<crate::mesh::SkinWeights>()
+                    })
+            })
+            .sum()
+    }
+
+    /// Bytes of the textures' pixels (CPU copies, level 0).
+    pub fn texture_bytes(&self) -> usize {
+        self.textures.iter().map(|t| t.data.len()).sum()
+    }
+
+    /// Bytes of the custom shaders' code.
+    pub fn shader_bytes(&self) -> usize {
+        self.shaders.iter().map(|s| s.code.len()).sum()
+    }
+
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
     }
@@ -151,5 +213,9 @@ impl RenderAssets {
 
     pub(crate) fn materials(&self) -> &[Material] {
         &self.materials
+    }
+
+    pub(crate) fn shaders(&self) -> &[ShaderCode] {
+        &self.shaders
     }
 }

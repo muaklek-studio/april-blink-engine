@@ -5,12 +5,16 @@ pub mod assets;
 pub mod build;
 pub mod config;
 pub mod console;
+pub mod cutscene;
 pub mod debug;
 pub mod effects;
 pub mod git;
 pub mod inspector;
+pub mod memory;
 pub mod profiler;
+pub mod rigging;
 pub mod scene_tree;
+pub mod state_graph;
 
 use crate::theme;
 use ab_engine::core::Color;
@@ -44,7 +48,7 @@ pub fn section(
                 };
                 ui.label(RichText::new(caret).size(11.0).color(theme::TEXT_DIM));
                 ui.label(RichText::new(icon).color(theme::ACCENT));
-                ui.label(RichText::new(title).strong());
+                ui.label(RichText::new(crate::i18n::field(title)).strong());
             });
         });
     let click = ui.interact(
@@ -80,8 +84,9 @@ pub fn grid(ui: &mut egui::Ui, id: &str, add_contents: impl FnOnce(&mut egui::Ui
         .show(ui, add_contents);
 }
 
+/// A field's name (translated, see [`crate::i18n::field`]).
 pub fn label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::TEXT_DIM));
+    ui.label(RichText::new(crate::i18n::field(text)).color(theme::TEXT_DIM));
 }
 
 /// An `Option<f32>` field showing `default` while unset.
