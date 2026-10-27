@@ -4,7 +4,7 @@ use crate::image_loader::decode_image;
 use crate::loader::{AssetRequest, LoadStatus, Loader, Outcome};
 use crate::source::{normalize_path, AssetSource, FileSystemSource};
 use ab_animation::AnimationLibrary;
-use ab_audio::AudioStream;
+use ab_audio::{AudioStream, SoundEvent, SoundEventDesc};
 use ab_rendering::{ColorSpace, RenderAssets, SamplerSettings, Texture, TextureHandle};
 use std::collections::HashMap;
 use std::fmt;
@@ -48,6 +48,7 @@ pub struct AssetServer {
     failed_scenes: HashMap<String, String>,
     textures: HashMap<(String, ColorSpace), TextureHandle>,
     audio: HashMap<String, AudioStream>,
+    sound_events: HashMap<String, SoundEvent>,
     /// `RenderAssets::id` the cached textures and scenes were registered in, and
     /// `AnimationLibrary::id` of the scenes' clips. Loading into other ones drops the stale
     /// handles instead of returning them.
@@ -66,6 +67,7 @@ impl AssetServer {
             scenes: HashMap::new(),
             textures: HashMap::new(),
             audio: HashMap::new(),
+            sound_events: HashMap::new(),
             failed_scenes: HashMap::new(),
             render_id: None,
             library_id: None,
@@ -127,6 +129,15 @@ impl AssetServer {
             self.failed_scenes.remove(&path);
             self.textures.retain(|(p, _), _| *p != path);
             self.audio.remove(&path);
+            // An event goes with its own file and with any of its clips.
+            self.sound_events.retain(|event_path, event| {
+                *event_path != path
+                    && !event
+                        .desc()
+                        .clips
+                        .iter()
+                        .any(|c| Self::normalize(&c.path).is_ok_and(|clip| clip == path))
+            });
             self.pending.retain(|key, _| key.path() != path);
             self.failed.retain(|key, _| key.path() != path);
         }
@@ -216,6 +227,34 @@ impl AssetServer {
         let stream = decode_audio(&path, bytes)?;
         self.audio.insert(path, stream.clone());
         Ok(stream)
+    }
+
+    /// Loads a sound event (`*.absound`) and the sound files of its clips (cached per
+    /// path). A clip whose file cannot be loaded is left out, with a warning.
+    pub fn load_sound_event(&mut self, path: &str) -> Result<SoundEvent, AssetError> {
+        let path = Self::normalize(path)?;
+        if let Some(event) = self.sound_events.get(&path) {
+            return Ok(event.clone());
+        }
+        let bytes = self.read(&path)?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| AssetError::invalid(&path, "not UTF-8 text".to_owned()))?;
+        let desc = SoundEventDesc::from_toml(&text).map_err(|e| AssetError::invalid(&path, e))?;
+        let streams = desc
+            .clips
+            .iter()
+            .map(|clip| match self.load_audio(&clip.path) {
+                Ok(stream) => Some(stream),
+                Err(err) => {
+                    warn!(event = %path, clip = %clip.path, "sound event clip skipped: {err}");
+                    None
+                }
+            })
+            .collect();
+        let event = SoundEvent::new(&path, desc, streams);
+        info!(path, clips = event.clip_count(), "sound event loaded");
+        self.sound_events.insert(path, event.clone());
+        Ok(event)
     }
 
     /// Starts loading a PNG/JPEG texture in the background (see the type's docs); then
@@ -423,10 +462,13 @@ impl AssetServer {
         Self::normalize(path).is_ok_and(|p| self.pending.keys().any(|key| key.path() == p))
     }
 
-    /// Whether a glTF scene or audio stream at `path` is cached.
+    /// Whether a glTF scene, audio stream or sound event at `path` is cached.
     pub fn is_loaded(&self, path: &str) -> bool {
-        Self::normalize(path)
-            .is_ok_and(|p| self.scenes.contains_key(&p) || self.audio.contains_key(&p))
+        Self::normalize(path).is_ok_and(|p| {
+            self.scenes.contains_key(&p)
+                || self.audio.contains_key(&p)
+                || self.sound_events.contains_key(&p)
+        })
     }
 }
 

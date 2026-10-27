@@ -74,6 +74,20 @@ fn sound(c: &Call<'_>, path: &str) -> Result<ab_audio::AudioStream, CallError> {
         .map_err(CallError::failed)
 }
 
+/// The sound event at `path` when it is one (`*.absound`).
+fn sound_event(c: &Call<'_>, path: &str) -> Result<Option<ab_audio::SoundEvent>, CallError> {
+    if !path.ends_with(&format!(".{}", ab_audio::SOUND_EVENT_EXTENSION)) {
+        return Ok(None);
+    }
+    c.tree
+        .world()
+        .resource_mut::<ab_asset::AssetServer>()
+        .ok_or_else(|| CallError::failed("no asset server"))?
+        .load_sound_event(path)
+        .map(Some)
+        .map_err(|e| CallError::failed(e.to_string()))
+}
+
 fn audio<R>(c: &Call<'_>, f: impl FnOnce(&mut Audio) -> R) -> Result<R, CallError> {
     let mut audio = c
         .tree
@@ -559,24 +573,47 @@ pub(super) fn add(b: &mut Builder) {
     });
 
     b.add("audio.play", |c| {
+        let (volume_db, pitch_scale) = (c.f32(1)?, c.f32(2)?.max(0.01));
+        if let Some(event) = sound_event(c, c.str(0)?)? {
+            return audio(c, |a| {
+                a.play_event_with(&event, volume_db, pitch_scale, None);
+            });
+        }
         let stream = sound(c, c.str(0)?)?;
         let options = SoundOptions {
-            volume_db: c.f32(1)?,
-            pitch_scale: c.f32(2)?.max(0.01),
+            volume_db,
+            pitch_scale,
             ..Default::default()
         };
         audio(c, |a| a.play(&stream, options))
     });
     b.add("audio.play_at", |c| {
-        let stream = sound(c, c.str(0)?)?;
         let position = c.vec3(1)?;
+        let (volume_db, pitch_scale) = (c.f32(2)?, c.f32(3)?.max(0.01));
+        if let Some(event) = sound_event(c, c.str(0)?)? {
+            return audio(c, |a| {
+                a.play_event_with(&event, volume_db, pitch_scale, Some(position));
+            });
+        }
+        let stream = sound(c, c.str(0)?)?;
         let options = SoundOptions {
-            volume_db: c.f32(2)?,
-            pitch_scale: c.f32(3)?.max(0.01),
+            volume_db,
+            pitch_scale,
             ..Default::default()
         };
         audio(c, |a| a.play_at(&stream, position, options))
     });
+    b.add("audio.set_snapshot", |c| {
+        let (name, active) = (c.str(0)?, c.bool(1)?);
+        let found = audio(c, |a| a.set_snapshot(name, active))?;
+        c.push_bool(found);
+        Ok(())
+    });
+    b.add("audio.set_bus_volume", |c| {
+        let (bus, offset_db, seconds) = (c.str(0)?, c.f32(1)?, c.f32(2)?);
+        audio(c, |a| a.set_bus_volume(bus, offset_db, seconds.max(0.0)))
+    });
+    b.add("audio.stop_all", |c| audio(c, Audio::stop_all));
     b.add("audio.master_volume_db", |c| {
         c.push_f32(audio(c, |a| a.master_volume_db())?);
         Ok(())

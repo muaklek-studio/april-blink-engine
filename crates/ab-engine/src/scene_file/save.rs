@@ -2,7 +2,7 @@
 
 use super::format::*;
 use super::{SceneInstance, SceneOrigin};
-use ab_audio::AudioPlayer;
+use ab_audio::{AudioPlayer, AudioZone, ZoneShape};
 use ab_core::{EulerRot, Transform3D, Vec3};
 use ab_physics::{
     BodyKind, CharacterBody3D, CollisionShape3D, Joint3D, JointKind, PhysicsBody3D, Ragdoll, Shape,
@@ -329,21 +329,43 @@ fn describe(tree: &SceneTree, node: NodeHandle, desc: &mut NodeDesc) {
                 tree.component::<AudioPlayer>(node),
             ) {
                 (Some(stream), Some(p)) => {
-                    let attenuation = p.positional;
+                    let a = p.positional.as_ref();
                     desc.audio = Some(AudioDesc {
                         stream,
+                        bus: (!p.bus.is_empty()).then(|| p.bus.clone()),
                         volume_db: Some(p.volume_db),
                         pitch: Some(p.pitch_scale),
                         looping: Some(p.looping),
                         autoplay: Some(p.autoplay),
-                        min_distance: attenuation.map(|a| a.min_distance),
-                        max_distance: attenuation.map(|a| a.max_distance),
+                        min_distance: a.map(|a| a.min_distance),
+                        max_distance: a.map(|a| a.max_distance),
+                        rolloff: a.map(|a| a.rolloff),
+                        curve: a.filter(|a| !a.curve.is_empty()).map(|a| a.curve.clone()),
+                        spread: a.map(|a| a.spread).filter(|&s| s != 0.0),
+                        doppler: a.map(|a| a.doppler).filter(|&d| d != 0.0),
+                        occlusion: a.map(|a| a.occlusion).filter(|&o| o),
                     });
                     class
                 }
                 _ => unsupported(tree, node, class, plain),
             }
         }
+        "AudioZone" => match tree.component::<AudioZone>(node) {
+            Some(z) => {
+                let (size, radius) = match z.shape {
+                    ZoneShape::Sphere { radius } => (None, Some(radius)),
+                    ZoneShape::Box { half_extents } => (Some(half_extents.map(|h| h * 2.0)), None),
+                };
+                desc.audio_zone = Some(AudioZoneDesc {
+                    snapshot: z.snapshot.clone(),
+                    size,
+                    radius,
+                    fade_distance: Some(z.fade_distance),
+                });
+                class
+            }
+            None => unsupported(tree, node, class, plain),
+        },
         "Timer" => {
             if let Some(t) = tree.component::<Timer>(node) {
                 desc.timer = Some(TimerDesc {

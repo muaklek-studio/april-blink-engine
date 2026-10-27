@@ -235,6 +235,7 @@ mod tests {
             main_scene: None,
             input: None,
             config: None,
+            audio: None,
             package: None,
             lfs: true,
             export: Default::default(),

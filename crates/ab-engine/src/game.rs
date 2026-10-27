@@ -23,6 +23,7 @@
 //! main_scene = "scenes/main.abscene"  # in the assets
 //! input = "input.toml"            # optional action map, in the project folder
 //! config = "config.toml"          # optional named values (see crate::game_config)
+//! audio = "audio.toml"            # optional mixer (see ab_audio::MixerSettings)
 //! assets = "assets"               # asset folder, in the project folder (the default)
 //!
 //! [window]
@@ -64,6 +65,10 @@ pub struct GameSettings {
     /// folder, e.g. `config.toml`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
+    /// The audio mixer (buses, effects, snapshots; see [`ab_audio::MixerSettings`]),
+    /// relative to the project folder, e.g. `audio.toml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
     /// Asset folder, relative to the project folder (default `assets`). Shipped games read
     /// their pack instead.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +125,7 @@ impl Default for GameSettings {
             main_scene: DEFAULT_MAIN_SCENE.into(),
             input: None,
             config: None,
+            audio: None,
             assets: None,
             save_name: None,
             window: WindowSettings::default(),
@@ -470,6 +476,16 @@ impl Game {
             let map = InputMap::from_toml(&text).with_context(|| format!("invalid {input}"))?;
             if let Some(mut actions) = tree.world().resource_mut::<Actions>() {
                 actions.set_map(map);
+            }
+        }
+        if let Some(file) = &settings.audio {
+            let text = self
+                .project_file(file)
+                .with_context(|| format!("cannot read the mixer {file}"))?;
+            let mixer: ab_audio::MixerSettings =
+                toml::from_str(&text).with_context(|| format!("invalid {file}"))?;
+            if let Some(mut audio) = tree.world().resource_mut::<ab_audio::Audio>() {
+                audio.configure_mixer(mixer);
             }
         }
         tree.world_mut()

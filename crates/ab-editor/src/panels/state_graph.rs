@@ -20,9 +20,10 @@ use ab_engine::state_machine::{
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_phosphor::regular as icon;
 
-const BOX: Vec2 = Vec2::new(150.0, 44.0);
-/// Where the "any state" box sits in the graph.
-const ANY_AT: Pos2 = Pos2::new(-220.0, -140.0);
+const BOX: Vec2 = Vec2::new(180.0, 58.0);
+/// Where the "any state" box sits in the graph, and its size.
+const ANY_AT: Pos2 = Pos2::new(-240.0, -170.0);
+const ANY_BOX: Vec2 = Vec2::new(150.0, 40.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Selected {
@@ -43,6 +44,10 @@ pub struct StateGraphPanel {
     zoom: f32,
     /// A transition being drawn from this state (`None` inside: from any state).
     connecting: Option<Option<usize>>,
+    /// A transition being dragged out of a state's port (`None` inside: any state).
+    dragging_link: Option<Option<usize>>,
+    /// Frame every state on the next draw.
+    fit: bool,
     /// The node it was opened from (clip names, the live state while playing).
     node: Option<NodeHandle>,
 }
@@ -58,6 +63,8 @@ impl Default for StateGraphPanel {
             pan: Vec2::new(300.0, 200.0),
             zoom: 1.0,
             connecting: None,
+            dragging_link: None,
+            fit: true,
             node: None,
         }
     }
@@ -195,10 +202,16 @@ impl StateGraphPanel {
                 StateMachineFile::from_toml(&text).map_err(|e| format!("{path}: {e}"))
             });
         match file {
-            Ok(file) => {
+            Ok(mut file) => {
+                // Written without positions: laid out (in both copies, so this alone does
+                // not count as a change).
+                if overlapping(&file) {
+                    arrange(&mut file);
+                }
                 self.saved = file.clone();
                 self.file = file;
                 self.error = None;
+                self.fit = true;
             }
             Err(err) => self.error = Some(err),
         }
@@ -348,6 +361,7 @@ impl StateGraphPanel {
             {
                 self.file = starter_for(&self.clip_names(editor));
                 self.selected = None;
+                self.fit = true;
             }
             let save = format!(
                 "{}  {}{}",
@@ -371,6 +385,26 @@ impl StateGraphPanel {
                 .clicked()
             {
                 self.assign(editor);
+            }
+            ui.separator();
+            if ui
+                .button(format!(
+                    "{}  {}",
+                    icon::TREE_STRUCTURE,
+                    t("state_graph.arrange")
+                ))
+                .on_hover_text(t("state_graph.arrange_hint"))
+                .clicked()
+            {
+                arrange(&mut self.file);
+                self.fit = true;
+            }
+            if ui
+                .button(format!("{}  {}", icon::FRAME_CORNERS, t("state_graph.fit")))
+                .on_hover_text(t("state_graph.fit_hint"))
+                .clicked()
+            {
+                self.fit = true;
             }
             if self.connecting.is_some() {
                 ui.label(RichText::new(t("state_graph.connecting")).color(theme::WARN));
@@ -842,6 +876,7 @@ impl StateGraphPanel {
             {
                 self.file = starter_for(&clips);
                 self.selected = None;
+                self.fit = true;
             }
             if ui
                 .button(format!("{}  {}", icon::PLUS, t("state_graph.add_state")))
@@ -867,31 +902,29 @@ impl StateGraphPanel {
     fn canvas(&mut self, ui: &mut egui::Ui, live: Option<&StateMachine>) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        if std::mem::take(&mut self.fit) {
+            self.fit_view(rect);
+        }
         let zoom = self.zoom;
         let origin = rect.min + self.pan;
         let to_screen = |p: Pos2| origin + p.to_vec2() * zoom;
         let to_graph = |p: Pos2| Pos2::ZERO + (p - origin) / zoom;
-        // Grid.
-        let step = 40.0 * zoom;
-        let mut x = rect.left() + (origin.x - rect.left()).rem_euclid(step);
-        while x < rect.right() {
-            painter.line_segment(
-                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                Stroke::new(1.0_f32, theme::BG_2),
-            );
-            x += step;
-        }
-        let mut y = rect.top() + (origin.y - rect.top()).rem_euclid(step);
-        while y < rect.bottom() {
-            painter.line_segment(
-                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                Stroke::new(1.0_f32, theme::BG_2),
-            );
-            y += step;
+        // Dot grid: present, not in the way.
+        let step = 32.0 * zoom;
+        if step > 8.0 {
+            let mut x = rect.left() + (origin.x - rect.left()).rem_euclid(step);
+            while x < rect.right() {
+                let mut y = rect.top() + (origin.y - rect.top()).rem_euclid(step);
+                while y < rect.bottom() {
+                    painter.circle_filled(Pos2::new(x, y), 1.0, theme::BG_3);
+                    y += step;
+                }
+                x += step;
+            }
         }
         let box_at =
             |p: [f32; 2]| Rect::from_min_size(to_screen(Pos2::new(p[0], p[1])), BOX * zoom);
-        let any_box = Rect::from_min_size(to_screen(ANY_AT), BOX * zoom);
+        let any_box = Rect::from_min_size(to_screen(ANY_AT), ANY_BOX * zoom);
         let rect_of = |name: &str, file: &StateMachineFile| -> Option<Rect> {
             if name == ANY_STATE {
                 return Some(any_box);
@@ -899,72 +932,107 @@ impl StateGraphPanel {
             file.state(name).map(|i| box_at(file.states[i].position))
         };
         let current = live.and_then(|m| m.state_name().map(str::to_owned));
-        // Transitions: arrows between box edges, side by side when both ways.
-        let mut clicked_transition = None;
-        let pointer = response.interact_pointer_pos().or(response.hover_pos());
-        for (i, tr) in self.file.transitions.iter().enumerate() {
+        let pointer = response.hover_pos();
+        let font = |size: f32| egui::FontId::proportional((size * zoom).clamp(8.0, 30.0));
+
+        // Transitions: curves from edge to edge; two ways between the same states bend
+        // apart, each with its head on the state it goes to and its conditions on a pill.
+        let mut hovered_transition = None;
+        let mut curves = Vec::with_capacity(self.file.transitions.len());
+        for tr in &self.file.transitions {
             let (Some(a), Some(b)) = (rect_of(&tr.from, &self.file), rect_of(&tr.to, &self.file))
             else {
+                curves.push(None);
                 continue;
             };
-            let dir = (b.center() - a.center()).normalized();
-            let side = Vec2::new(-dir.y, dir.x) * 6.0 * zoom;
-            let from = edge_point(a, b.center()) + side;
-            let to = edge_point(b, a.center()) + side;
-            let selected = self.selected == Some(Selected::Transition(i));
-            let color = if selected {
-                Color32::WHITE
-            } else {
-                theme::TEXT_DIM
-            };
-            painter.arrow(
-                from,
-                to - from,
-                Stroke::new(if selected { 2.5 } else { 1.5 }, color),
-            );
-            if !tr.when.is_empty() || tr.exit_time.is_some() {
-                let mid = from + (to - from) * 0.5 + side * 1.5;
-                let label = if tr.when.is_empty() {
-                    format!("{:.0}%", tr.exit_time.unwrap_or(0.0) * 100.0)
-                } else {
-                    tr.when
-                        .iter()
-                        .map(|c| c.parameter.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" & ")
-                };
-                painter.text(
-                    mid,
-                    egui::Align2::CENTER_CENTER,
-                    label,
-                    egui::FontId::proportional(10.0 * zoom.max(0.7)),
-                    theme::TEXT_DIM,
-                );
-            }
-            if response.clicked() {
-                if let Some(p) = pointer {
-                    if distance_to_segment(p, from, to) < 6.0 {
-                        clicked_transition = Some(i);
-                    }
+            let both_ways = self
+                .file
+                .transitions
+                .iter()
+                .any(|o| o.from == tr.to && o.to == tr.from);
+            let curve = transition_curve(a, b, if both_ways { 28.0 * zoom } else { 0.0 });
+            if let Some(p) = pointer {
+                if curve.distance(p) < 7.0 {
+                    hovered_transition = Some(curves.len());
                 }
             }
+            curves.push(Some(curve));
         }
-        // The "any state" box.
+        for (i, (tr, curve)) in self.file.transitions.iter().zip(&curves).enumerate() {
+            let Some(curve) = curve else { continue };
+            let selected = self.selected == Some(Selected::Transition(i));
+            let hovered = hovered_transition == Some(i);
+            let from_live = current.as_deref() == Some(tr.from.as_str())
+                || tr.from == ANY_STATE && current.is_some();
+            let color = if selected {
+                Color32::WHITE
+            } else if hovered {
+                theme::ACCENT
+            } else if from_live {
+                theme::PLAY.gamma_multiply(0.8)
+            } else {
+                EDGE
+            };
+            let width = if selected || hovered { 2.5 } else { 1.75 } * zoom.max(0.6);
+            painter.add(egui::Shape::line(
+                curve.points(24),
+                Stroke::new(width, color),
+            ));
+            let (tip, direction) = curve.end();
+            arrow_head(&painter, tip, direction, 11.0 * zoom.max(0.6), color);
+            let label = condition_label(tr);
+            if !label.is_empty() && zoom > 0.45 {
+                let at = curve.at(0.5);
+                let galley = painter.layout_no_wrap(
+                    label,
+                    font(11.0),
+                    if selected {
+                        Color32::WHITE
+                    } else {
+                        theme::TEXT
+                    },
+                );
+                let pill = Rect::from_center_size(
+                    at,
+                    galley.size() + Vec2::new(12.0, 4.0) * zoom.max(0.6),
+                );
+                painter.rect(
+                    pill,
+                    pill.height() * 0.5,
+                    theme::BG_3,
+                    Stroke::new(1.0_f32, color.gamma_multiply(0.7)),
+                    egui::StrokeKind::Inside,
+                );
+                painter.galley(pill.center() - galley.size() * 0.5, galley, theme::TEXT);
+            }
+        }
+
+        // The "any state" box: transitions from it can leave whatever state is playing.
+        let any_hover = pointer.is_some_and(|p| any_box.contains(p));
         painter.rect(
             any_box,
-            6.0,
-            theme::BG_2,
-            Stroke::new(1.0_f32, theme::BORDER),
+            8.0 * zoom,
+            theme::BG_1,
+            Stroke::new(
+                1.5_f32,
+                if any_hover {
+                    theme::ACCENT
+                } else {
+                    theme::BORDER
+                },
+            ),
             egui::StrokeKind::Inside,
         );
         painter.text(
             any_box.center(),
             egui::Align2::CENTER_CENTER,
-            t("state_graph.any_state"),
-            egui::FontId::proportional(13.0 * zoom),
+            format!("{}  {}", icon::ASTERISK, t("state_graph.any_state")),
+            font(13.0),
             theme::TEXT_DIM,
         );
-        let any_hit = ui.interact(any_box, ui.id().with("sm_any"), Sense::click());
+        let any_port = Pos2::new(any_box.right(), any_box.center().y);
+        let any_hit = ui.interact(any_box, ui.id().with("sm_any"), Sense::click_and_drag());
+
         // States.
         let entry = self
             .file
@@ -973,76 +1041,130 @@ impl StateGraphPanel {
             .or_else(|| self.file.states.first().map(|s| s.name.clone()));
         let mut moved = None;
         let mut clicked_state = None;
-        // What a state's menu asked for.
+        let mut released_on = None;
         let mut menu: Option<(usize, StateMenu)> = None;
+        let mut drag_from: Option<Option<usize>> = None;
         for (i, s) in self.file.states.iter().enumerate() {
             let r = box_at(s.position);
             let selected = self.selected == Some(Selected::State(i));
             let active = current.as_deref() == Some(s.name.as_str());
+            let is_entry = entry.as_deref() == Some(s.name.as_str());
+            let blend = s.blend.is_some();
+            let hovered = pointer.is_some_and(|p| r.expand(6.0).contains(p));
+            let accent = if blend { BLEND } else { theme::ACCENT };
+            // Shadow, body, colored band on the left.
+            painter.rect_filled(
+                r.translate(Vec2::new(0.0, 3.0 * zoom)),
+                8.0 * zoom,
+                Color32::from_black_alpha(90),
+            );
             let fill = if active {
-                theme::PLAY.gamma_multiply(0.45)
+                theme::PLAY.gamma_multiply(0.30)
+            } else if hovered {
+                theme::BG_3
             } else {
                 theme::BG_2
             };
-            let stroke = if selected {
+            let border = if selected {
                 Stroke::new(2.0_f32, Color32::WHITE)
-            } else if entry.as_deref() == Some(s.name.as_str()) {
-                Stroke::new(2.0_f32, theme::WARN)
+            } else if active {
+                Stroke::new(2.0_f32, theme::PLAY)
             } else {
                 Stroke::new(1.0_f32, theme::BORDER)
             };
-            painter.rect(r, 6.0, fill, stroke, egui::StrokeKind::Inside);
-            let kind = if s.blend.is_some() {
-                icon::CHART_LINE
+            painter.rect(r, 8.0 * zoom, fill, border, egui::StrokeKind::Inside);
+            let band = Rect::from_min_size(r.min, Vec2::new(5.0 * zoom, r.height()));
+            painter.rect_filled(
+                band,
+                egui::CornerRadius {
+                    nw: (8.0 * zoom) as u8,
+                    sw: (8.0 * zoom) as u8,
+                    ne: 0,
+                    se: 0,
+                },
+                if is_entry { theme::WARN } else { accent },
+            );
+            let left = r.left() + 14.0 * zoom;
+            let title = if is_entry {
+                format!("{}  {}", icon::FLAG, s.name)
             } else {
-                icon::FILM_STRIP
+                s.name.clone()
             };
             painter.text(
-                r.center() - Vec2::new(0.0, 7.0 * zoom),
-                egui::Align2::CENTER_CENTER,
-                &s.name,
-                egui::FontId::proportional(13.0 * zoom),
+                Pos2::new(left, r.top() + 17.0 * zoom),
+                egui::Align2::LEFT_CENTER,
+                title,
+                egui::FontId::new(
+                    (14.0 * zoom).clamp(8.0, 32.0),
+                    egui::FontFamily::Name(crate::fonts::BOLD.into()),
+                ),
                 theme::TEXT,
             );
-            let sub = s.clip.clone().unwrap_or_else(|| {
-                s.blend
-                    .as_ref()
-                    .map(|b| {
-                        format!(
-                            "{} ({})",
-                            b.clips
-                                .iter()
-                                .map(|c| c.0.as_str())
-                                .collect::<Vec<_>>()
-                                .join("/"),
-                            b.parameter
-                        )
-                    })
-                    .unwrap_or_default()
-            });
-            painter.text(
-                r.center() + Vec2::new(0.0, 9.0 * zoom),
-                egui::Align2::CENTER_CENTER,
-                format!("{kind} {sub}"),
-                egui::FontId::proportional(10.0 * zoom),
+            let sub = match (&s.clip, &s.blend) {
+                (_, Some(b)) => format!(
+                    "{}  {} · {}",
+                    icon::CHART_LINE,
+                    b.clips
+                        .iter()
+                        .map(|c| c.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    b.parameter
+                ),
+                (Some(clip), None) if !clip.is_empty() => format!("{}  {clip}", icon::FILM_STRIP),
+                _ => format!("{}  {}", icon::WARNING, t("state_graph.no_clip")),
+            };
+            painter.with_clip_rect(r.shrink(2.0)).text(
+                Pos2::new(left, r.bottom() - 15.0 * zoom),
+                egui::Align2::LEFT_CENTER,
+                sub,
+                font(11.0),
                 theme::TEXT_DIM,
             );
             if active {
                 if let Some(m) = live {
                     let progress = (m.state_time % 1.0).clamp(0.0, 1.0);
                     let bar = Rect::from_min_size(
-                        r.left_bottom() - Vec2::new(0.0, 3.0),
-                        Vec2::new(r.width() * progress, 3.0),
+                        Pos2::new(r.left() + 6.0 * zoom, r.bottom() - 4.0 * zoom),
+                        Vec2::new((r.width() - 12.0 * zoom) * progress, 2.5 * zoom),
                     );
-                    painter.rect_filled(bar, 0.0, theme::PLAY);
+                    painter.rect_filled(bar, 1.0, theme::PLAY);
                 }
+            }
+            // The port on the right: drag from it to another state for a transition.
+            let port = Pos2::new(r.right(), r.center().y);
+            let port_hot = pointer.is_some_and(|p| p.distance(port) < 9.0 * zoom.max(0.7));
+            if hovered || port_hot || selected {
+                painter.circle(
+                    port,
+                    5.5 * zoom.max(0.7),
+                    if port_hot { theme::ACCENT } else { theme::BG_4 },
+                    Stroke::new(1.5_f32, theme::BG_0),
+                );
+            }
+            let port_hit = ui.interact(
+                Rect::from_center_size(port, Vec2::splat(18.0 * zoom.max(0.7))),
+                ui.id().with(("sm_port", i)),
+                Sense::drag(),
+            );
+            if port_hit.drag_started() {
+                drag_from = Some(Some(i));
+            }
+            if port_hit.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
             let hit = ui.interact(r, ui.id().with(("sm_state", i)), Sense::click_and_drag());
             if hit.clicked() {
                 clicked_state = Some(i);
             }
-            if hit.dragged() {
+            if hit.double_clicked() {
+                self.selected = Some(Selected::State(i));
+            }
+            if hit.dragged() && self.dragging_link.is_none() {
                 moved = Some((i, hit.drag_delta() / zoom));
+            }
+            if hovered {
+                released_on = Some(i);
             }
             hit.context_menu(|ui| {
                 for (action, glyph, key) in [
@@ -1060,6 +1182,20 @@ impl StateGraphPanel {
                     }
                 }
             });
+        }
+        if any_hover {
+            painter.circle(
+                any_port,
+                5.5 * zoom.max(0.7),
+                theme::BG_4,
+                Stroke::new(1.5_f32, theme::BG_0),
+            );
+        }
+        if any_hit.drag_started() {
+            drag_from = Some(None);
+        }
+        if let Some(from) = drag_from {
+            self.dragging_link = Some(from);
         }
         match menu {
             Some((i, StateMenu::Connect)) => self.connecting = Some(Some(i)),
@@ -1088,59 +1224,96 @@ impl StateGraphPanel {
             p[0] += d.x;
             p[1] += d.y;
         }
+
+        // A link being dragged from a port: a curve to the pointer, made on release.
+        if let Some(from) = self.dragging_link {
+            let start = from.map_or(any_port, |f| {
+                let r = box_at(self.file.states[f].position);
+                Pos2::new(r.right(), r.center().y)
+            });
+            if let Some(p) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                let curve = Curve::new(
+                    start,
+                    start + Vec2::new(60.0 * zoom, 0.0),
+                    p - Vec2::new(60.0 * zoom, 0.0),
+                    p,
+                );
+                painter.add(egui::Shape::line(
+                    curve.points(24),
+                    Stroke::new(2.0_f32, theme::WARN),
+                ));
+                arrow_head(&painter, p, curve.end().1, 10.0, theme::WARN);
+            }
+            ui.ctx().request_repaint();
+            if ui.input(|i| i.pointer.any_released()) {
+                self.dragging_link = None;
+                if let Some(to) = released_on {
+                    self.link(from, to);
+                }
+            }
+        }
+
         // Clicks: finish a transition, or select.
         if let Some(i) = clicked_state {
             match self.connecting.take() {
-                Some(from) => {
-                    let from = from.map_or_else(
-                        || ANY_STATE.to_owned(),
-                        |f| self.file.states[f].name.clone(),
-                    );
-                    let to = self.file.states[i].name.clone();
-                    if from != to {
-                        self.file.transitions.push(TransitionDesc {
-                            from,
-                            to,
-                            when: Vec::new(),
-                            exit_time: None,
-                            fade: None,
-                        });
-                        self.selected = Some(Selected::Transition(self.file.transitions.len() - 1));
-                    }
-                }
+                Some(from) => self.link(from, i),
                 None => self.selected = Some(Selected::State(i)),
             }
-        } else if let Some(i) = clicked_transition {
+        } else if let (true, Some(i)) = (response.clicked(), hovered_transition) {
             self.selected = Some(Selected::Transition(i));
         } else if response.clicked() {
             self.selected = None;
             self.connecting = None;
         }
-        // While connecting, a line follows the pointer.
+        // Right-click a transition: delete it.
+        if let (true, Some(i)) = (response.secondary_clicked(), hovered_transition) {
+            self.selected = Some(Selected::Transition(i));
+        }
+        // While connecting by click, a line follows the pointer.
         if let (Some(from), Some(p)) = (self.connecting, response.hover_pos()) {
-            let start = from.map_or(any_box.center(), |f| {
-                box_at(self.file.states[f].position).center()
-            });
+            let start = from.map_or(any_port, |f| box_at(self.file.states[f].position).center());
             painter.line_segment([start, p], Stroke::new(1.5_f32, theme::WARN));
             ui.ctx().request_repaint();
         }
-        // Pan (drag the background, or the middle button) and zoom (wheel).
-        if response.dragged() && moved.is_none() {
+        // Pan (drag the background) and zoom (wheel, around the pointer).
+        if response.dragged() && moved.is_none() && self.dragging_link.is_none() {
             self.pan += response.drag_delta();
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 let before = response.hover_pos().map(to_graph);
-                self.zoom = (self.zoom * (1.0 + scroll / 400.0)).clamp(0.4, 2.5);
+                self.zoom = (self.zoom * (1.0 + scroll / 400.0)).clamp(0.3, 2.5);
                 if let (Some(g), Some(p)) = (before, response.hover_pos()) {
-                    // Keep the point under the pointer still.
                     self.pan = p - rect.min - g.to_vec2() * self.zoom;
                 }
             }
         }
+        // Double-click empty space: a state there.
+        if response.double_clicked() && hovered_transition.is_none() {
+            if let Some(p) = response.interact_pointer_pos() {
+                let at = to_graph(p) - BOX * 0.5;
+                let i = self.add_state(at);
+                self.selected = Some(Selected::State(i));
+            }
+        }
         let mut add_at = None;
         response.context_menu(|ui| {
+            if let Some(i) = hovered_transition.or(match self.selected {
+                Some(Selected::Transition(i)) => Some(i),
+                _ => None,
+            }) {
+                if ui
+                    .button(format!("{}  {}", icon::TRASH, t("state_graph.delete")))
+                    .clicked()
+                {
+                    self.file.transitions.remove(i);
+                    self.selected = None;
+                    ui.close();
+                    return;
+                }
+                ui.separator();
+            }
             if ui
                 .button(format!("{}  {}", icon::PLUS, t("state_graph.add_state")))
                 .clicked()
@@ -1152,13 +1325,28 @@ impl StateGraphPanel {
                 );
                 ui.close();
             }
+            if ui
+                .button(format!(
+                    "{}  {}",
+                    icon::TREE_STRUCTURE,
+                    t("state_graph.arrange")
+                ))
+                .clicked()
+            {
+                arrange(&mut self.file);
+                self.fit = true;
+                ui.close();
+            }
         });
         if let Some(at) = add_at {
             let i = self.add_state(at);
             self.selected = Some(Selected::State(i));
         }
-        let delete = ui.input(|i| i.key_pressed(egui::Key::Delete)) && response.hovered();
-        if delete {
+        let keys_here = response.hovered() && !ui.ctx().egui_wants_keyboard_input();
+        if keys_here && ui.input(|i| i.key_pressed(egui::Key::F)) {
+            self.fit = true;
+        }
+        if keys_here && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
             match self.selected {
                 Some(Selected::State(i)) => self.delete_state(i),
                 Some(Selected::Transition(i)) => {
@@ -1168,7 +1356,239 @@ impl StateGraphPanel {
                 None => {}
             }
         }
+        // How to use it, along the bottom.
+        painter.text(
+            rect.left_bottom() + Vec2::new(10.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            t("state_graph.canvas_hint"),
+            egui::FontId::proportional(11.0),
+            theme::TEXT_DIM,
+        );
     }
+
+    /// A transition from `from` (`None`: any state) to state `to`, selected.
+    fn link(&mut self, from: Option<usize>, to: usize) {
+        let from = from.map_or_else(
+            || ANY_STATE.to_owned(),
+            |f| self.file.states[f].name.clone(),
+        );
+        let to = self.file.states[to].name.clone();
+        if from == to
+            || self
+                .file
+                .transitions
+                .iter()
+                .any(|t| t.from == from && t.to == to)
+        {
+            return;
+        }
+        self.file.transitions.push(TransitionDesc {
+            from,
+            to,
+            when: Vec::new(),
+            exit_time: None,
+            fade: None,
+        });
+        self.selected = Some(Selected::Transition(self.file.transitions.len() - 1));
+    }
+
+    /// Zooms and pans so every state (and the any-state box) is in `rect`.
+    fn fit_view(&mut self, rect: Rect) {
+        let mut bounds = Rect::from_min_size(ANY_AT, ANY_BOX);
+        for s in &self.file.states {
+            bounds = bounds.union(Rect::from_min_size(
+                Pos2::new(s.position[0], s.position[1]),
+                BOX,
+            ));
+        }
+        let bounds = bounds.expand(40.0);
+        let zoom = (rect.width() / bounds.width())
+            .min(rect.height() / bounds.height())
+            .clamp(0.3, 1.4);
+        self.zoom = zoom;
+        self.pan = rect.center() - rect.min - bounds.center().to_vec2() * zoom;
+    }
+}
+
+/// Edge color of a transition at rest.
+const EDGE: Color32 = Color32::from_rgb(150, 160, 180);
+/// The band of a blend state.
+const BLEND: Color32 = Color32::from_rgb(170, 120, 240);
+
+/// What a transition waits for, short: `speed > 0.1 & grounded`, `90%`.
+fn condition_label(tr: &TransitionDesc) -> String {
+    let mut parts: Vec<String> = tr
+        .when
+        .iter()
+        .map(|c| match (c.op, c.value) {
+            (Some(op), Some(v)) => format!("{} {} {}", c.parameter, op.symbol(), trim_number(v)),
+            (Some(op), None) => format!("{} {} 0", c.parameter, op.symbol()),
+            _ => c.parameter.clone(),
+        })
+        .collect();
+    if let Some(exit) = tr.exit_time {
+        parts.push(format!("{}%", (exit * 100.0).round()));
+    }
+    parts.join(" & ")
+}
+
+fn trim_number(v: f32) -> String {
+    let text = format!("{v:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// A cubic Bézier curve on screen.
+#[derive(Debug, Clone, Copy)]
+struct Curve([Pos2; 4]);
+
+impl Curve {
+    fn new(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> Self {
+        Self([a, b, c, d])
+    }
+
+    fn at(&self, t: f32) -> Pos2 {
+        let [a, b, c, d] = self.0;
+        let u = 1.0 - t;
+        let v = a.to_vec2() * (u * u * u)
+            + b.to_vec2() * (3.0 * u * u * t)
+            + c.to_vec2() * (3.0 * u * t * t)
+            + d.to_vec2() * (t * t * t);
+        Pos2::ZERO + v
+    }
+
+    fn points(&self, n: usize) -> Vec<Pos2> {
+        (0..=n).map(|i| self.at(i as f32 / n as f32)).collect()
+    }
+
+    /// The end point and the direction it arrives from.
+    fn end(&self) -> (Pos2, Vec2) {
+        let d = self.0[3] - self.at(0.95);
+        (
+            self.0[3],
+            if d.length_sq() > 1e-6 {
+                d.normalized()
+            } else {
+                Vec2::X
+            },
+        )
+    }
+
+    fn distance(&self, p: Pos2) -> f32 {
+        self.points(24)
+            .windows(2)
+            .map(|w| distance_to_segment(p, w[0], w[1]))
+            .fold(f32::INFINITY, f32::min)
+    }
+}
+
+/// The curve of a transition from box `a` to box `b`. With `lane` (the other way taken
+/// too), it runs on its own side, `lane` to its left, so the two never cross.
+fn transition_curve(a: Rect, b: Rect, lane: f32) -> Curve {
+    let dir = b.center() - a.center();
+    let normal = if dir.length_sq() > 1e-6 {
+        Vec2::new(dir.y, -dir.x).normalized() * lane
+    } else {
+        Vec2::ZERO
+    };
+    // Leaving and arriving shifted sideways (still on the boxes' edges), slightly bowed.
+    let shift = normal * 0.5;
+    let from = a.clamp(edge_point(a.translate(shift), b.center() + shift));
+    let to = b.clamp(edge_point(b.translate(shift), a.center() + shift));
+    let span = to - from;
+    let bow = normal * 0.4;
+    Curve::new(from, from + span * 0.3 + bow, to - span * 0.3 + bow, to)
+}
+
+/// A filled arrowhead with its tip at `tip`, pointing along `direction`.
+fn arrow_head(painter: &egui::Painter, tip: Pos2, direction: Vec2, size: f32, color: Color32) {
+    let back = -direction * size;
+    let side = Vec2::new(-direction.y, direction.x) * size * 0.5;
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, tip + back + side, tip + back - side],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// Lays the states out in columns by how many transitions they are from the entry state
+/// (the ones it cannot reach last), rows within a column in file order.
+pub fn arrange(file: &mut StateMachineFile) {
+    let n = file.states.len();
+    if n == 0 {
+        return;
+    }
+    let entry = file
+        .entry
+        .as_deref()
+        .and_then(|e| file.state(e))
+        .unwrap_or(0);
+    let mut depth = vec![usize::MAX; n];
+    depth[entry] = 0;
+    let mut queue = std::collections::VecDeque::from([entry]);
+    // What any state leads to sits one step out, beside what the entry leads to.
+    for tr in file.transitions.iter().filter(|t| t.from == ANY_STATE) {
+        if let Some(j) = file.state(&tr.to) {
+            if depth[j] == usize::MAX {
+                depth[j] = 1;
+            }
+        }
+    }
+    while let Some(i) = queue.pop_front() {
+        let name = file.states[i].name.clone();
+        for tr in file.transitions.iter().filter(|t| t.from == name) {
+            if let Some(j) = file.state(&tr.to) {
+                if depth[j] == usize::MAX {
+                    depth[j] = depth[i] + 1;
+                    queue.push_back(j);
+                }
+            }
+        }
+        if i == entry {
+            // Any state's targets, placed above, go on from there too.
+            let more: Vec<usize> = (0..n)
+                .filter(|&j| depth[j] == 1 && !queue.contains(&j))
+                .collect();
+            queue.extend(more);
+        }
+    }
+    let deepest = depth
+        .iter()
+        .copied()
+        .filter(|&d| d != usize::MAX)
+        .max()
+        .unwrap_or(0);
+    for d in &mut depth {
+        if *d == usize::MAX {
+            *d = deepest + 1;
+        }
+    }
+    let mut rows = vec![0usize; deepest + 2];
+    let counts: Vec<usize> = (0..deepest + 2)
+        .map(|c| depth.iter().filter(|&&d| d == c).count())
+        .collect();
+    for (i, state) in file.states.iter_mut().enumerate() {
+        let column = depth[i];
+        let row = rows[column];
+        rows[column] += 1;
+        let height = counts[column] as f32 * GAP.y;
+        state.position = [
+            column as f32 * GAP.x,
+            (row as f32 * GAP.y - height * 0.5 + GAP.y * 0.5).round(),
+        ];
+    }
+}
+
+/// Spacing of [`arrange`]: columns, rows.
+const GAP: Vec2 = Vec2::new(340.0, 120.0);
+
+/// Whether states sit on top of each other (a file written by hand, without positions).
+fn overlapping(file: &StateMachineFile) -> bool {
+    file.states.iter().enumerate().any(|(i, a)| {
+        file.states[i + 1..].iter().any(|b| {
+            (a.position[0] - b.position[0]).abs() < BOX.x
+                && (a.position[1] - b.position[1]).abs() < BOX.y
+        })
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1361,6 +1781,71 @@ mod tests {
         );
         // No jump clip: the usual name stays, to be set by hand.
         assert_eq!(file.states[2].clip.as_deref(), Some("Jump"));
+    }
+
+    #[test]
+    fn arranging_spreads_states_out_by_steps_from_the_entry() {
+        let mut file = starter_for(&[]);
+        for state in &mut file.states {
+            state.position = [0.0, 0.0];
+        }
+        assert!(overlapping(&file));
+        arrange(&mut file);
+        assert!(!overlapping(&file));
+        let x = |name: &str| file.states[file.state(name).unwrap()].position[0];
+        assert_eq!(x("Idle"), 0.0, "the entry first");
+        assert!(x("Move") > x("Idle"));
+        assert_eq!(
+            x("Jump"),
+            x("Move"),
+            "any state's target beside the entry's"
+        );
+        file.check().unwrap();
+    }
+
+    #[test]
+    fn conditions_read_as_short_labels() {
+        let tr = TransitionDesc {
+            from: "Idle".into(),
+            to: "Move".into(),
+            when: vec![
+                ab_engine::state_machine::Condition {
+                    parameter: "speed".into(),
+                    op: Some(ab_engine::state_machine::Compare::Greater),
+                    value: Some(0.1),
+                },
+                ab_engine::state_machine::Condition {
+                    parameter: "grounded".into(),
+                    op: None,
+                    value: None,
+                },
+            ],
+            exit_time: Some(0.9),
+            fade: None,
+        };
+        assert_eq!(condition_label(&tr), "speed > 0.1 & grounded & 90%");
+    }
+
+    #[test]
+    fn curves_start_and_end_on_the_boxes() {
+        let a = Rect::from_min_size(Pos2::ZERO, BOX);
+        let b = Rect::from_min_size(Pos2::new(400.0, 0.0), BOX);
+        let c = transition_curve(a, b, 0.0);
+        assert!((c.at(0.0).x - a.right()).abs() < 1e-3);
+        let (tip, dir) = c.end();
+        assert!((tip.x - b.left()).abs() < 1e-3 && dir.x > 0.9);
+        let bent = transition_curve(a, b, 30.0);
+        assert!(bent.at(0.5).y < a.center().y - 10.0, "bowed to one side");
+        let back = transition_curve(b, a, 30.0);
+        assert!(
+            back.at(0.5).y > a.center().y + 10.0,
+            "the other way on the other side"
+        );
+        for p in [bent.at(0.0), bent.end().0, back.at(0.0), back.end().0] {
+            let on_a = a.expand(0.01).contains(p);
+            let on_b = b.expand(0.01).contains(p);
+            assert!(on_a || on_b, "{p:?} ends on a box");
+        }
     }
 
     #[test]

@@ -184,6 +184,7 @@ fn autoplay_follows_the_tree() {
     tree.component_mut::<AudioPlayer>(node).unwrap().positional = Some(Attenuation {
         min_distance: 2.0,
         max_distance: 10.0,
+        ..Attenuation::default()
     });
     frame(&mut tree);
     frame(&mut tree);

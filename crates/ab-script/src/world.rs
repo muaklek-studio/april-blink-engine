@@ -440,7 +440,8 @@ impl<'a> Tree<'a> {
             .unwrap_or(false)
     }
 
-    /// Plays a sound file (`"audio/click.wav"`) once, not positioned.
+    /// Plays a sound file (`"audio/click.wav"`) or sound event (`"sfx/click.absound"`: its
+    /// clip choice, randomization, bus and limits) once, not positioned.
     pub fn play_sound(&mut self, path: &str, options: SoundOptions) -> Result<(), Error> {
         self.run(
             method!("audio.play"),
@@ -452,7 +453,8 @@ impl<'a> Tree<'a> {
         )
     }
 
-    /// Plays a sound file once at a point in the world (louder near the listener).
+    /// Plays a sound file or sound event once at a point in the world (louder near the
+    /// listener).
     pub fn play_sound_at(
         &mut self,
         path: &str,
@@ -481,6 +483,30 @@ impl<'a> Tree<'a> {
             method!("audio.set_master_volume_db"),
             &[volume_db.to_value()],
         );
+    }
+
+    /// Starts (`true`) or stops a mixer snapshot from `audio.toml` (a pause menu's muffle, a
+    /// cutscene's quiet). Returns whether the mixer has it.
+    pub fn set_audio_snapshot(&mut self, name: &str, active: bool) -> bool {
+        self.query(
+            method!("audio.set_snapshot"),
+            &[name.to_value(), active.to_value()],
+        )
+        .unwrap_or(false)
+    }
+
+    /// Fades a mixer bus (`"Music"`, `"SFX"`…) by `offset_db` on top of its mixer setting
+    /// over `seconds`: settings-menu sliders, music dipping for a cutscene.
+    pub fn set_bus_volume(&mut self, bus: &str, offset_db: f32, seconds: f32) {
+        let _ = self.run(
+            method!("audio.set_bus_volume"),
+            &[bus.to_value(), offset_db.to_value(), seconds.to_value()],
+        );
+    }
+
+    /// Stops every sound and clears reverb and echo tails.
+    pub fn stop_all_sounds(&mut self) {
+        let _ = self.run(method!("audio.stop_all"), &[]);
     }
 
     /// Bakes the walkable areas from the physics world (floors and obstacles in

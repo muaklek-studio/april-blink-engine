@@ -18,6 +18,8 @@ pub enum AssetKind {
     Rig,
     Image,
     Audio,
+    /// A sound event: clips, variation, bus and 3D settings (`.absound`).
+    SoundEvent,
     Font,
     Config,
     Other,
@@ -35,6 +37,7 @@ impl AssetKind {
             Some("glb" | "gltf") => Self::Model,
             Some("png" | "jpg" | "jpeg") => Self::Image,
             Some("wav" | "ogg" | "mp3" | "flac") => Self::Audio,
+            Some(ab_engine::audio::SOUND_EVENT_EXTENSION) => Self::SoundEvent,
             Some("ttf" | "otf") => Self::Font,
             Some(ab_engine::scene_file::SCENE_EXTENSION) => Self::Scene,
             Some(ab_engine::scene_file::MATERIAL_EXTENSION) => Self::Material,
@@ -58,6 +61,7 @@ impl AssetKind {
             Self::Rig => icon::PERSON_SIMPLE,
             Self::Image => icon::IMAGE,
             Self::Audio => icon::WAVEFORM,
+            Self::SoundEvent => icon::SPEAKER_HIGH,
             Self::Font => icon::TEXT_AA,
             Self::Config => icon::GEAR_SIX,
             Self::Other => icon::FILE,
@@ -138,6 +142,11 @@ impl AssetIndex {
         self.scan = None;
         self.entries = scan(&self.root);
         self.scanned = Some(Instant::now());
+    }
+
+    /// Every file and folder found.
+    pub fn all(&self) -> impl Iterator<Item = &AssetEntry> {
+        self.entries.iter()
     }
 
     pub fn of_kind(&self, kind: AssetKind) -> impl Iterator<Item = &AssetEntry> {

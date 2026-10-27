@@ -52,6 +52,55 @@ pub enum Command {
     OpenCutsceneEditor,
     OpenAnimationGraph,
     OpenRigging,
+    OpenAudioMixer,
+    OpenSoundEvent,
+    SearchEverything,
+    AddNode,
+}
+
+impl Command {
+    /// Every command, in menu order (the command palette lists them).
+    pub const ALL: [Command; 39] = [
+        Command::NewScene,
+        Command::OpenScene,
+        Command::Save,
+        Command::SaveAs,
+        Command::ExportGame,
+        Command::Undo,
+        Command::Redo,
+        Command::Cut,
+        Command::Copy,
+        Command::Paste,
+        Command::Duplicate,
+        Command::Delete,
+        Command::Rename,
+        Command::SelectAll,
+        Command::SelectNone,
+        Command::FrameSelection,
+        Command::Play,
+        Command::Stop,
+        Command::Pause,
+        Command::StepFrame,
+        Command::ToolSelect,
+        Command::ToolMove,
+        Command::ToolRotate,
+        Command::ToolScale,
+        Command::ToggleSnap,
+        Command::ToggleHighlight,
+        Command::Shortcuts,
+        Command::Preferences,
+        Command::OpenUiDesigner,
+        Command::OpenAnimationEditor,
+        Command::OpenAssetBrowser,
+        Command::OpenGit,
+        Command::OpenCutsceneEditor,
+        Command::OpenAnimationGraph,
+        Command::OpenRigging,
+        Command::OpenAudioMixer,
+        Command::OpenSoundEvent,
+        Command::SearchEverything,
+        Command::AddNode,
+    ];
 }
 
 /// When a binding's keys count.
@@ -93,6 +142,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::Pause, NONE, Key::F6, Scope::Global),
     bind(Command::StepFrame, NONE, Key::F7, Scope::Global),
     bind(Command::SaveAs, CTRL_SHIFT, Key::S, Scope::Editor),
+    bind(Command::AddNode, CTRL_SHIFT, Key::A, Scope::Editor),
     bind(Command::ExportGame, CTRL_SHIFT, Key::E, Scope::Editor),
     bind(Command::Redo, CTRL_SHIFT, Key::Z, Scope::Scene),
     bind(
@@ -127,7 +177,20 @@ pub const BINDINGS: &[Binding] = &[
         Scope::Editor,
     ),
     bind(Command::OpenRigging, CTRL_SHIFT, Key::Num7, Scope::Editor),
+    bind(
+        Command::OpenAudioMixer,
+        CTRL_SHIFT,
+        Key::Num8,
+        Scope::Editor,
+    ),
+    bind(
+        Command::OpenSoundEvent,
+        CTRL_SHIFT,
+        Key::Num9,
+        Scope::Editor,
+    ),
     bind(Command::Save, CTRL, Key::S, Scope::Editor),
+    bind(Command::SearchEverything, CTRL, Key::P, Scope::Editor),
     bind(Command::NewScene, CTRL, Key::N, Scope::Editor),
     bind(Command::OpenScene, CTRL, Key::O, Scope::Editor),
     bind(Command::Undo, CTRL, Key::Z, Scope::Scene),
@@ -189,6 +252,10 @@ impl Command {
             Command::OpenCutsceneEditor => "open_cutscene_editor",
             Command::OpenAnimationGraph => "open_animation_graph",
             Command::OpenRigging => "open_rigging",
+            Command::OpenAudioMixer => "open_audio_mixer",
+            Command::OpenSoundEvent => "open_sound_event",
+            Command::SearchEverything => "command_palette",
+            Command::AddNode => "add_node",
         }
     }
 
@@ -238,6 +305,10 @@ impl Command {
             Command::OpenCutsceneEditor => icon::FILM_SLATE,
             Command::OpenAnimationGraph => icon::GRAPH,
             Command::OpenRigging => icon::PERSON_SIMPLE,
+            Command::OpenAudioMixer => icon::FADERS,
+            Command::OpenSoundEvent => icon::SPEAKER_HIGH,
+            Command::SearchEverything => icon::MAGNIFYING_GLASS,
+            Command::AddNode => icon::PLUS_CIRCLE,
         }
     }
 

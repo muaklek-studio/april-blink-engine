@@ -40,6 +40,8 @@ pub struct Project {
     pub input: Option<String>,
     /// The game's named values, relative to the project folder (`config.toml`).
     pub config: Option<String>,
+    /// The audio mixer, relative to the project folder (`audio.toml`).
+    pub audio: Option<String>,
     /// Cargo package of the scripts (`None` for a project without scripts).
     pub package: Option<String>,
     /// Its packed assets go to Git LFS (`asset_lfs` in `game.toml`, on unless `false`; see
@@ -92,6 +94,7 @@ impl Project {
             main_scene: text("main_scene"),
             input: text("input"),
             config: text("config"),
+            audio: text("audio"),
             lfs: settings
                 .get("asset_lfs")
                 .and_then(toml::Value::as_bool)
@@ -102,12 +105,13 @@ impl Project {
         })
     }
 
-    /// The project's own files, packed apart from the assets in exports: `game.toml` and the
-    /// input map, as (path relative to the project folder, file).
+    /// The project's own files, packed apart from the assets in exports: `game.toml`, the
+    /// input map, the config and the mixer, as (path relative to the project folder, file).
     pub fn project_files(&self) -> Vec<(String, PathBuf)> {
         std::iter::once(GAME_FILE.to_owned())
             .chain(self.input.clone())
             .chain(self.config.clone())
+            .chain(self.audio.clone())
             .map(|name| (name.replace('\\', "/"), self.root.join(&name)))
             .collect()
     }

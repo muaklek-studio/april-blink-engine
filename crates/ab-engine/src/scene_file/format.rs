@@ -242,6 +242,8 @@ pub struct NodeDesc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_zone: Option<AudioZoneDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timer: Option<TimerDesc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub particles: Option<ParticlesDesc>,
@@ -653,8 +655,11 @@ pub enum ShapeDesc {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AudioDesc {
-    /// Asset path of the sound.
+    /// Asset path of the sound file or sound event (`*.absound`).
     pub stream: String,
+    /// Bus to play on (else the event's, else the master).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bus: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_db: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -667,6 +672,33 @@ pub struct AudioDesc {
     pub min_distance: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_distance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolloff: Option<ab_audio::Rolloff>,
+    /// Points of a custom rolloff, `[distance, volume]` in 0..=1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curve: Option<Vec<[f32; 2]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doppler: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occlusion: Option<bool>,
+}
+
+/// An `AudioZone`: `audio_zone = { snapshot = "Cave", size = [10, 4, 10] }` (a box) or
+/// `radius = 6` (a sphere).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AudioZoneDesc {
+    pub snapshot: String,
+    /// Full size of a box zone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 3]>,
+    /// Radius of a sphere zone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fade_distance: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

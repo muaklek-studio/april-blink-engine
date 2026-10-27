@@ -35,19 +35,20 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(crate::fonts::definitions(None, &[]));
 
     let mut style = (*ctx.global_style()).clone();
-    // Compact: dense panels like a desktop DCC tool, still readable (Thai needs ≥ 13 px).
+    // Dense panels like a desktop DCC tool, sized so Thai (with its stacked vowel and tone
+    // marks) reads as easily as Latin text.
     style.text_styles = [
-        (TextStyle::Heading, bold(15.0)),
-        (TextStyle::Body, FontId::proportional(13.0)),
-        (TextStyle::Button, FontId::proportional(13.0)),
-        (TextStyle::Small, FontId::proportional(11.0)),
-        (TextStyle::Monospace, FontId::monospace(12.0)),
+        (TextStyle::Heading, bold(16.0)),
+        (TextStyle::Body, FontId::proportional(14.0)),
+        (TextStyle::Button, FontId::proportional(14.0)),
+        (TextStyle::Small, FontId::proportional(11.5)),
+        (TextStyle::Monospace, FontId::monospace(12.5)),
     ]
     .into();
     let spacing = &mut style.spacing;
     spacing.item_spacing = egui::vec2(6.0, 4.0);
     spacing.button_padding = egui::vec2(7.0, 3.0);
-    spacing.interact_size = egui::vec2(36.0, 21.0);
+    spacing.interact_size = egui::vec2(36.0, 22.0);
     spacing.icon_width = 13.0;
     spacing.icon_width_inner = 7.0;
     spacing.icon_spacing = 5.0;
@@ -140,6 +141,7 @@ pub fn class_icon(class: &str) -> &'static str {
         "HLOD" => icon::STACK,
         "AudioStreamPlayer" | "AudioStreamPlayer3D" => icon::SPEAKER_HIGH,
         "AudioListener3D" => icon::EAR,
+        "AudioZone" => icon::SPEAKER_SIMPLE_HIGH,
         "Timer" => icon::TIMER,
         "Particles3D" => icon::SPARKLE,
         "Joint3D" => icon::LINK,
@@ -167,7 +169,7 @@ pub fn class_color(class: &str) -> Color32 {
         "DirectionalLight3D" | "OmniLight3D" | "SpotLight3D" => WARN,
         "StaticBody3D" | "RigidBody3D" | "AnimatableBody3D" | "CharacterBody3D" | "Area3D"
         | "CollisionShape3D" | "Joint3D" | "Ragdoll" => PLAY,
-        "AudioStreamPlayer" | "AudioStreamPlayer3D" | "AudioListener3D" => {
+        "AudioStreamPlayer" | "AudioStreamPlayer3D" | "AudioListener3D" | "AudioZone" => {
             Color32::from_rgb(240, 130, 180)
         }
         "Particles3D" | "CameraShake" => Color32::from_rgb(255, 140, 80),

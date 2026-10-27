@@ -1,3 +1,4 @@
+use crate::clip::StreamCut;
 use crate::AudioError;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
 use kira::sound::streaming::StreamingSoundData;
@@ -22,6 +23,8 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct AudioStream {
     pub(crate) data: StreamData,
+    /// How it plays (a clip's trim and loop; see [`crate::ClipEdit`]).
+    pub(crate) cut: StreamCut,
 }
 
 #[derive(Clone)]
@@ -51,6 +54,7 @@ impl AudioStream {
             .map_err(|err| AudioError::Decode(err.to_string()))?;
         Ok(Self {
             data: StreamData::Decoded(Box::new(data)),
+            cut: StreamCut::default(),
         })
     }
 
@@ -71,6 +75,7 @@ impl AudioStream {
                 sample_rate,
                 duration,
             },
+            cut: StreamCut::default(),
         })
     }
 
@@ -84,6 +89,7 @@ impl AudioStream {
                 settings: StaticSoundSettings::default(),
                 slice: None,
             })),
+            cut: StreamCut::default(),
         }
     }
 
@@ -92,10 +98,39 @@ impl AudioStream {
         matches!(self.data, StreamData::Streaming { .. })
     }
 
+    /// How long it plays (a trimmed stream: its trimmed length).
     pub fn duration(&self) -> Duration {
+        match (&self.data, self.cut.slice) {
+            (StreamData::Decoded(data), _) => data.duration(),
+            (StreamData::Streaming { duration, .. }, None) => *duration,
+            (StreamData::Streaming { duration, .. }, Some((from, to))) => {
+                let to = to
+                    .unwrap_or(duration.as_secs_f64())
+                    .min(duration.as_secs_f64());
+                Duration::from_secs_f64((to - from).max(0.0))
+            }
+        }
+    }
+
+    /// A streamed sound decoded whole (for drawing or editing it); a decoded one as is.
+    pub fn decoded(&self) -> Result<Self, AudioError> {
         match &self.data {
-            StreamData::Decoded(data) => data.duration(),
-            StreamData::Streaming { duration, .. } => *duration,
+            StreamData::Decoded(_) => Ok(self.clone()),
+            StreamData::Streaming { bytes, .. } => Self::from_bytes(bytes.to_vec()),
+        }
+    }
+
+    /// Mono samples of a decoded sound with its sample rate (`None` while streaming).
+    pub fn samples(&self) -> Option<(u32, Vec<f32>)> {
+        match &self.data {
+            StreamData::Decoded(data) => Some((
+                data.sample_rate,
+                data.frames
+                    .iter()
+                    .map(|f| (f.left + f.right) * 0.5)
+                    .collect(),
+            )),
+            StreamData::Streaming { .. } => None,
         }
     }
 

@@ -26,6 +26,7 @@ mod about;
 mod app;
 mod asset_sync;
 mod asset_viewer;
+mod audio_widgets;
 mod build;
 mod chrome;
 mod commands;
@@ -41,6 +42,7 @@ mod git_window;
 mod history;
 mod i18n;
 mod loading;
+mod palette;
 mod panels;
 mod preferences;
 mod preview;
@@ -239,7 +241,7 @@ fn parse() -> anyhow::Result<Options> {
                 println!(
                     "usage: ab-editor [--project <asset dir>] [--scene <scene.toml>] \
                      [--scripts <library>] [--select <node path,...>] [--play] [--physics-view] \
-                     [--show <panel|window:<tool>,...>] [--system-titlebar] [--screenshot <file.png>] [--screenshot-window <tool>] \
+                     [--show <panel|window:<tool>|sound_event:<asset>|palette[:<query>],...>] [--system-titlebar] [--screenshot <file.png>] [--screenshot-window <tool>] \
                      [--language <en|th|…>] \
                      [--hold-loading]\n\n\
                      Without --project the project manager opens after the system check."

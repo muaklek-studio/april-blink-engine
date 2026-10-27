@@ -1083,7 +1083,7 @@ mod tests {
             "the export version wins over Cargo's"
         );
         assert_eq!(
-            ab_project::export::Game::Project(project).name(),
+            ab_project::export::Game::Project(Box::new(project)).name(),
             "NightRelics"
         );
         let _ = std::fs::remove_dir_all(&root);

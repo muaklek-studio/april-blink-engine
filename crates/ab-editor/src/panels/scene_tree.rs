@@ -230,7 +230,7 @@ impl SceneTreePanel {
                 }
                 Action::Instance(path, parent) => {
                     editor.select(Some(parent));
-                    crate::app::instance_asset(editor, &path, None);
+                    crate::app::drop_asset(editor, &path, None, Some(parent));
                 }
                 Action::AttachScript(node, name) => editor.attach_script(node, &name),
                 Action::PasteInto(node) => editor.paste(None, Some(node), None),

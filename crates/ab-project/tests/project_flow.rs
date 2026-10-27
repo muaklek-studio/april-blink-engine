@@ -54,7 +54,7 @@ fn a_new_project_builds_and_exports_with_the_player() {
     let out = root.join("dist");
     let mut log = Vec::new();
     let result = export(
-        &Game::Project(Project::open(&project.root).unwrap()),
+        &Game::Project(Box::new(Project::open(&project.root).unwrap())),
         &Options::new(&out),
         &mut |line: &str| log.push(line.to_owned()),
     );

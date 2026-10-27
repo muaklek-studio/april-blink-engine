@@ -156,6 +156,11 @@ pub const CAMERAS: &[Template] = &[
         "[[node]]\nname = \"Listener\"\ntype = \"AudioListener3D\"\n",
     ),
     t(
+        "Audio Zone",
+        "AudioZone",
+        "[[node]]\nname = \"AudioZone\"\ntype = \"AudioZone\"\naudio_zone = { size = [10.0, 6.0, 10.0], fade_distance = 2.0 }\n",
+    ),
+    t(
         "HLOD Group",
         "HLOD",
         "[[node]]\nname = \"HLOD\"\ntype = \"HLOD\"\nhlod = { distance = 80.0, detail = 0.3 }\n",
@@ -488,6 +493,182 @@ impl Template {
     }
 }
 
+/// Something that can be created, for searching: the Create menu's search and the command
+/// palette list every one of these.
+pub struct Creatable {
+    /// The menu it is in.
+    pub category: String,
+    pub class: &'static str,
+    pub label: String,
+    pub scene: SceneFile,
+    /// A UI control: goes under a canvas layer (see [`place_ui`]).
+    pub ui: bool,
+}
+
+/// Everything the Create menu offers, flat.
+pub fn catalog(editor: &Editor) -> Vec<Creatable> {
+    let mut all = Vec::new();
+    let groups: [(&str, &[Template], bool); 9] = [
+        ("create.node", BASIC, false),
+        ("create.mesh", MESHES, false),
+        ("create.path", PATHS, false),
+        ("create.procedural", PROCEDURAL, false),
+        ("create.light", LIGHTS, false),
+        ("create.camera", CAMERAS, false),
+        ("create.physics", PHYSICS, false),
+        ("create.ui", UI, true),
+        ("create.ui", UI_SCREENS, true),
+    ];
+    for (category, templates, ui) in groups {
+        for template in templates {
+            all.push(Creatable {
+                category: tr(category),
+                class: template.class,
+                label: template.label.to_owned(),
+                scene: template.scene(),
+                ui,
+            });
+        }
+    }
+    let one = |category: &str, class: &'static str, label: String, scene: SceneFile| Creatable {
+        category: tr(category),
+        class,
+        label,
+        scene,
+        ui: false,
+    };
+    all.push(one(
+        "create.effect",
+        "Node3D",
+        tr("create.layered_effect"),
+        layered_effect(),
+    ));
+    for preset in ParticleSettings::PRESETS {
+        all.push(one(
+            "create.effect",
+            "Particles3D",
+            preset_label(preset),
+            effect(preset),
+        ));
+    }
+    all.push(one(
+        "create.sound",
+        "AudioStreamPlayer3D",
+        tr("create.sound"),
+        sound(editor),
+    ));
+    all.push(one(
+        "create.animation_player",
+        "AnimationPlayer",
+        tr("create.animation_player"),
+        SceneFile {
+            environment: None,
+            nodes: vec![crate::panels::animation::new_player()],
+        },
+    ));
+    all.push(one(
+        "create.ragdoll",
+        "Ragdoll",
+        tr("create.ragdoll_falls"),
+        ragdoll(true),
+    ));
+    all.push(one(
+        "create.ragdoll",
+        "Ragdoll",
+        tr("create.ragdoll_stands"),
+        ragdoll(false),
+    ));
+    all
+}
+
+/// A particle preset's name for menus (`"magic_sparks"` → `"Magic sparks"`).
+fn preset_label(preset: &str) -> String {
+    let mut label: String = preset[..1].to_uppercase();
+    label.push_str(&preset[1..].replace('_', " "));
+    label
+}
+
+/// Adds `item` to the scene (3D nodes at `at`) and opens it in its editor if it has one.
+pub fn add(editor: &mut Editor, item: Creatable, at: Vec3) {
+    if item.ui {
+        let scene = place_ui(editor, item.scene);
+        editor.add_scene(scene, None);
+    } else {
+        editor.add_scene(item.scene, Some(at));
+    }
+    if let Some(node) = editor
+        .selection
+        .filter(|&n| crate::features::Feature::of(editor, n).is_some())
+    {
+        editor.open_request = Some(node);
+    }
+}
+
+/// The search at the top of the Create menu: while something is typed, the matching
+/// entries of every section in one list. Returns whether it took over the menu.
+fn search(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) -> bool {
+    let id = egui::Id::new("create-menu-search");
+    let mut query = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
+    let edit = ui.add(
+        egui::TextEdit::singleline(&mut query)
+            .hint_text(format!(
+                "{}  {}",
+                egui_phosphor::regular::MAGNIFYING_GLASS,
+                tr("create.search")
+            ))
+            .desired_width(220.0),
+    );
+    if !edit.has_focus() && query.is_empty() {
+        edit.request_focus();
+    }
+    ui.data_mut(|d| d.insert_temp(id, query.clone()));
+    if query.trim().is_empty() {
+        ui.separator();
+        return false;
+    }
+    let catalog = catalog(editor);
+    let mut found: Vec<(i32, usize)> = catalog
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let score = [&c.label, &c.category, &c.class.to_owned()]
+                .iter()
+                .filter_map(|text| crate::palette::score(query.trim(), text))
+                .max()?;
+            Some((score, i))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let mut chosen = None;
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            if found.is_empty() {
+                ui.label(egui::RichText::new(tr("palette.nothing")).color(theme::TEXT_DIM));
+            }
+            for (rank, &(_, i)) in found.iter().enumerate() {
+                let c = &catalog[i];
+                let text = format!("{}  {}", theme::class_icon(c.class), c.label);
+                let button = egui::Button::new(text).selected(rank == 0).right_text(
+                    egui::RichText::new(&c.category)
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                if ui.add(button).clicked() || (rank == 0 && enter) {
+                    chosen = Some(i);
+                }
+            }
+        });
+    if let Some(i) = chosen {
+        let item = catalog.into_iter().nth(i).expect("found in the catalog");
+        add(editor, item, at);
+        ui.data_mut(|d| d.remove::<String>(id));
+        ui.close();
+    }
+    true
+}
+
 fn entry(ui: &mut egui::Ui, class: &str, label: &str) -> bool {
     ui.button(egui::RichText::new(format!(
         "{}  {label}",
@@ -499,6 +680,9 @@ fn entry(ui: &mut egui::Ui, class: &str, label: &str) -> bool {
 /// The Create menu body. New nodes go at `at` (the view's focus point).
 pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
     ui.set_min_width(200.0);
+    if search(ui, editor, at) {
+        return;
+    }
     let mut chosen: Option<SceneFile> = None;
     let mut section = |ui: &mut egui::Ui, title: &str, templates: &[Template]| {
         ui.menu_button(title, |ui| {
@@ -585,8 +769,7 @@ pub fn menu(ui: &mut egui::Ui, editor: &mut Editor, at: Vec3) {
         }
         ui.separator();
         for preset in ParticleSettings::PRESETS {
-            let mut label: String = preset[..1].to_uppercase();
-            label.push_str(&preset[1..].replace('_', " "));
+            let label = preset_label(preset);
             if entry(ui, "Particles3D", &label) {
                 chosen = Some(effect(preset));
                 ui.close();

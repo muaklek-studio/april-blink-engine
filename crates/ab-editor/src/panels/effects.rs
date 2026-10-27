@@ -41,16 +41,33 @@ impl EffectsPanel {
             self.layer = layers.first().copied();
             self.stop = None;
         }
+        self.keyboard(ui, editor, &layers);
+        // The preview controls and the layers stay in sight; the settings scroll below.
+        self.preview_bar(ui, editor, root, &layers);
+        self.layers(ui, editor, root, &layers);
+        ui.separator();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.preview_bar(ui, editor, root, &layers);
-                self.layers(ui, editor, root, &layers);
                 if let Some(layer) = self.layer {
                     self.settings(ui, editor, layer);
                 }
                 self.save(ui, editor, root);
             });
+    }
+
+    /// Space pauses or plays the preview, R restarts it (while no text field has the keys).
+    fn keyboard(&mut self, ui: &egui::Ui, editor: &mut Editor, layers: &[NodeHandle]) {
+        if ui.ctx().egui_wants_keyboard_input() || editor.is_playing() {
+            return;
+        }
+        let pressed = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::Space) {
+            editor.preview_effects = !editor.preview_effects;
+        }
+        if pressed(egui::Key::R) {
+            restart(editor, layers);
+        }
     }
 
     fn preview_bar(
@@ -92,13 +109,7 @@ impl EffectsPanel {
                 .on_hover_text(tr("effects.restart_hint"))
                 .clicked()
             {
-                for &layer in layers {
-                    if let Some(mut emitter) =
-                        editor.tree_mut().component_mut::<ParticleEmitter>(layer)
-                    {
-                        emitter.restart();
-                    }
-                }
+                restart(editor, layers);
             }
             let playing = editor.preview_effects;
             let (glyph, tip) = if playing {
@@ -109,6 +120,11 @@ impl EffectsPanel {
             if ui.button(glyph).on_hover_text(tip).clicked() {
                 editor.preview_effects = !playing;
             }
+            ui.label(
+                RichText::new(tr("effects.keys_hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
         });
         ui.add_space(4.0);
     }
@@ -138,13 +154,30 @@ impl EffectsPanel {
                         .tree()
                         .component::<ParticleEmitter>(layer)
                         .map(|e| e.settings.color.sample(0.2));
+                    let visible = editor.tree().is_visible(layer);
                     ui.horizontal(|ui| {
+                        // Hide a layer to see the others alone (saved like any visibility).
+                        let eye = if visible { icon::EYE } else { icon::EYE_SLASH };
+                        let can_hide =
+                            layers.len() > 1 && editor.is_editable(layer) && !editor.is_playing();
+                        if ui
+                            .add_enabled(can_hide, egui::Button::new(eye).frame(false))
+                            .on_hover_text(tr("effects.hide_layer"))
+                            .clicked()
+                        {
+                            set_visible(editor, layer, !visible);
+                        }
                         if let Some(color) = swatch {
                             let (rect, _) =
                                 ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
                             ui.painter().rect_filled(rect, 2.0, color32(color));
                         }
-                        if ui.selectable_label(selected, name).clicked() {
+                        let text = if visible {
+                            RichText::new(name)
+                        } else {
+                            RichText::new(name).color(theme::TEXT_DIM).strikethrough()
+                        };
+                        if ui.selectable_label(selected, text).clicked() {
                             self.layer = Some(layer);
                             self.stop = None;
                         }
@@ -440,6 +473,25 @@ fn save_effect(
 }
 
 /// The effect being edited: (its root, its Particles3D layers).
+/// Starts every layer's particles over.
+fn restart(editor: &mut Editor, layers: &[NodeHandle]) {
+    for &layer in layers {
+        if let Some(mut emitter) = editor.tree_mut().component_mut::<ParticleEmitter>(layer) {
+            emitter.restart();
+        }
+    }
+}
+
+/// Shows or hides a layer (one undo step, saved with the scene).
+fn set_visible(editor: &mut Editor, layer: NodeHandle, visible: bool) {
+    let Some(old) = editor.describe_node(layer) else {
+        return;
+    };
+    let mut new = old.clone();
+    new.visible = (!visible).then_some(false);
+    editor.apply_desc(layer, &old, new);
+}
+
 fn effect_of(editor: &Editor) -> Option<(NodeHandle, Vec<NodeHandle>)> {
     let tree = editor.tree();
     let node = editor.selection.filter(|&n| tree.is_valid(n))?;

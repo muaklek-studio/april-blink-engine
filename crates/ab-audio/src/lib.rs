@@ -28,12 +28,23 @@
 //! ```
 
 mod audio;
+mod chain;
+pub mod clip;
 mod components;
+pub mod dsp;
+pub mod effect;
+mod event;
+pub mod mixer;
 mod nodes;
 mod stream;
 
-pub use audio::{audio_system, Audio, AudioOutput, SoundOptions};
-pub use components::{Attenuation, AudioListener3D, AudioPlayer};
+pub use audio::{audio_system, Audio, AudioOutput, SoundOptions, VoiceId, VoiceStats};
+pub use clip::ClipEdit;
+pub use components::{Attenuation, AudioListener3D, AudioPlayer, AudioZone, Rolloff, ZoneShape};
+pub use dsp::meter::{Levels, MeterReading};
+pub use effect::{EffectDesc, EffectKind};
+pub use event::{ClipDesc, PickMode, SoundEvent, SoundEventDesc, StealMode, SOUND_EVENT_EXTENSION};
+pub use mixer::{MixerSettings, MASTER};
 pub use nodes::AudioNodes;
 pub use stream::AudioStream;
 
@@ -42,6 +53,7 @@ pub mod class {
     pub const AUDIO_STREAM_PLAYER: &str = "AudioStreamPlayer";
     pub const AUDIO_STREAM_PLAYER_3D: &str = "AudioStreamPlayer3D";
     pub const AUDIO_LISTENER_3D: &str = "AudioListener3D";
+    pub const AUDIO_ZONE: &str = "AudioZone";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

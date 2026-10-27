@@ -164,6 +164,7 @@ pub fn build_scene(engine: &mut Engine) -> anyhow::Result<()> {
             .with_attenuation(Attenuation {
                 min_distance: 1.5,
                 max_distance: 14.0,
+                ..Attenuation::default()
             }),
     );
     tree.add_child(gem, drone)?;

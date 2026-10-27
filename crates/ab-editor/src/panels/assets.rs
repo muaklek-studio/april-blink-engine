@@ -35,6 +35,8 @@ pub struct AssetsPanel {
     thumbnails: Option<crate::thumbnails::Thumbnails>,
     /// The window a double-click opens.
     pub viewer: crate::asset_viewer::AssetViewer,
+    /// A sound event just created, to open in its editor.
+    open_event: Option<String>,
 }
 
 /// The Create dialog.
@@ -55,6 +57,7 @@ enum CreateKind {
     Folder,
     Material,
     Shader,
+    SoundEvent,
 }
 
 enum Action {
@@ -64,6 +67,10 @@ enum Action {
     Instance(String),
     OpenScript(PathBuf, usize),
     SystemOpen(PathBuf),
+    /// Open a sound event in the Sound Event editor.
+    SoundEvent(String),
+    /// Make a sound event playing this sound file, next to it, and open it.
+    NewSoundEvent(String),
 }
 
 impl AssetsPanel {
@@ -351,16 +358,31 @@ impl AssetsPanel {
                 self.filter.clear();
             }
             Some(Action::Open(path)) => crate::app::request_open(ui.ctx(), path),
-            Some(Action::Instance(path)) => crate::app::instance_asset(editor, &path, None),
+            Some(Action::Instance(path)) => {
+                let target = editor.selection;
+                crate::app::drop_asset(editor, &path, None, target);
+            }
             Some(Action::OpenScript(path, line)) => open_script(editor, &path, line),
             Some(Action::SystemOpen(path)) => {
                 if let Err(err) = scripts::open_with_system(&path) {
                     editor.fail(format!("{err:#}"));
                 }
             }
+            Some(Action::SoundEvent(path)) => crate::app::request_sound_event(ui.ctx(), path),
+            Some(Action::NewSoundEvent(sound)) => match new_sound_event(editor, &sound) {
+                Ok(path) => {
+                    editor.assets.request_rescan();
+                    self.selected = Some(path.clone());
+                    crate::app::request_sound_event(ui.ctx(), path);
+                }
+                Err(err) => editor.fail(err),
+            },
             None => {}
         }
         self.create_dialog(ui.ctx(), editor);
+        if let Some(path) = self.open_event.take() {
+            crate::app::request_sound_event(ui.ctx(), path);
+        }
         self.delete_dialog(ui.ctx(), editor);
     }
 
@@ -445,6 +467,21 @@ impl AssetsPanel {
                 });
                 ui.close();
             }
+            let sound_event = ui.add_enabled(
+                self.folder != SCRIPTS,
+                egui::Button::new(format!("{}  {}", icon::SPEAKER_HIGH, t("audio.event_item"))),
+            );
+            if sound_event.clicked() {
+                self.create = Some(Create {
+                    kind: CreateKind::SoundEvent,
+                    name: "new_sound".into(),
+                    template: None,
+                    open_after: true,
+                    error: None,
+                    focus: true,
+                });
+                ui.close();
+            }
         }
     }
 
@@ -461,6 +498,7 @@ impl AssetsPanel {
                 CreateKind::Folder => (icon::FOLDER_PLUS, t("assets.new_folder")),
                 CreateKind::Material => (icon::DROP_HALF, t("assets.new_material")),
                 CreateKind::Shader => (icon::SPARKLE, t("assets.new_shader")),
+                CreateKind::SoundEvent => (icon::SPEAKER_HIGH, t("audio.new_event")),
             };
             ui.heading(format!("{glyph}  {title}"));
             ui.add_space(4.0);
@@ -499,6 +537,13 @@ impl AssetsPanel {
                     tf(
                         "assets.shader_preview",
                         &[("path", &join(&self.folder, &format!("{name}.wgsl")))],
+                    )
+                }),
+                CreateKind::SoundEvent => folder_name(&create.name).map(|name| {
+                    let file = format!("{name}.{}", ab_engine::audio::SOUND_EVENT_EXTENSION);
+                    tf(
+                        "audio.event_preview",
+                        &[("path", &join(&self.folder, &file))],
                     )
                 }),
             };
@@ -651,6 +696,28 @@ impl AssetsPanel {
                         .open(editor.project(), &relative, AssetKind::Shader);
                 }
                 editor.info(tf("assets.shader_created", &[("path", &relative)]));
+                Ok(())
+            }
+            CreateKind::SoundEvent => {
+                let name = folder_name(name)?;
+                let file = format!("{name}.{}", ab_engine::audio::SOUND_EVENT_EXTENSION);
+                let relative = join(&self.folder, &file);
+                let path = editor.project().join(&relative);
+                if path.exists() {
+                    return Err(tf("assets.exists", &[("path", &relative)]));
+                }
+                let desc = ab_engine::audio::SoundEventDesc {
+                    bus: "SFX".into(),
+                    ..Default::default()
+                };
+                editor
+                    .write_project_file(&path, desc.to_toml())
+                    .map_err(|e| e.to_string())?;
+                editor.assets.request_rescan();
+                self.selected = Some(relative.clone());
+                if open_after {
+                    self.open_event = Some(relative);
+                }
                 Ok(())
             }
             CreateKind::Folder => {
@@ -958,7 +1025,14 @@ impl AssetsPanel {
             None => response.on_hover_text(&entry.path),
         };
 
-        let draggable = matches!(entry.kind, AssetKind::Model | AssetKind::Scene);
+        let draggable = matches!(
+            entry.kind,
+            AssetKind::Model
+                | AssetKind::Scene
+                | AssetKind::Audio
+                | AssetKind::SoundEvent
+                | AssetKind::Material
+        );
         if draggable {
             response.dnd_set_drag_payload(AssetDrag(entry.path.clone()));
         }
@@ -970,6 +1044,7 @@ impl AssetsPanel {
             action = match entry.kind {
                 AssetKind::Folder => Some(Action::Enter(entry.path.clone())),
                 AssetKind::Scene => Some(Action::Open(entry.path.clone())),
+                AssetKind::SoundEvent => Some(Action::SoundEvent(entry.path.clone())),
                 kind if crate::asset_viewer::can_view(kind) => {
                     Some(Action::View(entry.path.clone(), kind))
                 }
@@ -1005,6 +1080,26 @@ impl AssetsPanel {
                 action = Some(Action::Instance(entry.path.clone()));
                 ui.close();
             }
+            if entry.kind == AssetKind::SoundEvent
+                && ui
+                    .button(format!("{}  {}", icon::SPEAKER_HIGH, t("audio.edit_event")))
+                    .clicked()
+            {
+                action = Some(Action::SoundEvent(entry.path.clone()));
+                ui.close();
+            }
+            if entry.kind == AssetKind::Audio
+                && ui
+                    .button(format!(
+                        "{}  {}",
+                        icon::SPEAKER_HIGH,
+                        t("audio.new_event_from_file")
+                    ))
+                    .clicked()
+            {
+                action = Some(Action::NewSoundEvent(entry.path.clone()));
+                ui.close();
+            }
             if ui
                 .button(format!("{}  {}", icon::CLIPBOARD_TEXT, t("menu.copy_path")))
                 .clicked()
@@ -1015,6 +1110,30 @@ impl AssetsPanel {
         });
         action
     }
+}
+
+/// Writes `<sound>.absound` next to a sound file, playing it; returns its asset path.
+fn new_sound_event(editor: &Editor, sound: &str) -> Result<String, String> {
+    let stem = sound.rsplit_once('.').map_or(sound, |(stem, _)| stem);
+    let path = (1..)
+        .map(|n| {
+            let suffix = if n == 1 {
+                String::new()
+            } else {
+                format!("_{n}")
+            };
+            format!("{stem}{suffix}.{}", ab_engine::audio::SOUND_EVENT_EXTENSION)
+        })
+        .find(|p| !editor.project().join(p).exists())
+        .expect("a free name");
+    let desc = ab_engine::audio::SoundEventDesc {
+        clips: vec![ab_engine::audio::ClipDesc::new(sound)],
+        ..Default::default()
+    };
+    editor
+        .write_project_file(&editor.project().join(&path), desc.to_toml())
+        .map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 /// Where a tile's picture goes: a square at its top.
@@ -1115,6 +1234,7 @@ fn kind_color(kind: AssetKind) -> egui::Color32 {
         AssetKind::Rig => egui::Color32::from_rgb(230, 170, 120),
         AssetKind::Image => egui::Color32::from_rgb(180, 140, 255),
         AssetKind::Audio => egui::Color32::from_rgb(240, 130, 180),
+        AssetKind::SoundEvent => egui::Color32::from_rgb(255, 170, 110),
         AssetKind::Font => egui::Color32::from_rgb(200, 200, 200),
         AssetKind::Config => theme::TEXT_DIM,
         AssetKind::Other => theme::TEXT_DIM,

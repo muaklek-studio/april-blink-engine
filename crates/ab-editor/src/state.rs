@@ -64,6 +64,42 @@ fn config_of(assets: &Path) -> Option<PathBuf> {
     Some(project.root.join(project.config?))
 }
 
+/// Where the mixer of the project whose asset folder is `assets` is kept: `audio` in its
+/// `game.toml`, else `audio.toml` next to it (made on the first save).
+fn mixer_of(assets: &Path) -> Option<PathBuf> {
+    let project = project_of(assets)?;
+    let name = project.audio.unwrap_or_else(|| MIXER_FILE.to_owned());
+    Some(project.root.join(name))
+}
+
+/// The mixer's file name in new projects and in projects that had none.
+pub const MIXER_FILE: &str = "audio.toml";
+
+/// `game.toml` naming the mixer file (added before the first table when it is missing).
+fn with_mixer_entry(game_toml: &str) -> Option<String> {
+    let table: toml::Table = game_toml.parse().ok()?;
+    if table.contains_key("audio") {
+        return None;
+    }
+    let entry = format!("audio = \"{MIXER_FILE}\"\n");
+    let mut out = String::with_capacity(game_toml.len() + entry.len());
+    let mut placed = false;
+    for line in game_toml.split_inclusive('\n') {
+        if !placed && line.trim_start().starts_with('[') {
+            out.push_str(&entry);
+            placed = true;
+        }
+        out.push_str(line);
+    }
+    if !placed {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&entry);
+    }
+    Some(out)
+}
+
 /// The languages of the project whose asset folder is `assets` (`[localization]` of its
 /// `game.toml`), so keyed UI texts show translated in the view.
 fn localization_of(assets: &Path) -> Option<ab_engine::localization::LocalizationSettings> {
@@ -130,6 +166,12 @@ pub struct Editor {
     pub clipboard: Clipboard,
     /// The project's `config.toml`, if it has one.
     pub config_path: Option<PathBuf>,
+    /// The project's mixer file (see [`mixer_of`]).
+    pub mixer_path: Option<PathBuf>,
+    /// The mixer as edited (applied live; saved by the Audio Mixer).
+    pub mixer: ab_engine::audio::MixerSettings,
+    /// The mixer was changed and not saved yet.
+    pub mixer_modified: bool,
     /// A node to open in its own editor (see [`crate::features`]): set by a double click in
     /// the scene tree or by creating a UI node, taken by the editor window.
     pub open_request: Option<NodeHandle>,
@@ -287,6 +329,9 @@ impl Editor {
             gesture: false,
             clipboard: Clipboard::default(),
             config_path: config_of(&project_dir),
+            mixer_path: mixer_of(&project_dir),
+            mixer: ab_engine::audio::MixerSettings::default(),
+            mixer_modified: false,
             open_request: None,
             config_modified: false,
             config_before_play: None,
@@ -295,8 +340,74 @@ impl Editor {
             backups: None,
         };
         editor.load_config();
+        editor.load_mixer();
         editor.new_scene();
         editor
+    }
+
+    // =========================================================================================
+    // Mixer
+    // =========================================================================================
+
+    /// Reads the project's mixer (the default layout when it has none yet) and applies it.
+    pub fn load_mixer(&mut self) {
+        let loaded = self
+            .mixer_path
+            .as_ref()
+            .filter(|p| p.is_file())
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| toml::from_str(&text).map_err(|e| e.to_string()))
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            });
+        self.mixer = match loaded {
+            Some(Ok(mixer)) => mixer,
+            Some(Err(err)) => {
+                self.fail(err);
+                ab_engine::audio::MixerSettings::default()
+            }
+            None => ab_engine::audio::MixerSettings::default(),
+        };
+        self.mixer_modified = false;
+        self.apply_mixer();
+    }
+
+    /// Hands the edited mixer to the engine's audio (it rebuilds only what changed).
+    pub fn apply_mixer(&mut self) {
+        let mixer = self.mixer.clone();
+        if let Some(mut audio) = self
+            .tree()
+            .world()
+            .resource_mut::<ab_engine::audio::Audio>()
+        {
+            audio.configure_mixer(mixer);
+        }
+    }
+
+    /// Writes the mixer file (solo is a listening aid, never saved) and names it in
+    /// `game.toml` if it was not.
+    pub fn save_mixer(&mut self) -> anyhow::Result<()> {
+        let path = self
+            .mixer_path
+            .clone()
+            .context("the project has no game.toml to keep a mixer next to")?;
+        let mut mixer = self.mixer.clone();
+        for bus in &mut mixer.buses {
+            bus.solo = false;
+        }
+        let text = toml::to_string(&mixer)?;
+        self.write_project_file(&path, text)
+            .with_context(|| format!("writing {}", path.display()))?;
+        if let Some(project) = project_of(self.project()) {
+            let game = project.root.join(ab_project::GAME_FILE);
+            let current = std::fs::read_to_string(&game)?;
+            if let Some(updated) = with_mixer_entry(&current) {
+                self.write_project_file(&game, updated)?;
+            }
+        }
+        self.mixer_modified = false;
+        Ok(())
     }
 
     pub fn tree(&self) -> &SceneTree {
@@ -2255,6 +2366,15 @@ impl Editor {
                 // Scripts are inert stand-ins; this propagates transforms and frees nodes.
                 self.engine.tree_mut().process(0.0);
                 effects_system(self.engine.tree_mut().world_mut());
+                // Previews (sound events, mixer meters) play while editing.
+                if let Some(mut audio) = self
+                    .engine
+                    .tree()
+                    .world()
+                    .resource_mut::<ab_engine::audio::Audio>()
+                {
+                    audio.update_preview(delta);
+                }
                 if let Some(mut time) = self.engine.tree().world().resource_mut::<Time>() {
                     time.end_frame();
                 }
@@ -3054,6 +3174,52 @@ mod tests {
             first
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_mixer_is_named_in_game_toml_once_before_the_first_table() {
+        let game = "title = \"Game\"\ninput = \"input.toml\"\n\n[window]\nwidth = 640\n";
+        let updated = with_mixer_entry(game).unwrap();
+        let table: toml::Table = updated.parse().unwrap();
+        assert_eq!(table["audio"].as_str(), Some(MIXER_FILE));
+        assert_eq!(
+            table["window"]["width"].as_integer(),
+            Some(640),
+            "still the window's"
+        );
+        assert!(with_mixer_entry(&updated).is_none(), "already there");
+        assert!(with_mixer_entry("title = \"x\"")
+            .unwrap()
+            .ends_with("audio = \"audio.toml\"\n"));
+    }
+
+    #[test]
+    fn the_mixer_saves_without_solo_and_loads_back() {
+        let dir = std::env::temp_dir().join(format!("ab-mixer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(
+            dir.join("game.toml"),
+            "title = \"Mixer\"\n\n[window]\nwidth = 640\n",
+        )
+        .unwrap();
+        let mut editor = Editor::new(dir.join("assets"), None, AudioOutput::Silent);
+        assert_eq!(
+            editor.mixer,
+            ab_engine::audio::MixerSettings::default(),
+            "the default layout"
+        );
+        editor.mixer.buses[0].volume_db = -6.0;
+        editor.mixer.buses[0].solo = true;
+        editor.save_mixer().unwrap();
+        let text = std::fs::read_to_string(dir.join("audio.toml")).unwrap();
+        assert!(!text.contains("solo"));
+        assert!(std::fs::read_to_string(dir.join("game.toml"))
+            .unwrap()
+            .contains("audio = \"audio.toml\""));
+        let again = Editor::new(dir.join("assets"), None, AudioOutput::Silent);
+        assert_eq!(again.mixer.buses[0].volume_db, -6.0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

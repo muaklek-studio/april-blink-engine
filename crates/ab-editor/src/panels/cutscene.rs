@@ -13,7 +13,7 @@ use crate::i18n::t;
 use crate::state::Editor;
 use crate::theme;
 use ab_engine::animation_file::{rotation_to_degrees, TrackInterpolation};
-use ab_engine::core::Affine3A;
+use ab_engine::core::{Affine3A, Quat, Vec3};
 use ab_engine::cutscene::{
     CameraKey, CutsceneFile, CutscenePlayer, Event, EventKind, CUTSCENE_EXTENSION,
 };
@@ -44,7 +44,31 @@ pub struct CutscenePanel {
     /// Show the shot through the cutscene's camera.
     pub look_through: bool,
     pixels_per_second: f32,
+    /// Zoom the timeline to the cutscene's length on the next draw.
+    fit: bool,
     error: Option<String>,
+}
+
+/// The edited cutscene's camera move, for the 3D views to draw (see [`camera_path`]).
+#[derive(Debug, Clone)]
+pub struct CameraPath {
+    /// The path, sampled along the cutscene.
+    pub points: Vec<Vec3>,
+    /// The keys' positions, and which one is selected.
+    pub keys: Vec<Vec3>,
+    pub selected: Option<usize>,
+    /// The camera at the playhead: position, rotation, field of view (degrees).
+    pub at: Option<(Vec3, Quat, f32)>,
+    pass: u64,
+}
+
+const CAMERA_PATH: &str = "ab-editor.cutscene-path";
+
+/// The camera move of the cutscene being edited, while its editor is open.
+pub fn camera_path(ctx: &egui::Context) -> Option<CameraPath> {
+    let path: CameraPath = ctx.data(|d| d.get_temp(egui::Id::new(CAMERA_PATH)))?;
+    // Published by the editor in the last frames: gone when it closes.
+    (ctx.cumulative_pass_nr() <= path.pass + 2).then_some(path)
 }
 
 impl Default for CutscenePanel {
@@ -59,6 +83,7 @@ impl Default for CutscenePanel {
             selected: None,
             look_through: true,
             pixels_per_second: 90.0,
+            fit: true,
             error: None,
         }
     }
@@ -203,6 +228,104 @@ impl CutscenePanel {
         self.playing = false;
         self.selected = None;
         self.error = None;
+        self.fit = true;
+    }
+
+    /// Hands the camera move to the 3D views (see [`camera_path`]).
+    fn publish_path(&self, ctx: &egui::Context) {
+        let duration = self.file.duration();
+        let samples = ((duration * 20.0) as usize).clamp(2, 2000);
+        let points = (0..=samples)
+            .filter_map(|i| self.file.camera_at(duration * i as f32 / samples as f32))
+            .map(|(p, _, _)| p)
+            .collect();
+        let path = CameraPath {
+            points,
+            keys: self
+                .file
+                .camera
+                .iter()
+                .map(|k| Vec3::from(k.position))
+                .collect(),
+            selected: match self.selected {
+                Some(Selected::Camera(i)) => Some(i),
+                _ => None,
+            },
+            at: (!self.look_through)
+                .then(|| self.file.camera_at(self.time))
+                .flatten(),
+            pass: ctx.cumulative_pass_nr(),
+        };
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(CAMERA_PATH), path));
+    }
+
+    /// Times worth jumping to: keys, events, the start and the end.
+    fn marks(&self) -> Vec<f32> {
+        let mut marks: Vec<f32> = self
+            .file
+            .camera
+            .iter()
+            .map(|k| k.time)
+            .chain(self.file.events.iter().map(|e| e.time))
+            .chain([0.0, self.file.duration()])
+            .collect();
+        marks.sort_by(f32::total_cmp);
+        marks.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+        marks
+    }
+
+    /// Keys of the timeline: Space plays, K keys the camera, Delete removes the selected,
+    /// Home goes to the start, ← → jump between keys and events.
+    fn keyboard(&mut self, ui: &egui::Ui, view: Option<(Affine3A, f32)>) {
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        let pressed = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::Space) {
+            if !self.playing && self.time >= self.file.duration() {
+                self.time = 0.0;
+            }
+            self.playing = !self.playing;
+        }
+        if pressed(egui::Key::K) && !self.look_through {
+            if let Some((global, fov)) = view {
+                self.key_camera(global, fov);
+            }
+        }
+        if pressed(egui::Key::Home) {
+            self.time = 0.0;
+            self.playing = false;
+        }
+        if pressed(egui::Key::ArrowRight) {
+            if let Some(next) = self.marks().into_iter().find(|&m| m > self.time + 1e-3) {
+                self.time = next;
+            }
+            self.playing = false;
+        }
+        if pressed(egui::Key::ArrowLeft) {
+            if let Some(previous) = self
+                .marks()
+                .into_iter()
+                .rev()
+                .find(|&m| m < self.time - 1e-3)
+            {
+                self.time = previous;
+            }
+            self.playing = false;
+        }
+        if pressed(egui::Key::Delete) {
+            match self.selected.take() {
+                Some(Selected::Camera(i)) if i < self.file.camera.len() => {
+                    self.file.camera.remove(i);
+                    self.dirty = true;
+                }
+                Some(Selected::Event(i)) if i < self.file.events.len() => {
+                    self.file.events.remove(i);
+                    self.dirty = true;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The camera at the playhead, to look through: world transform and field of view.
@@ -238,6 +361,8 @@ impl CutscenePanel {
             }
             ui.ctx().request_repaint();
         }
+        self.keyboard(ui, view);
+        self.publish_path(ui.ctx());
         self.toolbar(ui, editor, node, view);
         ui.separator();
         egui::Panel::right("cutscene-details")
@@ -268,7 +393,7 @@ impl CutscenePanel {
                 RichText::new(format!("{}  {name}", icon::FILM_SLATE)).font(theme::bold(13.0)),
             );
             ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(220.0))
-                .on_hover_text("The cutscene file, in the project");
+                .on_hover_text(t("cutscene.file_hint"));
             let save = egui::Button::new(format!(
                 "{}  {}{}",
                 icon::FLOPPY_DISK,
@@ -286,7 +411,7 @@ impl CutscenePanel {
             };
             if ui
                 .button(play)
-                .on_hover_text("Preview the camera move")
+                .on_hover_text(t("cutscene.preview_hint"))
                 .clicked()
             {
                 if !self.playing && self.time >= self.file.duration() {
@@ -439,6 +564,11 @@ impl CutscenePanel {
         let (lanes, lane_count) = lanes(&self.file.events, min_seconds);
         let events_height = ROW * lane_count.max(1) as f32;
         let height = RULER + ROW + events_height + 8.0;
+        if std::mem::take(&mut self.fit) {
+            // The whole cutscene in view, with a little room after it.
+            let room = (ui.available_width() - NAMES - 24.0).max(100.0);
+            self.pixels_per_second = (room / (duration * 1.1)).clamp(20.0, 600.0);
+        }
         egui::ScrollArea::horizontal().show(ui, |ui| {
             let width = NAMES + (duration + 2.0) * self.pixels_per_second;
             let (rect, response) = ui.allocate_exact_size(
@@ -496,9 +626,18 @@ impl CutscenePanel {
                     theme::TEXT,
                 );
             }
-            // Camera keys.
+            // Camera keys, joined: each stretch is a move from one shot to the next.
             let mut moves: Vec<(Selected, f32)> = Vec::new();
             let camera_y = rect.top() + RULER + ROW / 2.0;
+            for pair in self.file.camera.windows(2) {
+                painter.line_segment(
+                    [
+                        Pos2::new(x_of(pair[0].time), camera_y),
+                        Pos2::new(x_of(pair[1].time), camera_y),
+                    ],
+                    Stroke::new(3.0_f32, theme::ACCENT.gamma_multiply(0.35)),
+                );
+            }
             for (i, key) in self.file.camera.iter().enumerate() {
                 let center = Pos2::new(x_of(key.time), camera_y);
                 let selected = self.selected == Some(Selected::Camera(i));
@@ -624,6 +763,23 @@ impl CutscenePanel {
             painter.line_segment(
                 [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
                 Stroke::new(1.5_f32, theme::WARN),
+            );
+            // A handle on the ruler with the time, to grab and to read.
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(x - 6.0, rect.top()),
+                    Pos2::new(x + 6.0, rect.top()),
+                    Pos2::new(x, rect.top() + 9.0),
+                ],
+                theme::WARN,
+                Stroke::NONE,
+            ));
+            painter.text(
+                Pos2::new(x + 8.0, rect.top() + RULER + ROW * 0.5 - 9.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{:.2}s", self.time),
+                egui::FontId::monospace(10.5),
+                theme::WARN,
             );
             // Zoom with Ctrl+wheel.
             if response.hovered() && ui.input(|i| i.modifiers.command) {

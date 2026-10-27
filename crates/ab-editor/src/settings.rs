@@ -30,6 +30,8 @@ pub struct EditorSettings {
     pub system_fonts: bool,
     /// Interface zoom, 1 = 100 %.
     pub ui_scale: f32,
+    /// The first-steps card over an empty scene.
+    pub show_tips: bool,
     /// The tool windows open when the editor last closed (`animation`, `ui_designer`, …),
     /// opened again with the next project.
     pub windows: Vec<String>,
@@ -56,6 +58,7 @@ impl Default for EditorSettings {
             ui_font: None,
             system_fonts: true,
             ui_scale: 1.0,
+            show_tips: true,
             windows: Vec::new(),
             window_rects: Default::default(),
             recent_scenes: Default::default(),

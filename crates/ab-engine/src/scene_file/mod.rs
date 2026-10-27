@@ -95,10 +95,10 @@ mod save;
 pub mod ui;
 
 pub use format::{
-    AnimationDesc, AudioDesc, BodyDesc, BoxDesc, ButtonDesc, CameraDesc, CanvasDesc, CharacterDesc,
-    ColorDesc, ControlDesc, EnvironmentDesc, GeneratorDesc, ImageDesc, JointDesc, LabelDesc,
-    LightDesc, MaterialDesc, MeshDesc, NodeDesc, PanelDesc, ParticlesDesc, PathDesc, ProgressDesc,
-    RagdollDesc, SceneFile, ShapeDesc, TimerDesc, SCENE_FORMAT_VERSION,
+    AnimationDesc, AudioDesc, AudioZoneDesc, BodyDesc, BoxDesc, ButtonDesc, CameraDesc, CanvasDesc,
+    CharacterDesc, ColorDesc, ControlDesc, EnvironmentDesc, GeneratorDesc, ImageDesc, JointDesc,
+    LabelDesc, LightDesc, MaterialDesc, MeshDesc, NodeDesc, PanelDesc, ParticlesDesc, PathDesc,
+    ProgressDesc, RagdollDesc, SceneFile, ShapeDesc, TimerDesc, SCENE_FORMAT_VERSION,
 };
 pub use load::{
     apply_environment, install_clips, instantiate_scene, load_animations, load_scene,

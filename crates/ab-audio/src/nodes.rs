@@ -1,5 +1,5 @@
 use crate::class;
-use crate::components::{Attenuation, AudioListener3D, AudioPlayer};
+use crate::components::{Attenuation, AudioListener3D, AudioPlayer, AudioZone};
 use ab_scene::{NodeHandle, SceneTree, Transform};
 
 /// Audio node constructors on [`SceneTree`] (`use ab_audio::AudioNodes;`).
@@ -13,6 +13,10 @@ pub trait AudioNodes {
 
     /// Creates a detached `AudioListener3D`, usually added under the camera.
     fn create_audio_listener3d(&mut self, name: &str) -> NodeHandle;
+
+    /// Creates a detached `AudioZone`: a place whose mixer snapshot takes over while the
+    /// listener is inside.
+    fn create_audio_zone(&mut self, name: &str, zone: AudioZone) -> NodeHandle;
 }
 
 impl AudioNodes for SceneTree {
@@ -39,5 +43,9 @@ impl AudioNodes for SceneTree {
             class::AUDIO_LISTENER_3D,
             (Transform::default(), AudioListener3D::default()),
         )
+    }
+
+    fn create_audio_zone(&mut self, name: &str, zone: AudioZone) -> NodeHandle {
+        self.spawn_node(name, class::AUDIO_ZONE, (Transform::default(), zone))
     }
 }

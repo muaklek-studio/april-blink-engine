@@ -176,6 +176,13 @@ impl Engine {
         );
         schedule.add_system(
             ScheduleStage::PostUpdate,
+            ab_ecs::named(
+                "audio_occlusion",
+                crate::audio_occlusion::audio_occlusion_system,
+            ),
+        );
+        schedule.add_system(
+            ScheduleStage::PostUpdate,
             ab_ecs::named("audio", audio_system),
         );
         schedule.add_system(

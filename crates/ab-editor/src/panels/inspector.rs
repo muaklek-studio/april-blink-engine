@@ -30,6 +30,8 @@ pub struct InspectorPanel {
     groups_text: Option<(NodeHandle, String)>,
     /// The Script field's open button was pressed: (file, line).
     open_script: Option<(std::path::PathBuf, usize)>,
+    /// Only the sections matching this are shown.
+    filter: String,
 }
 
 impl InspectorPanel {
@@ -38,7 +40,7 @@ impl InspectorPanel {
             super::empty_hint(
                 ui,
                 icon::CURSOR_CLICK,
-                "Select a node to see its properties",
+                &crate::i18n::t("inspector.nothing_selected"),
             );
             return;
         };
@@ -82,7 +84,7 @@ impl InspectorPanel {
                 }
                 let mut subtitle = class.clone();
                 if let Some(instance) = &old.instance {
-                    subtitle = format!("Instance of {instance}");
+                    subtitle = crate::i18n::tf("inspector.instance_of", &[("path", instance)]);
                 }
                 ui.label(RichText::new(subtitle).small().color(theme::TEXT_DIM));
             });
@@ -91,10 +93,9 @@ impl InspectorPanel {
         if others > 0 {
             ui.label(
                 RichText::new(format!(
-                    "{}  {} nodes selected: these are the active one's properties. The \
-                     gizmo, Duplicate and Delete act on all of them.",
+                    "{}  {}",
                     icon::SELECTION_ALL,
-                    others + 1
+                    crate::i18n::tf("inspector.many_selected", &[("count", &(others + 1))])
                 ))
                 .small()
                 .color(theme::ACCENT),
@@ -103,8 +104,9 @@ impl InspectorPanel {
         if !editable {
             ui.label(
                 RichText::new(format!(
-                    "{}  Part of an instanced model: edit the instance instead.",
-                    icon::INFO
+                    "{}  {}",
+                    icon::INFO,
+                    crate::i18n::t("inspector.inside_instance")
                 ))
                 .color(theme::WARN),
             );
@@ -113,64 +115,79 @@ impl InspectorPanel {
         if override_target {
             ui.label(
                 RichText::new(format!(
-                    "{}  Part of a prefab: changes stay with this instance (overrides).",
-                    icon::LINK_SIMPLE
+                    "{}  {}",
+                    icon::LINK_SIMPLE,
+                    crate::i18n::t("inspector.prefab_override")
                 ))
                 .color(theme::ACCENT),
             );
         }
         ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::FUNNEL_SIMPLE).color(theme::TEXT_DIM));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text(crate::i18n::t("inspector.filter"))
+                    .desired_width(ui.available_width() - 28.0),
+            );
+            if !self.filter.is_empty() && ui.small_button(icon::X).clicked() {
+                self.filter.clear();
+            }
+        });
         ui.separator();
 
+        let filter = self.filter.clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if is_3d {
-                    self.transform(ui, editor, node);
-                }
-                self.node_section(ui, editor, node, &mut desc);
-                class_sections(ui, editor, node, &class, &mut desc);
-                if is_3d {
-                    rig_section(ui, editor, node, &mut desc);
-                    lod_section(ui, editor, node, &class, &mut desc);
-                }
-                if let Some(rebuild) = ui.ctx().data_mut(|d| {
-                    d.remove_temp::<Option<NodeHandle>>(egui::Id::new(LOD_REBUILD))
-                        .flatten()
-                }) {
-                    ab_engine::scene_file::lod::build_all(editor.tree_mut(), rebuild);
-                    editor.info("Levels of detail rebuilt");
-                }
-                if let Some(bake) = ui.ctx().data_mut(|d| {
-                    d.remove_temp::<Option<NodeHandle>>(egui::Id::new(BAKE_REQUEST))
-                        .flatten()
-                }) {
-                    match editor.bake_generator(bake) {
-                        Ok(_) => return,
-                        Err(err) => editor.fail(err),
+                super::with_section_filter(ui, &filter, |ui| {
+                    if is_3d {
+                        self.transform(ui, editor, node);
                     }
-                }
-                if let Some(missing) = editor
-                    .tree()
-                    .component::<ab_engine::scene_file::prefab::MissingInstance>(node)
-                    .map(|m| m.error.clone())
-                {
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(format!(
-                            "{}  Not loaded: {missing}. The instance and its overrides are \
+                    self.node_section(ui, editor, node, &mut desc);
+                    class_sections(ui, editor, node, &class, &mut desc);
+                    if is_3d {
+                        rig_section(ui, editor, node, &mut desc);
+                        lod_section(ui, editor, node, &class, &mut desc);
+                    }
+                    if let Some(rebuild) = ui.ctx().data_mut(|d| {
+                        d.remove_temp::<Option<NodeHandle>>(egui::Id::new(LOD_REBUILD))
+                            .flatten()
+                    }) {
+                        ab_engine::scene_file::lod::build_all(editor.tree_mut(), rebuild);
+                        editor.info("Levels of detail rebuilt");
+                    }
+                    if let Some(bake) = ui.ctx().data_mut(|d| {
+                        d.remove_temp::<Option<NodeHandle>>(egui::Id::new(BAKE_REQUEST))
+                            .flatten()
+                    }) {
+                        match editor.bake_generator(bake) {
+                            Ok(_) => return,
+                            Err(err) => editor.fail(err),
+                        }
+                    }
+                    if let Some(missing) = editor
+                        .tree()
+                        .component::<ab_engine::scene_file::prefab::MissingInstance>(node)
+                        .map(|m| m.error.clone())
+                    {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "{}  Not loaded: {missing}. The instance and its overrides are \
                              kept and saved as they are.",
-                            icon::WARNING
-                        ))
-                        .color(theme::WARN),
-                    );
-                } else if old
-                    .instance
-                    .as_deref()
-                    .is_some_and(ab_engine::scene_file::is_scene_path)
-                {
-                    self.prefab_section(ui, editor, node, &old);
-                }
+                                icon::WARNING
+                            ))
+                            .color(theme::WARN),
+                        );
+                    } else if old
+                        .instance
+                        .as_deref()
+                        .is_some_and(ab_engine::scene_file::is_scene_path)
+                    {
+                        self.prefab_section(ui, editor, node, &old);
+                    }
+                })
             });
 
         if desc != old {
@@ -471,7 +488,7 @@ impl InspectorPanel {
                 };
                 let response = ui.add(
                     egui::TextEdit::singleline(text)
-                        .hint_text("enemies, pickups")
+                        .hint_text(crate::i18n::t("inspector.groups_hint"))
                         .desired_width(f32::INFINITY),
                 );
                 if !response.has_focus() && !response.lost_focus() {
@@ -726,6 +743,13 @@ fn class_sections(
                 editor,
                 class,
                 desc.audio.get_or_insert_with(Default::default),
+            );
+        }
+        "AudioZone" => {
+            audio_zone_section(
+                ui,
+                editor,
+                desc.audio_zone.get_or_insert_with(Default::default),
             );
         }
         "Timer" => timer_section(
@@ -2388,9 +2412,11 @@ fn shape_section(ui: &mut egui::Ui, shape: &mut ShapeDesc) {
 }
 
 fn audio_section(ui: &mut egui::Ui, editor: &Editor, class: &str, a: &mut AudioDesc) {
+    use ab_engine::audio::{Attenuation, MASTER, SOUND_EVENT_EXTENSION};
+    let is_event = a.stream.ends_with(&format!(".{SOUND_EVENT_EXTENSION}"));
     section(ui, "audio", icon::SPEAKER_HIGH, "Sound", |ui| {
         grid(ui, "audio_grid", |ui| {
-            label(ui, "Stream");
+            label(ui, "Sound");
             egui::ComboBox::from_id_salt("stream")
                 .selected_text(if a.stream.is_empty() {
                     crate::i18n::field("None")
@@ -2399,12 +2425,70 @@ fn audio_section(ui: &mut egui::Ui, editor: &Editor, class: &str, a: &mut AudioD
                 })
                 .width(ui.available_width() - 4.0)
                 .show_ui(ui, |ui| {
-                    for asset in editor.assets.of_kind(AssetKind::Audio) {
-                        if ui
-                            .selectable_label(a.stream == asset.path, &asset.path)
-                            .clicked()
-                        {
+                    let events = editor.assets.of_kind(AssetKind::SoundEvent);
+                    let files = editor.assets.of_kind(AssetKind::Audio);
+                    for asset in events.chain(files) {
+                        let text = format!("{}  {}", asset.kind.icon(), asset.path);
+                        if ui.selectable_label(a.stream == asset.path, text).clicked() {
                             a.stream = asset.path.clone();
+                        }
+                    }
+                });
+            ui.end_row();
+            if is_event {
+                ui.label("");
+                if ui
+                    .button(format!(
+                        "{}  {}",
+                        icon::PENCIL_SIMPLE,
+                        crate::i18n::t("audio.edit_event")
+                    ))
+                    .clicked()
+                {
+                    crate::app::request_sound_event(ui.ctx(), a.stream.clone());
+                }
+                ui.end_row();
+            }
+            label(ui, "Bus");
+            let current = a.bus.clone().unwrap_or_default();
+            let shown = if current.is_empty() {
+                crate::i18n::t(if is_event {
+                    "audio.bus_of_event"
+                } else {
+                    "audio.bus_master"
+                })
+            } else {
+                current.clone()
+            };
+            egui::ComboBox::from_id_salt("audio_bus")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            current.is_empty(),
+                            crate::i18n::t(if is_event {
+                                "audio.bus_of_event"
+                            } else {
+                                "audio.bus_master"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        a.bus = None;
+                    }
+                    let returns: Vec<&str> = editor
+                        .mixer
+                        .returns
+                        .iter()
+                        .map(|r| r.name.as_str())
+                        .collect();
+                    for bus in editor
+                        .mixer
+                        .bus_names()
+                        .filter(|b| *b != MASTER && !returns.contains(b))
+                    {
+                        if ui.selectable_label(current == bus, bus).clicked() {
+                            a.bus = Some(bus.to_owned());
                         }
                     }
                 });
@@ -2421,16 +2505,118 @@ fn audio_section(ui: &mut egui::Ui, editor: &Editor, class: &str, a: &mut AudioD
             label(ui, "Autoplay");
             opt_bool(ui, &mut a.autoplay, false);
             ui.end_row();
-            if class == "AudioStreamPlayer3D" {
-                label(ui, "Full volume within");
-                opt_f32(ui, &mut a.min_distance, 1.0, 0.0..=1000.0, 0.05);
-                ui.end_row();
-                label(ui, "Silent beyond");
-                opt_f32(ui, &mut a.max_distance, 40.0, 0.0..=10_000.0, 0.1);
-                ui.end_row();
-            }
         });
     });
+    if class == "AudioStreamPlayer3D" {
+        section(ui, "audio_3d", icon::CUBE, "3D sound", |ui| {
+            let base = Attenuation::default();
+            let mut att = Attenuation {
+                min_distance: a.min_distance.unwrap_or(base.min_distance),
+                max_distance: a.max_distance.unwrap_or(base.max_distance),
+                rolloff: a.rolloff.unwrap_or(base.rolloff),
+                curve: a.curve.clone().unwrap_or_default(),
+                spread: a.spread.unwrap_or(base.spread),
+                doppler: a.doppler.unwrap_or(base.doppler),
+                occlusion: a.occlusion.unwrap_or(base.occlusion),
+            };
+            if is_event {
+                ui.label(
+                    RichText::new(crate::i18n::t("audio.event_3d_hint"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+            }
+            if crate::panels::sound_event::attenuation_editor(ui, &mut att, "player_3d") {
+                a.min_distance = Some(att.min_distance);
+                a.max_distance = Some(att.max_distance);
+                a.rolloff = Some(att.rolloff);
+                a.curve = (!att.curve.is_empty()).then_some(att.curve);
+                a.spread = Some(att.spread);
+                a.doppler = Some(att.doppler);
+                a.occlusion = Some(att.occlusion);
+            }
+        });
+    }
+}
+
+fn audio_zone_section(
+    ui: &mut egui::Ui,
+    editor: &Editor,
+    z: &mut ab_engine::scene_file::AudioZoneDesc,
+) {
+    section(
+        ui,
+        "audio_zone",
+        icon::SPEAKER_SIMPLE_HIGH,
+        "Audio zone",
+        |ui| {
+            grid(ui, "audio_zone_grid", |ui| {
+                label(ui, "Snapshot");
+                egui::ComboBox::from_id_salt("zone_snapshot")
+                    .selected_text(if z.snapshot.is_empty() {
+                        crate::i18n::field("None")
+                    } else {
+                        z.snapshot.clone()
+                    })
+                    .show_ui(ui, |ui| {
+                        for s in &editor.mixer.snapshots {
+                            ui.selectable_value(&mut z.snapshot, s.name.clone(), &s.name);
+                        }
+                    });
+                ui.end_row();
+                label(ui, "Shape");
+                let mut sphere = z.radius.is_some();
+                ui.horizontal(|ui| {
+                    if ui
+                        .radio(!sphere, crate::i18n::t("audio.zone_box"))
+                        .clicked()
+                    {
+                        sphere = false;
+                    }
+                    if ui
+                        .radio(sphere, crate::i18n::t("audio.zone_sphere"))
+                        .clicked()
+                    {
+                        sphere = true;
+                    }
+                });
+                if sphere && z.radius.is_none() {
+                    z.radius = Some(5.0);
+                    z.size = None;
+                } else if !sphere && z.radius.is_some() {
+                    z.radius = None;
+                    z.size = Some([10.0, 6.0, 10.0]);
+                }
+                ui.end_row();
+                if let Some(radius) = &mut z.radius {
+                    label(ui, "Radius");
+                    ui.add(
+                        egui::DragValue::new(radius)
+                            .range(0.01..=10_000.0)
+                            .speed(0.05)
+                            .suffix(" m"),
+                    );
+                } else {
+                    label(ui, "Size");
+                    let mut size = z.size.unwrap_or([10.0, 6.0, 10.0]);
+                    if vec3(ui, &mut size, 0.05, " m") {
+                        z.size = Some(size.map(|s| s.max(0.01)));
+                    }
+                }
+                ui.end_row();
+                label(ui, "Fade distance");
+                opt_f32(ui, &mut z.fade_distance, 2.0, 0.0..=1000.0, 0.05);
+                ui.end_row();
+            });
+            if editor.mixer.snapshots.is_empty() {
+                ui.label(
+                    RichText::new(crate::i18n::t("audio.zone_no_snapshots"))
+                        .small()
+                        .color(theme::WARN),
+                );
+            }
+        },
+    );
 }
 
 fn timer_section(ui: &mut egui::Ui, t: &mut TimerDesc) {

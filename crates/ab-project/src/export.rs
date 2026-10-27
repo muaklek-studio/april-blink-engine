@@ -52,7 +52,7 @@ const FONT_LICENSE: &str = include_str!("../../ab-ui/fonts/OFL.txt");
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Game {
     /// A project: script library + player.
-    Project(Project),
+    Project(Box<Project>),
     /// A game executable of the engine's workspace.
     Engine {
         /// The engine workspace.
@@ -325,9 +325,10 @@ pub fn resolve_game(name: &str) -> Result<Game> {
                 Game::slice(&engine)
             })
         }
-        path => Ok(Game::Project(Project::open(Path::new(path)).with_context(
-            || format!("`{path}` is neither slice, demo nor a project folder"),
-        )?)),
+        path => Ok(Game::Project(Box::new(
+            Project::open(Path::new(path))
+                .with_context(|| format!("`{path}` is neither slice, demo nor a project folder"))?,
+        ))),
     }
 }
 

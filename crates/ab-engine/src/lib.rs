@@ -28,6 +28,7 @@
 pub mod animation_file;
 mod app;
 pub mod assets;
+pub mod audio_occlusion;
 pub mod blood;
 pub mod climb;
 mod config;

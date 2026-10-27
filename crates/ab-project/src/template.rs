@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn project_files_are_the_settings_the_input_map_and_the_config() {
+    fn project_files_are_the_settings_the_input_map_the_config_and_the_mixer() {
         let dir = temp("project-files");
         let project = create(&new("Packed", &dir)).unwrap();
         let names: Vec<_> = project
@@ -319,7 +319,10 @@ mod tests {
                 name
             })
             .collect();
-        assert_eq!(names, ["game.toml", "input.toml", "config.toml"]);
+        assert_eq!(
+            names,
+            ["game.toml", "input.toml", "config.toml", "audio.toml"]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

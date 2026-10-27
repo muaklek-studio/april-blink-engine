@@ -1372,3 +1372,58 @@ fn lods_and_hlod_groups_are_built_on_load_and_saved_as_written() {
     let err = load_scene(tree, "bad.abscene").unwrap_err().to_string();
     assert!(err.contains("lod"), "{err}");
 }
+
+#[test]
+fn sound_events_buses_and_audio_zones_load_and_save_back() {
+    let event = "bus = \"SFX\"\npitch_random_semitones = 2.0\n\n[spatial]\nmax_distance = 25.0\nrolloff = \"linear\"\n\n[[clip]]\npath = \"audio/thud.wav\"\nfade_out = 0.05\n";
+    let scene = "[[node]]\nname = \"Room\"\ntype = \"Node3D\"\n\n\
+                 [[node]]\nname = \"Thud\"\nparent = \".\"\ntype = \"AudioStreamPlayer3D\"\naudio = { stream = \"sfx/thud.absound\", occlusion = true, doppler = 1.0 }\n\n\
+                 [[node]]\nname = \"Music\"\nparent = \".\"\ntype = \"AudioStreamPlayer\"\naudio = { stream = \"audio/thud.wav\", bus = \"Music\" }\n\n\
+                 [[node]]\nname = \"Cave\"\nparent = \".\"\ntype = \"AudioZone\"\naudio_zone = { snapshot = \"Cave\", size = [10.0, 4.0, 10.0], fade_distance = 3.0 }\n";
+    let (mut engine, _assets) =
+        engine_with(&[("sfx/thud.absound", event), ("room.abscene", scene)]);
+    let tree = engine.tree_mut();
+    let room = load_scene(tree, "room.abscene").unwrap();
+    let node = |path| tree.get_node(room, path).unwrap();
+
+    let thud = tree.component::<AudioPlayer>(node("Thud")).unwrap().clone();
+    let event = thud.event.as_ref().expect("plays the event");
+    assert_eq!((event.desc().bus.as_str(), event.clip_count()), ("SFX", 1));
+    let spatial = thud.positional.as_ref().unwrap();
+    assert_eq!(spatial.max_distance, 25.0, "from the event");
+    assert_eq!(spatial.rolloff, ab_engine::audio::Rolloff::Linear);
+    assert!(
+        spatial.occlusion && spatial.doppler == 1.0,
+        "from the scene"
+    );
+    assert_eq!(
+        tree.component::<AudioPlayer>(node("Music")).unwrap().bus,
+        "Music"
+    );
+    let zone = tree
+        .component::<ab_engine::audio::AudioZone>(node("Cave"))
+        .unwrap()
+        .clone();
+    assert_eq!(zone.snapshot, "Cave");
+    assert_eq!(
+        zone.shape,
+        ab_engine::audio::ZoneShape::Box {
+            half_extents: [5.0, 2.0, 5.0]
+        }
+    );
+
+    let saved = save_scene(tree, room);
+    let by_name = |name: &str| saved.nodes.iter().find(|n| n.name == name).unwrap();
+    let thud = by_name("Thud").audio.as_ref().unwrap();
+    assert_eq!(thud.stream, "sfx/thud.absound");
+    assert_eq!((thud.occlusion, thud.doppler), (Some(true), Some(1.0)));
+    assert_eq!(
+        by_name("Music").audio.as_ref().unwrap().bus.as_deref(),
+        Some("Music")
+    );
+    let zone = by_name("Cave").audio_zone.as_ref().unwrap();
+    assert_eq!(
+        (zone.size, zone.fade_distance),
+        (Some([10.0, 4.0, 10.0]), Some(3.0))
+    );
+}

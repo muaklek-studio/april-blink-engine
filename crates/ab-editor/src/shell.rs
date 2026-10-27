@@ -206,8 +206,15 @@ impl eframe::App for Shell {
             },
             Screen::Projects(manager) => {
                 if let Action::Open { project, scripts } = manager.update(ui) {
+                    // `--scene` names the scene the first project opens with; after that (and
+                    // without it) a project opens on its main scene.
+                    let scene = self
+                        .options
+                        .scene
+                        .take()
+                        .or_else(|| project.main_scene.clone());
                     let options = Options {
-                        scene: project.main_scene.clone(),
+                        scene,
                         scripts,
                         ..self.options.clone()
                     };

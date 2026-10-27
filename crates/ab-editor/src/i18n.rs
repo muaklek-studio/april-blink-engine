@@ -82,7 +82,9 @@ fn field_key(text: &str) -> Option<String> {
         }
     }
     // Text in another script makes no key: it is shown as it is.
-    let ascii = text.chars().all(|c| c.is_ascii() || c == '°' || c == '→');
+    let ascii = text
+        .chars()
+        .all(|c| c.is_ascii() || matches!(c, '°' | '→' | '…'));
     (key.len() > "field.".len() && ascii).then_some(key)
 }
 
@@ -157,6 +159,11 @@ mod tests {
         assert_eq!(look("Field of view"), "มุมมองภาพ");
         assert_eq!(look("Max (°)"), "สูงสุด (°)");
         assert_eq!(look("Max"), "สูงสุด");
+        assert_eq!(
+            look("Add script…"),
+            "เพิ่มสคริปต์…",
+            "an ellipsis is punctuation"
+        );
         assert_eq!(look("Size start → end"), "ขนาดเริ่ม → จบ");
         // Unknown, or not English: as it is.
         assert_eq!(look("Something new"), "Something new");

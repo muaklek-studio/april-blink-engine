@@ -157,6 +157,9 @@ fn default_layout() -> DockState<Tab> {
     dock
 }
 
+/// A Window menu entry: the window, its command (if it has one), else its title's key.
+type MenuTool = (ToolWindow, Option<Command>, &'static str);
+
 /// A tool in a native window of its own (see [`crate::tool_window`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolWindow {
@@ -174,6 +177,10 @@ enum ToolWindow {
     AnimationGraph,
     /// The Rigging editor: a character's skeleton over a view of it (only in a window).
     Rigging,
+    /// The Audio Mixer: buses, effects, snapshots (only in a window).
+    AudioMixer,
+    /// The Sound Event editor: a `.absound` asset's clips and settings (only in a window).
+    SoundEvent,
 }
 
 impl ToolWindow {
@@ -186,6 +193,8 @@ impl ToolWindow {
             ToolWindow::Cutscene => "cutscene_editor",
             ToolWindow::AnimationGraph => "animation_graph",
             ToolWindow::Rigging => "rigging",
+            ToolWindow::AudioMixer => "audio_mixer",
+            ToolWindow::SoundEvent => "sound_event",
         }
     }
 
@@ -204,6 +213,12 @@ impl ToolWindow {
         }
         if key == "rigging" {
             return Some(ToolWindow::Rigging);
+        }
+        if key == "audio_mixer" {
+            return Some(ToolWindow::AudioMixer);
+        }
+        if key == "sound_event" {
+            return Some(ToolWindow::SoundEvent);
         }
         Tab::ALL
             .into_iter()
@@ -278,6 +293,18 @@ impl ToolWindow {
                 t("window.rigging"),
                 [1400.0, 900.0],
                 [900.0, 560.0],
+            ),
+            ToolWindow::AudioMixer => (
+                icon::FADERS,
+                t("window.audio_mixer"),
+                [1280.0, 860.0],
+                [720.0, 520.0],
+            ),
+            ToolWindow::SoundEvent => (
+                icon::SPEAKER_HIGH,
+                t("window.sound_event"),
+                [1280.0, 760.0],
+                [860.0, 480.0],
             ),
         };
         crate::tool_window::Spec {
@@ -559,14 +586,11 @@ impl EffectsWorkspace {
             ui,
             "effects-settings",
             false,
-            400.0,
+            440.0,
             Tab::Effects.icon(),
             &t("window.effects_editor"),
-            |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| effects.show(ui, editor));
-            },
+            // The panel scrolls its settings itself, under its fixed layer list.
+            |ui| effects.show(ui, editor),
         );
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_0))
@@ -623,6 +647,9 @@ const OPEN_REQUEST: &str = "ab-editor.open-request";
 /// Most the decoded-image cache keeps (the oldest images go first).
 const IMAGE_CACHE_BYTES: u64 = 2 << 30;
 
+/// How often the editor wakes when nothing moves and no input comes.
+const IDLE_POLL: Duration = Duration::from_millis(250);
+
 /// Where Save As suggests saving a scene that has no file yet.
 const NEW_SCENE_PATH: &str = "scenes/new_scene.abscene";
 
@@ -631,15 +658,71 @@ pub fn request_open(ctx: &egui::Context, path: String) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(OPEN_REQUEST), path));
 }
 
-/// Adds a model or scene file to the scene as an instance.
-pub fn instance_asset(editor: &mut Editor, path: &str, at: Option<Vec3>) {
+/// Asks the editor to open a sound event (`.absound`) in the Sound Event editor.
+pub fn request_sound_event(ctx: &egui::Context, path: String) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SOUND_EVENT_REQUEST), path));
+}
+
+const SOUND_EVENT_REQUEST: &str = "ab-editor.sound-event-request";
+
+/// An asset dropped into the scene (the view or the Scene tree): a model or scene becomes
+/// an instance, a sound or sound event a 3D sound player, and a material dropped on an
+/// object becomes its mesh's material.
+pub fn drop_asset(
+    editor: &mut Editor,
+    path: &str,
+    at: Option<Vec3>,
+    target: Option<ab_engine::scene::NodeHandle>,
+) {
+    match AssetKind::of(std::path::Path::new(path)) {
+        AssetKind::Material => {
+            let tree = editor.tree();
+            let mesh = target.and_then(|t| {
+                tree.subtree(t)
+                    .into_iter()
+                    .find(|&n| tree.class_name(n) == Some("MeshInstance3D"))
+            });
+            let Some(mesh) = mesh.filter(|&m| editor.is_editable(m)) else {
+                editor.fail(t("scene_tree.drop_material_on_mesh"));
+                return;
+            };
+            let Some(old) = editor.describe_node(mesh) else {
+                return;
+            };
+            let mut new = old.clone();
+            new.material = Some(ab_engine::scene_file::MaterialDesc {
+                file: Some(path.to_owned()),
+                ..Default::default()
+            });
+            // Selected first: the selection follows the node if it is rebuilt.
+            editor.select(Some(mesh));
+            editor.apply_desc(mesh, &old, new);
+        }
+        AssetKind::Audio | AssetKind::SoundEvent => {
+            editor.add_node(
+                NodeDesc {
+                    name: node_name(path),
+                    kind: Some("AudioStreamPlayer3D".into()),
+                    audio: Some(ab_engine::scene_file::AudioDesc {
+                        stream: path.to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                at,
+            );
+        }
+        _ => instance_asset(editor, path, at),
+    }
+}
+
+/// A node name from a file's name (no path separators or dots).
+fn node_name(path: &str) -> String {
     let stem = std::path::Path::new(path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Instance".into());
-    // Node names cannot contain path separators or dots.
-    let name: String = stem
-        .chars()
+    stem.chars()
         .map(|c| {
             if crate::panels::is_name_char(c) || c == '_' || c == '-' {
                 c
@@ -647,7 +730,12 @@ pub fn instance_asset(editor: &mut Editor, path: &str, at: Option<Vec3>) {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Adds a model or scene file to the scene as an instance.
+pub fn instance_asset(editor: &mut Editor, path: &str, at: Option<Vec3>) {
+    let name = node_name(path);
     if editor.scene_path.as_deref() == Some(path) {
         editor.fail("A scene cannot contain itself");
         return;
@@ -717,6 +805,9 @@ pub struct EditorApp {
     cutscene_workspace: CutsceneWorkspace,
     state_graph: crate::panels::state_graph::StateGraphPanel,
     rigging_workspace: RiggingWorkspace,
+    audio_mixer: crate::panels::audio_mixer::AudioMixerPanel,
+    palette: crate::palette::Palette,
+    sound_event: crate::panels::sound_event::SoundEventEditor,
     /// Help → About (the machine is read the first time it opens).
     about: crate::about::About,
     git_window: crate::git_window::GitWindow,
@@ -861,6 +952,7 @@ impl EditorApp {
         viewport.options.snap = settings.snap;
         viewport.options.highlight_selection = settings.highlight_selection;
         viewport.options.highlight_hover = settings.highlight_hover;
+        viewport.options.tips = settings.show_tips;
         if options.scene.is_some() {
             viewport.frame_selection(&editor);
         }
@@ -906,6 +998,14 @@ impl EditorApp {
                     .filter_map(|name| name.strip_prefix("window:")),
             )
             .filter_map(ToolWindow::from_key)
+            // `--show sound_event:<asset>`: that event in its editor.
+            .chain(
+                options
+                    .show
+                    .iter()
+                    .any(|name| name.starts_with("sound_event:"))
+                    .then_some(ToolWindow::SoundEvent),
+            )
             .fold(Vec::new(), |mut all, window| {
                 if !all.contains(&window) {
                     all.push(window);
@@ -934,6 +1034,23 @@ impl EditorApp {
                     .any(|name| name == "about")
                     .then_some(Dialog::About)
             });
+        // `--show palette` / `--show palette:<query>`: the command palette (screenshots).
+        let mut palette = crate::palette::Palette::default();
+        if let Some(query) = options.show.iter().find_map(|name| {
+            (name == "palette")
+                .then_some("")
+                .or_else(|| name.strip_prefix("palette:"))
+        }) {
+            palette.open_with(query);
+        }
+        let mut sound_event = crate::panels::sound_event::SoundEventEditor::default();
+        if let Some(path) = options
+            .show
+            .iter()
+            .find_map(|name| name.strip_prefix("sound_event:"))
+        {
+            sound_event.open(&editor, path);
+        }
         Self {
             editor,
             viewport,
@@ -981,6 +1098,9 @@ impl EditorApp {
             cutscene_workspace: Default::default(),
             state_graph: Default::default(),
             rigging_workspace: Default::default(),
+            audio_mixer: Default::default(),
+            palette,
+            sound_event,
             about: crate::about::About::new(render_state.map(|s| s.adapter.get_info())),
             git_window: Default::default(),
             placements,
@@ -1208,6 +1328,28 @@ impl EditorApp {
                         workspace.show(ui, editor, viewport, render_state)
                     })
                 }
+                ToolWindow::AudioMixer => {
+                    let (mixer, editor) = (&mut self.audio_mixer, &mut self.editor);
+                    host.show(ctx, &spec, |ui| {
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.set_min_size(ui.available_size());
+                                mixer.show(ui, editor);
+                            });
+                    })
+                }
+                ToolWindow::SoundEvent => {
+                    let (event, editor) = (&mut self.sound_event, &mut self.editor);
+                    host.show(ctx, &spec, |ui| {
+                        egui::Frame::NONE
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.set_min_size(ui.available_size());
+                                event.show(ui, editor);
+                            });
+                    })
+                }
                 ToolWindow::Panel(Tab::Animation) => {
                     let (workspace, animation, editor, viewport) = (
                         &mut self.animation_workspace,
@@ -1297,6 +1439,7 @@ impl EditorApp {
         self.settings.snap = options.snap.sanitized();
         self.settings.highlight_selection = options.highlight_selection;
         self.settings.highlight_hover = options.highlight_hover;
+        self.settings.show_tips = options.tips;
         self.settings.windows = self.windows.iter().map(|w| w.key().to_owned()).collect();
         if self.settings == self.saved_settings {
             return;
@@ -1557,6 +1700,11 @@ impl EditorApp {
             Command::OpenCutsceneEditor => self.open_window(ctx, ToolWindow::Cutscene),
             Command::OpenAnimationGraph => self.open_window(ctx, ToolWindow::AnimationGraph),
             Command::OpenRigging => self.open_window(ctx, ToolWindow::Rigging),
+            Command::OpenAudioMixer => self.open_window(ctx, ToolWindow::AudioMixer),
+            Command::OpenSoundEvent => self.open_window(ctx, ToolWindow::SoundEvent),
+            Command::SearchEverything => self.palette.toggle(),
+            Command::AddNode if editing => self.palette.open_with("+ "),
+            Command::AddNode => {}
             // Not while playing.
             Command::NewScene | Command::OpenScene | Command::SaveAs | Command::SelectNone => {}
         }
@@ -1655,12 +1803,22 @@ impl EditorApp {
             ui.menu_button(format!("{}  {}", icon::MAGNET, t("menu.snapping")), |ui| {
                 crate::viewport::snap_settings(ui, &mut self.viewport.options.snap);
             });
-            let options = &mut self.viewport.options;
-            ui.checkbox(
-                &mut options.highlight_selection,
-                format!("{} (H)", t("menu.highlight_selection")),
-            );
-            ui.checkbox(&mut options.highlight_hover, t("menu.highlight_hover"));
+            ui.separator();
+            // The game's settings and the editor's, where most editors keep them.
+            let ctx = ui.ctx().clone();
+            let config = ToolWindow::Panel(Tab::Config);
+            if ui
+                .add(
+                    egui::Button::new(format!("{}  {}", icon::SLIDERS, t("window.game_config")))
+                        .selected(self.windows.contains(&config)),
+                )
+                .on_hover_text(t("menu.game_config_hint"))
+                .clicked()
+            {
+                self.open_window(&ctx, config);
+                ui.close();
+            }
+            commands::menu_item(ui, Command::Preferences, true);
         });
         ui.add_enabled_ui(editing, |ui| {
             ui.menu_button(t("menu.create"), |ui| {
@@ -1700,8 +1858,10 @@ impl EditorApp {
             ui.checkbox(&mut options.collision, t("menu.collision"));
             ui.checkbox(
                 &mut options.highlight_selection,
-                t("menu.highlight_selection"),
+                format!("{} (H)", t("menu.highlight_selection")),
             );
+            ui.checkbox(&mut options.highlight_hover, t("menu.highlight_hover"));
+            ui.checkbox(&mut options.tips, t("menu.tips"));
             ui.checkbox(&mut options.ui, t("menu.edit_ui"));
             ui.checkbox(&mut options.stats, t("menu.statistics"));
             ui.checkbox(&mut options.editor_lighting, t("menu.editor_lighting"));
@@ -1719,7 +1879,6 @@ impl EditorApp {
             }
         });
         self.window_menu(ui);
-        self.settings_menu(ui);
         ui.menu_button(t("menu.play"), |ui| {
             ui.set_min_width(220.0);
             let playing = self.editor.is_playing();
@@ -1743,33 +1902,12 @@ impl EditorApp {
             commands::menu_item(ui, Command::StepFrame, paused);
         });
         ui.menu_button(t("menu.help"), |ui| {
-            ui.set_min_width(200.0);
+            ui.set_min_width(220.0);
+            commands::menu_item(ui, Command::SearchEverything, true);
             commands::menu_item(ui, Command::Shortcuts, true);
             if menu_item(ui, icon::INFO, &t("menu.about"), "", true) {
                 self.dialog = Some(Dialog::About);
             }
-        });
-    }
-
-    /// Settings: the game's config and the editor's preferences.
-    fn settings_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(t("menu.settings"), |ui| {
-            ui.set_min_width(230.0);
-            let ctx = ui.ctx().clone();
-            let config = ToolWindow::Panel(Tab::Config);
-            if ui
-                .add(
-                    egui::Button::new(format!("{}  {}", icon::SLIDERS, t("window.game_config")))
-                        .selected(self.windows.contains(&config)),
-                )
-                .on_hover_text(t("menu.game_config_hint"))
-                .clicked()
-            {
-                self.open_window(&ctx, config);
-                ui.close();
-            }
-            ui.separator();
-            commands::menu_item(ui, Command::Preferences, true);
         });
     }
 
@@ -1778,41 +1916,81 @@ impl EditorApp {
         ui.menu_button(t("window.menu"), |ui| {
             ui.set_min_width(250.0);
             let ctx = ui.ctx().clone();
-            for (window, command) in [
-                (ToolWindow::UiDesigner, Command::OpenUiDesigner),
+            // The tools, grouped by what they work on.
+            let groups: [(&str, &[MenuTool]); 4] = [
                 (
-                    ToolWindow::Panel(Tab::Animation),
-                    Command::OpenAnimationEditor,
+                    "window.group_scene",
+                    &[
+                        (
+                            ToolWindow::Panel(Tab::Assets),
+                            Some(Command::OpenAssetBrowser),
+                            "",
+                        ),
+                        (ToolWindow::UiDesigner, Some(Command::OpenUiDesigner), ""),
+                        (
+                            ToolWindow::Panel(Tab::Effects),
+                            None,
+                            "window.effects_editor",
+                        ),
+                        (ToolWindow::Panel(Tab::Build), None, "window.level_builder"),
+                    ],
                 ),
-                (ToolWindow::Panel(Tab::Assets), Command::OpenAssetBrowser),
-                (ToolWindow::Git, Command::OpenGit),
-                (ToolWindow::Cutscene, Command::OpenCutsceneEditor),
-                (ToolWindow::AnimationGraph, Command::OpenAnimationGraph),
-                (ToolWindow::Rigging, Command::OpenRigging),
-            ] {
-                let open = self.windows.contains(&window);
-                let text = format!("{}  {}", command.icon(), command.label());
-                let button = egui::Button::new(text)
-                    .selected(open)
-                    .shortcut_text(command.shortcut_text(&ctx));
-                if ui.add(button).clicked() {
-                    self.open_window(&ctx, window);
-                    ui.close();
+                (
+                    "window.group_animation",
+                    &[
+                        (
+                            ToolWindow::Panel(Tab::Animation),
+                            Some(Command::OpenAnimationEditor),
+                            "",
+                        ),
+                        (
+                            ToolWindow::AnimationGraph,
+                            Some(Command::OpenAnimationGraph),
+                            "",
+                        ),
+                        (ToolWindow::Rigging, Some(Command::OpenRigging), ""),
+                        (ToolWindow::Cutscene, Some(Command::OpenCutsceneEditor), ""),
+                    ],
+                ),
+                (
+                    "window.group_audio",
+                    &[
+                        (ToolWindow::AudioMixer, Some(Command::OpenAudioMixer), ""),
+                        (ToolWindow::SoundEvent, Some(Command::OpenSoundEvent), ""),
+                    ],
+                ),
+                (
+                    "window.group_project",
+                    &[
+                        (ToolWindow::Git, Some(Command::OpenGit), ""),
+                        (ToolWindow::Panel(Tab::Profiler), None, "tab.profiler"),
+                        (ToolWindow::Panel(Tab::Debug), None, "tab.debug"),
+                    ],
+                ),
+            ];
+            for (i, (heading, tools)) in groups.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
                 }
-            }
-            // The other features' editors.
-            for (tab, key) in [
-                (Tab::Effects, "window.effects_editor"),
-                (Tab::Build, "window.level_builder"),
-                (Tab::Profiler, "tab.profiler"),
-                (Tab::Debug, "tab.debug"),
-            ] {
-                let window = ToolWindow::Panel(tab);
-                let open = self.windows.contains(&window);
-                let text = format!("{}  {}", tab.icon(), t(key));
-                if ui.add(egui::Button::new(text).selected(open)).clicked() {
-                    self.open_window(&ctx, window);
-                    ui.close();
+                ui.label(RichText::new(t(heading)).small().color(theme::TEXT_DIM));
+                for &(window, command, key) in tools.iter() {
+                    let open = self.windows.contains(&window);
+                    let (glyph, label, keys) = match command {
+                        Some(c) => (c.icon(), c.label(), c.shortcut_text(&ctx)),
+                        None => {
+                            let ToolWindow::Panel(tab) = window else {
+                                continue;
+                            };
+                            (tab.icon(), t(key), String::new())
+                        }
+                    };
+                    let button = egui::Button::new(format!("{glyph}  {label}"))
+                        .selected(open)
+                        .shortcut_text(keys);
+                    if ui.add(button).clicked() {
+                        self.open_window(&ctx, window);
+                        ui.close();
+                    }
                 }
             }
             ui.separator();
@@ -2000,28 +2178,186 @@ impl EditorApp {
                 self.editor.stop();
                 self.viewport.game_focus = false;
             }
+
+            // Find anything, and add nodes: on the right, always in sight.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let search = egui::Button::new(
+                    RichText::new(format!(
+                        "{}  {}   {}",
+                        icon::MAGNIFYING_GLASS,
+                        t("palette.button"),
+                        Command::SearchEverything.shortcut_text(ui.ctx())
+                    ))
+                    .color(theme::TEXT_DIM),
+                )
+                .fill(theme::BG_0)
+                .min_size(egui::vec2(240.0, 24.0));
+                if ui.add(search).on_hover_text(t("palette.tooltip")).clicked() {
+                    self.palette.toggle();
+                }
+                let add = egui::Button::new(RichText::new(format!(
+                    "{}  {}",
+                    icon::PLUS,
+                    t("palette.add")
+                )))
+                .min_size(egui::vec2(0.0, 24.0));
+                if ui
+                    .add_enabled(editing, add)
+                    .on_hover_text(Command::AddNode.tooltip(ui.ctx()))
+                    .clicked()
+                {
+                    self.palette.open_with("+ ");
+                }
+            });
         });
+    }
+
+    /// Everything the command palette can find.
+    fn palette_entries(&self, ctx: &egui::Context) -> Vec<crate::palette::Entry> {
+        use crate::palette::{Action, Entry, Group};
+        let editing = !self.editor.is_playing();
+        let mut entries: Vec<Entry> = Command::ALL
+            .into_iter()
+            .filter(|c| *c != Command::SearchEverything)
+            .map(|c| Entry {
+                group: Group::Command,
+                icon: c.icon(),
+                label: c.label(),
+                detail: c.shortcut_text(ctx),
+                keywords: c.name().replace('_', " "),
+                action: Action::Command(c),
+            })
+            .collect();
+        // Windows that have no command of their own, and the panels.
+        let windows = [
+            (Tab::Effects, "window.effects_editor"),
+            (Tab::Build, "window.level_builder"),
+            (Tab::Config, "window.game_config"),
+            (Tab::Profiler, "tab.profiler"),
+            (Tab::Debug, "tab.debug"),
+        ];
+        for (tab, key) in windows {
+            entries.push(Entry {
+                group: Group::Command,
+                icon: tab.icon(),
+                label: t(key),
+                detail: t("window.menu"),
+                keywords: tab.name().replace('_', " "),
+                action: Action::Window(tab.name().to_owned()),
+            });
+        }
+        for tab in Tab::ALL
+            .into_iter()
+            .filter(|t| !t.is_feature() && *t != Tab::Viewport)
+        {
+            entries.push(Entry {
+                group: Group::Command,
+                icon: tab.icon(),
+                label: t(&format!("tab.{}", tab.name())),
+                detail: t("menu.view"),
+                keywords: format!("{} panel", tab.name().replace('_', " ")),
+                action: Action::Window(tab.name().to_owned()),
+            });
+        }
+        if editing {
+            for (i, c) in crate::create::catalog(&self.editor).into_iter().enumerate() {
+                entries.push(Entry {
+                    group: Group::Create,
+                    icon: theme::class_icon(c.class),
+                    label: c.label,
+                    detail: c.category,
+                    keywords: format!("add create new {}", c.class),
+                    action: Action::Create(i),
+                });
+            }
+            let tree = self.editor.tree();
+            for node in tree.subtree(self.editor.scene_root) {
+                if node == self.editor.scene_root {
+                    continue;
+                }
+                let class = tree.class_name(node).unwrap_or("Node");
+                entries.push(Entry {
+                    group: Group::Node,
+                    icon: theme::class_icon(class),
+                    label: tree.name(node).map(|n| n.to_owned()).unwrap_or_default(),
+                    detail: class.to_owned(),
+                    keywords: tree.path_of(node).unwrap_or_default(),
+                    action: Action::Node(node),
+                });
+            }
+        }
+        for asset in self
+            .editor
+            .assets
+            .all()
+            .filter(|a| a.kind != AssetKind::Folder)
+        {
+            entries.push(Entry {
+                group: Group::Asset,
+                icon: asset.kind.icon(),
+                label: asset.name.clone(),
+                detail: asset.path.clone(),
+                keywords: String::new(),
+                action: Action::Asset(asset.path.clone(), asset.kind),
+            });
+        }
+        entries
+    }
+
+    /// Carries out what was picked in the command palette.
+    fn run_palette(&mut self, ctx: &egui::Context, action: crate::palette::Action) {
+        use crate::palette::Action;
+        match action {
+            Action::Command(command) => self.execute(ctx, command, None),
+            Action::Window(key) => match ToolWindow::from_key(&key) {
+                // A docked panel comes to the front where it is.
+                Some(ToolWindow::Panel(tab)) if !tab.is_feature() => {
+                    match self.dock.find_tab(&tab) {
+                        Some(found) => _ = self.dock.set_active_tab(found),
+                        None if !self.windows.contains(&ToolWindow::Panel(tab)) => {
+                            self.dock_tab(tab)
+                        }
+                        None => self.open_window(ctx, ToolWindow::Panel(tab)),
+                    }
+                }
+                Some(window) => self.open_window(ctx, window),
+                None => {}
+            },
+            Action::Create(index) => {
+                if let Some(item) = crate::create::catalog(&self.editor).into_iter().nth(index) {
+                    let at = self.viewport.placement();
+                    crate::create::add(&mut self.editor, item, at);
+                }
+            }
+            Action::Asset(path, kind) => match kind {
+                AssetKind::Scene => self.guard(Pending::Open(path)),
+                AssetKind::Model => instance_asset(&mut self.editor, &path, None),
+                AssetKind::SoundEvent => {
+                    self.sound_event.open(&self.editor, &path);
+                    self.open_window(ctx, ToolWindow::SoundEvent);
+                }
+                kind if crate::asset_viewer::can_view(kind) => {
+                    let _ = self.assets.viewer.open(self.editor.project(), &path, kind);
+                }
+                _ => {
+                    self.assets.reveal(&path);
+                    match self.dock.find_tab(&Tab::Assets) {
+                        Some(found) => _ = self.dock.set_active_tab(found),
+                        None => self.open_window(ctx, ToolWindow::Panel(Tab::Assets)),
+                    }
+                }
+            },
+            Action::Node(node) => {
+                self.editor.select(Some(node));
+                self.viewport.frame_selection_everywhere(&self.editor);
+            }
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            match &self.editor.status {
-                Some(status) if status.error => {
-                    ui.label(
-                        RichText::new(format!("{}  {}", icon::X_CIRCLE, status.text))
-                            .color(theme::ERROR),
-                    );
-                }
-                Some(status) => {
-                    ui.label(
-                        RichText::new(format!("{}  {}", icon::CHECK_CIRCLE, status.text))
-                            .color(theme::TEXT_DIM),
-                    );
-                }
-                None => {
-                    ui.label(RichText::new(t("status.ready")).color(theme::TEXT_DIM));
-                }
-            }
+            // The counters on the right first; the message gets what is left, cut with
+            // "…" when long (all of it on hover).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
                 let (mode, color) = match self.editor.mode {
@@ -2113,6 +2449,25 @@ impl EditorApp {
                     };
                     ui.label(RichText::new(text).color(theme::TEXT_DIM));
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let (text, color) = match &self.editor.status {
+                        Some(status) if status.error => (
+                            format!("{}  {}", icon::X_CIRCLE, status.text),
+                            theme::ERROR,
+                        ),
+                        Some(status) => (
+                            format!("{}  {}", icon::CHECK_CIRCLE, status.text),
+                            theme::TEXT_DIM,
+                        ),
+                        None => (t("status.ready"), theme::TEXT_DIM),
+                    };
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(&text).color(color)).truncate(),
+                    );
+                    if label.hovered() {
+                        label.on_hover_text(text);
+                    }
+                });
             });
         });
     }
@@ -2562,6 +2917,9 @@ impl EditorApp {
         let delta = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.editor.tick(delta);
+        // The views redraw only while something moves; idle, a few frames a second still
+        // pick up what happens off screen (scripts rebuilt, files changed on disk).
+        ctx.request_repaint_after(IDLE_POLL);
         // Not while a dialog is open: the unsaved-changes prompt is about the scene as it is.
         if self.dialog.is_none() && self.disk_checked.elapsed() >= Duration::from_secs(1) {
             self.disk_checked = now;
@@ -2590,6 +2948,12 @@ impl EditorApp {
         }
         if let Some(path) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new(OPEN_REQUEST))) {
             self.guard(Pending::Open(path));
+        }
+        if let Some(path) =
+            ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new(SOUND_EVENT_REQUEST)))
+        {
+            self.sound_event.open(&self.editor, &path);
+            self.open_window(ctx, ToolWindow::SoundEvent);
         }
         if self.dialog.is_none() {
             self.shortcuts(ctx);
@@ -2730,6 +3094,12 @@ impl EditorApp {
         for command in commands::take_requests(ctx) {
             self.execute(ctx, command, None);
         }
+        if self.palette.is_open() {
+            let entries = self.palette_entries(ctx);
+            if let Some(action) = self.palette.show(ctx, &entries) {
+                self.run_palette(ctx, action);
+            }
+        }
         if self.custom_frame {
             chrome::window_frame(ctx);
         }
@@ -2767,6 +3137,76 @@ mod tests {
             ..Default::default()
         };
         EditorApp::new(None, project, &options, LogBuffer::default(), None)
+    }
+
+    #[test]
+    fn sounds_dropped_in_become_3d_players_and_materials_go_on_meshes() {
+        let mut app = app();
+        let editor = &mut app.editor;
+        drop_asset(
+            editor,
+            "audio/thud.wav",
+            Some(Vec3::new(1.0, 0.0, 2.0)),
+            None,
+        );
+        let player = editor.selection.unwrap();
+        assert_eq!(
+            editor.tree().class_name(player),
+            Some("AudioStreamPlayer3D")
+        );
+        assert_eq!(
+            editor.tree().position(player),
+            Some(Vec3::new(1.0, 0.0, 2.0))
+        );
+        let desc = editor.describe_node(player).unwrap();
+        assert_eq!(desc.audio.unwrap().stream, "audio/thud.wav");
+
+        // On nothing: refused with a message.
+        drop_asset(editor, "materials/gold.abmat", None, None);
+        assert!(editor.status.as_ref().is_some_and(|s| s.error));
+
+        editor.select(None);
+        editor.add_scene(crate::create::MESHES[0].scene(), Some(Vec3::ZERO));
+        let cube = editor.selection.unwrap();
+        drop_asset(editor, "materials/gold.abmat", None, Some(cube));
+        let desc = editor.describe_node(editor.selection.unwrap()).unwrap();
+        assert_eq!(
+            desc.material.and_then(|m| m.file).as_deref(),
+            Some("materials/gold.abmat")
+        );
+    }
+
+    #[test]
+    fn the_palette_finds_commands_nodes_to_add_files_and_scene_nodes() {
+        let mut app = app();
+        app.editor.assets.rescan();
+        let ctx = egui::Context::default();
+        let entries = app.palette_entries(&ctx);
+        let find = |query: &str| {
+            let mut palette = crate::palette::Palette::default();
+            palette.open_with(query);
+            palette.matches(&entries).first().map(|e| e.action.clone())
+        };
+        assert_eq!(
+            find("> audio mixer"),
+            Some(crate::palette::Action::Command(Command::OpenAudioMixer))
+        );
+        assert!(matches!(
+            find("+ cube"),
+            Some(crate::palette::Action::Create(_))
+        ));
+        assert!(matches!(
+            find("/ thud.wav"),
+            Some(crate::palette::Action::Asset(..))
+        ));
+        // Every node type to add is there and adds without an error.
+        let created = crate::create::catalog(&app.editor).len();
+        assert!(created > 30, "{created}");
+        let ctx = egui::Context::default();
+        app.run_palette(&ctx, find("+ omni light").unwrap());
+        let added = app.editor.selection.unwrap();
+        assert_eq!(app.editor.tree().class_name(added), Some("OmniLight3D"));
+        app.run_palette(&ctx, crate::palette::Action::Node(app.editor.scene_root));
     }
 
     #[test]

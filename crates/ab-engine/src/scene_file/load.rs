@@ -4,7 +4,7 @@ use super::format::*;
 use super::{SceneInstance, SceneOrigin};
 use ab_animation::AnimationPlayer;
 use ab_asset::{spawn_gltf, AssetError, AssetServer};
-use ab_audio::{Attenuation, AudioNodes, AudioPlayer};
+use ab_audio::{Attenuation, AudioNodes, AudioPlayer, AudioZone, ZoneShape};
 use ab_core::{EulerRot, Quat, Transform3D, Vec3};
 use ab_effects::{ColorRamp, EffectNodes, ParticleEmitter, ParticleSettings};
 use ab_physics::{
@@ -534,22 +534,38 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
                 .audio
                 .clone()
                 .ok_or("audio players need `audio = { stream = ... }`")?;
-            let stream = tree
-                .world()
-                .resource_mut::<AssetServer>()
-                .ok_or("the AssetServer resource is missing")?
-                .load_audio(&a.stream)
-                .map_err(|e| e.to_string())?;
-            let mut player = AudioPlayer::new(stream);
+            let mut player = {
+                let mut assets = tree
+                    .world()
+                    .resource_mut::<AssetServer>()
+                    .ok_or("the AssetServer resource is missing")?;
+                if a.stream
+                    .ends_with(&format!(".{}", ab_audio::SOUND_EVENT_EXTENSION))
+                {
+                    let event = assets
+                        .load_sound_event(&a.stream)
+                        .map_err(|e| e.to_string())?;
+                    AudioPlayer::with_event(event)
+                } else {
+                    AudioPlayer::new(assets.load_audio(&a.stream).map_err(|e| e.to_string())?)
+                }
+            };
+            player.bus = a.bus.clone().unwrap_or_default();
             player.volume_db = a.volume_db.unwrap_or(0.0);
             player.pitch_scale = a.pitch.unwrap_or(1.0);
-            player.looping = a.looping.unwrap_or(false);
+            player.looping = a.looping.unwrap_or(player.looping);
             player.autoplay = a.autoplay.unwrap_or(false);
             let node = if kind == "AudioStreamPlayer3D" {
-                let default = Attenuation::default();
+                // The scene's settings over the event's over the defaults.
+                let base = player.positional.take().unwrap_or_default();
                 player.positional = Some(Attenuation {
-                    min_distance: a.min_distance.unwrap_or(default.min_distance),
-                    max_distance: a.max_distance.unwrap_or(default.max_distance),
+                    min_distance: a.min_distance.unwrap_or(base.min_distance),
+                    max_distance: a.max_distance.unwrap_or(base.max_distance),
+                    rolloff: a.rolloff.unwrap_or(base.rolloff),
+                    curve: a.curve.clone().unwrap_or(base.curve),
+                    spread: a.spread.unwrap_or(base.spread),
+                    doppler: a.doppler.unwrap_or(base.doppler),
+                    occlusion: a.occlusion.unwrap_or(base.occlusion),
                 });
                 tree.create_audio_stream_player3d(name, player)
             } else {
@@ -564,6 +580,26 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
             )
             .map_err(|e| e.to_string())?;
             node
+        }
+        "AudioZone" => {
+            let z = desc.audio_zone.clone().unwrap_or_default();
+            let shape = match (z.radius, z.size) {
+                (Some(radius), _) => ZoneShape::Sphere { radius },
+                (None, Some(size)) => ZoneShape::Box {
+                    half_extents: size.map(|s| s * 0.5),
+                },
+                (None, None) => AudioZone::default().shape,
+            };
+            tree.create_audio_zone(
+                name,
+                AudioZone {
+                    snapshot: z.snapshot,
+                    shape,
+                    fade_distance: z
+                        .fade_distance
+                        .unwrap_or(AudioZone::default().fade_distance),
+                },
+            )
         }
         "AudioListener3D" => tree.create_audio_listener3d(name),
         "Ragdoll" => {
@@ -666,7 +702,7 @@ fn create(tree: &mut SceneTree, desc: &NodeDesc, depth: u32) -> Result<NodeHandl
                 "unknown type `{other}` (supported: Node, Node3D, MeshInstance3D, Camera3D, \
                  DirectionalLight3D, OmniLight3D, SpotLight3D, StaticBody3D, RigidBody3D, \
                  AnimatableBody3D, CharacterBody3D, Area3D, CollisionShape3D, Joint3D, Ragdoll, \
-                 AudioStreamPlayer, AudioStreamPlayer3D, AudioListener3D, Timer, \
+                 AudioStreamPlayer, AudioStreamPlayer3D, AudioListener3D, AudioZone, Timer, \
                  Particles3D, CameraShake, AnimationPlayer, CanvasLayer, Control, Panel, Label, \
                  Button, ProgressBar, VBoxContainer, HBoxContainer, TextureRect)"
             ))

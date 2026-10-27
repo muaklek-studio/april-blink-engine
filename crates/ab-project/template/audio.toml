@@ -1,0 +1,58 @@
+# The mixer: buses, their effects and snapshots. The editor's Audio Mixer edits this file.
+max_voices = 64
+
+[master]
+volume_db = 0.0
+
+[[master.effect]]
+type = "limiter"
+input_db = 0.0
+ceiling_db = -0.3
+release_ms = 80.0
+lookahead_ms = 3.0
+
+[[bus]]
+name = "Music"
+volume_db = 0.0
+
+[[bus]]
+name = "SFX"
+volume_db = 0.0
+
+[[bus.send]]
+to = "Reverb"
+level_db = -12.0
+
+[[bus]]
+name = "Voice"
+volume_db = 0.0
+
+[[bus.send]]
+to = "Reverb"
+level_db = -18.0
+
+[[bus]]
+name = "UI"
+volume_db = 0.0
+
+[[bus]]
+name = "Ambience"
+volume_db = 0.0
+
+[[bus.send]]
+to = "Reverb"
+level_db = -18.0
+
+[[return]]
+name = "Reverb"
+volume_db = 0.0
+
+[[return.effect]]
+type = "reverb"
+room_size = 0.6
+damping = 0.5
+width = 1.0
+pre_delay_ms = 20.0
+low_cut_hz = 150.0
+high_cut_hz = 9000.0
+mix = 1.0

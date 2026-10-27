@@ -71,6 +71,10 @@ pub struct FrameStats {
     pub hlod_proxies: u32,
     /// Meshes hidden behind others (occlusion culling).
     pub occluded: u32,
+    /// The image changes with time even when nothing in the scene moves (custom shaders,
+    /// drifting fog, film grain, particles, motion blur settling): drawing the same scene
+    /// again gives a different picture.
+    pub animated: bool,
 }
 
 /// What a renderer holds on the GPU, in bytes (estimated from sizes and formats).
@@ -188,6 +192,8 @@ pub struct SceneRenderer {
     shafts_layout: wgpu::BindGroupLayout,
     /// Whether this frame traces light shafts.
     shafts: bool,
+    /// Whether this frame's motion blur still smears a camera move (the next frame differs).
+    blurring: bool,
     /// Static, skinned.
     shadow_pipelines: [wgpu::RenderPipeline; 2],
     post_pipeline: wgpu::RenderPipeline,
@@ -491,6 +497,7 @@ impl SceneRenderer {
             shafts_pipeline,
             shafts_layout,
             shafts: false,
+            blurring: false,
             shadow_pipelines,
             post_pipeline,
             bloom_pass: BloomPass::new(device, HDR_FORMAT),
@@ -736,6 +743,10 @@ impl SceneRenderer {
             self.bloom_pass.record(&mut encoder);
         }
         self.record_post_pass(&mut encoder, target);
+        stats.animated = stats.particles > 0
+            || self.blurring
+            || time_dependent(&environment)
+            || self.plan.forward.iter().any(|b| b.class.shader.is_some());
         if let Some(ui) = world.resource::<UiDrawList>() {
             let textures = &self.textures;
             let ready = self.ui_pass.prepare(gpu, &ui, width, height, |handle| {
@@ -1384,6 +1395,7 @@ impl SceneRenderer {
         } else {
             0.0
         };
+        self.blurring = motion > 0.0 && previous != view_proj;
         let overlay = world
             .resource::<ScreenOverlay>()
             .map(|o| *o)
@@ -2081,6 +2093,18 @@ fn fog_camera_term(fog: &crate::environment::Fog, camera_height: f32) -> f32 {
         .exp()
 }
 
+/// Whether the environment alone makes each frame differ: patchy fog the wind moves, or film
+/// grain (a new noise every frame).
+fn time_dependent(environment: &Environment) -> bool {
+    let fog = &environment.fog;
+    let drifting = fog.enabled
+        && fog.density > 0.0
+        && fog.patchiness > 0.0
+        && fog.wind != Vec3::ZERO
+        && fog.wind.is_finite();
+    drifting || environment.post.grain > 0.0
+}
+
 fn shader(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -2339,5 +2363,30 @@ mod tests {
         assert!(data.iter().all(|&b| b == 9));
         let (w, h, _) = shrink_to_fit(&texture, 4096);
         assert_eq!((w, h), (300, 100), "already fits");
+    }
+
+    #[test]
+    fn only_moving_fog_and_grain_make_a_still_scene_change() {
+        let mut environment = Environment::default();
+        assert!(!time_dependent(&environment));
+
+        environment.fog.enabled = true;
+        environment.fog.density = 0.05;
+        environment.fog.patchiness = 0.5;
+        environment.fog.wind = Vec3::ZERO;
+        assert!(!time_dependent(&environment), "still fog");
+        environment.fog.wind = Vec3::X;
+        assert!(time_dependent(&environment), "drifting patches");
+        environment.fog.patchiness = 0.0;
+        assert!(
+            !time_dependent(&environment),
+            "even fog looks the same as it moves"
+        );
+
+        environment.post.grain = 0.3;
+        assert!(
+            time_dependent(&environment),
+            "grain is new noise every frame"
+        );
     }
 }

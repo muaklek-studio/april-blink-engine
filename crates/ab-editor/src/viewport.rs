@@ -112,6 +112,8 @@ pub struct ViewOptions {
     pub lod_levels: bool,
     /// Show the occlusion culling buffer in a corner (and keep it each frame).
     pub occlusion_buffer: bool,
+    /// A card of first steps over an empty scene.
+    pub tips: bool,
 }
 
 impl Default for ViewOptions {
@@ -130,6 +132,7 @@ impl Default for ViewOptions {
             ui: false,
             lod_levels: false,
             occlusion_buffer: false,
+            tips: true,
         }
     }
 }
@@ -776,6 +779,12 @@ impl Viewport {
                     draw_selection(&painter, &projector, editor, node, active);
                 }
             }
+            // The cutscene being edited: its camera's path, keys and the shot at the playhead.
+            if editor.mode == Mode::Edit {
+                if let Some(path) = crate::panels::cutscene::camera_path(ui.ctx()) {
+                    draw_camera_path(&painter, &projector, &path);
+                }
+            }
             for line in &self.overlay {
                 if let (Some(a), Some(b)) =
                     (projector.project(line.from), projector.project(line.to))
@@ -866,7 +875,10 @@ impl Viewport {
                     .hover_pos()
                     .map(|p| ground_point(&projector, p))
                     .unwrap_or(self.camera.pivot);
-                crate::app::instance_asset(editor, &path.0, Some(at));
+                let target = response
+                    .hover_pos()
+                    .and_then(|p| pick(editor, &projector, p));
+                crate::app::drop_asset(editor, &path.0, Some(at), target);
             }
             // A script dropped on an object attaches to it.
             if let Some(script) = response.dnd_release_payload::<crate::scripts::ScriptDrag>() {
@@ -907,12 +919,30 @@ impl Viewport {
         }
 
         self.overlay(ui, rect, editor);
+        if self.main
+            && self.options.tips
+            && editor.mode == Mode::Edit
+            // A new scene nobody has touched yet, or an empty one.
+            && ((editor.scene_path.is_none() && !editor.modified)
+                || editor.tree().children(editor.scene_root).is_empty())
+        {
+            self.tips(ui, rect);
+        }
         if response.hovered() && editor.is_playing() && !self.game_focus {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         let _ = gizmo_hovered;
-        // Keep animating (effects preview, play mode).
-        ui.ctx().request_repaint();
+        // Only while something moves; otherwise the editor waits for input (no redraw at
+        // 60+ fps of a scene that is standing still).
+        let interacting = response.dragged() || response.is_pointer_button_down_on();
+        if keeps_animating(
+            editor.mode,
+            editor.preview_effects,
+            interacting,
+            &self.stats(),
+        ) {
+            ui.ctx().request_repaint();
+        }
     }
 
     // =========================================================================================
@@ -1877,6 +1907,74 @@ impl Viewport {
     // Overlay
     // =========================================================================================
 
+    /// First steps, over an empty scene: how to add things, move around, find anything.
+    fn tips(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let ctx = ui.ctx().clone();
+        let steps = [
+            (
+                icon::PLUS_CIRCLE,
+                tf(
+                    "tips.add",
+                    &[(
+                        "keys",
+                        &crate::commands::Command::AddNode.shortcut_text(&ctx),
+                    )],
+                ),
+            ),
+            (icon::HAND_GRABBING, t("tips.drag")),
+            (icon::MOUSE, t("tips.move")),
+            (
+                icon::MAGNIFYING_GLASS,
+                tf(
+                    "tips.search",
+                    &[(
+                        "keys",
+                        &crate::commands::Command::SearchEverything.shortcut_text(&ctx),
+                    )],
+                ),
+            ),
+            (icon::PLAY, t("tips.play")),
+        ];
+        let width = (rect.width() - 40.0).clamp(240.0, 440.0);
+        let area = egui::Area::new(ui.id().with("tips"))
+            .order(egui::Order::Middle)
+            // Low in the view, clear of where one clicks and drags to work.
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(Pos2::new(rect.center().x, rect.bottom() - 12.0))
+            .constrain_to(rect);
+        area.show(&ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(14))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.heading(format!("{}  {}", icon::SPARKLE, t("tips.title")));
+                    ui.add_space(6.0);
+                    for (glyph, text) in steps {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(glyph).color(theme::ACCENT).size(16.0));
+                            ui.label(text);
+                        });
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let add =
+                            egui::Button::new(format!("{}  {}", icon::PLUS, t("tips.add_button")))
+                                .fill(theme::ACCENT_DIM);
+                        if ui.add(add).clicked() {
+                            crate::commands::request(&ctx, crate::commands::Command::AddNode);
+                        }
+                        if ui
+                            .button(t("tips.hide"))
+                            .on_hover_text(t("tips.hide_hint"))
+                            .clicked()
+                        {
+                            self.options.tips = false;
+                        }
+                    });
+                });
+        });
+    }
+
     fn overlay(&mut self, ui: &mut egui::Ui, rect: Rect, editor: &mut Editor) {
         let bar = Rect::from_min_size(
             rect.min + Vec2::new(8.0, 8.0),
@@ -2240,6 +2338,22 @@ impl Viewport {
 
 use ab_engine::input::{KeyCode, MouseButton};
 
+/// Whether a view must be drawn again without waiting for input: the game running, a drag or
+/// flight under way (keys held, the mouse still), or, editing with effects previewed, a
+/// picture that changes with time (`stats` of the last frame drawn).
+fn keeps_animating(
+    mode: Mode,
+    preview_effects: bool,
+    interacting: bool,
+    stats: &FrameStats,
+) -> bool {
+    interacting
+        || match mode {
+            Mode::Play { paused } => !paused,
+            Mode::Edit => preview_effects && stats.animated,
+        }
+}
+
 fn mouse_button(button: egui::PointerButton) -> Option<MouseButton> {
     Some(match button {
         egui::PointerButton::Primary => MouseButton::Left,
@@ -2458,6 +2572,7 @@ fn has_icon(class: &str) -> bool {
             | "Particles3D"
             | "AudioStreamPlayer3D"
             | "AudioListener3D"
+            | "AudioZone"
             | "Area3D"
             | "CameraShake"
             | "Joint3D"
@@ -2714,6 +2829,69 @@ fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 }
 
 /// Screen polyline of a circle around `axis`.
+/// A cutscene's camera move: a dashed path, a diamond per key (white when selected) and
+/// a small frustum where the camera is at the playhead.
+fn draw_camera_path(
+    painter: &egui::Painter,
+    projector: &Projector,
+    path: &crate::panels::cutscene::CameraPath,
+) {
+    let color = theme::ACCENT;
+    for (i, pair) in path.points.windows(2).enumerate() {
+        if i % 2 == 1 {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (projector.project(pair[0]), projector.project(pair[1])) {
+            painter.line_segment([a, b], Stroke::new(2.0_f32, color.gamma_multiply(0.8)));
+        }
+    }
+    for (i, key) in path.keys.iter().enumerate() {
+        let Some(at) = projector.project(*key) else {
+            continue;
+        };
+        let fill = if path.selected == Some(i) {
+            Color32::WHITE
+        } else {
+            color
+        };
+        let s = 6.0;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                at + Vec2::new(0.0, -s),
+                at + Vec2::new(s, 0.0),
+                at + Vec2::new(0.0, s),
+                at + Vec2::new(-s, 0.0),
+            ],
+            fill,
+            Stroke::new(1.0_f32, theme::BG_0),
+        ));
+        painter.text(
+            at + Vec2::new(8.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{}", i + 1),
+            egui::FontId::proportional(11.0),
+            fill,
+        );
+    }
+    if let Some((position, rotation, fov)) = path.at {
+        let depth = 1.2;
+        let half = (fov.to_radians() * 0.5).tan() * depth;
+        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .map(|(x, y)| position + rotation * Vec3::new(x * half * 16.0 / 9.0, y * half, -depth));
+        let warn = Stroke::new(1.5_f32, theme::WARN);
+        let tip = projector.project(position);
+        let screen: Vec<Option<Pos2>> = corners.iter().map(|&c| projector.project(c)).collect();
+        for i in 0..4 {
+            if let (Some(a), Some(b)) = (screen[i], screen[(i + 1) % 4]) {
+                painter.line_segment([a, b], warn);
+            }
+            if let (Some(t), Some(c)) = (tip, screen[i]) {
+                painter.line_segment([t, c], warn);
+            }
+        }
+    }
+}
+
 fn ring(projector: &Projector, center: Vec3, axis: Vec3, radius: f32) -> Vec<Pos2> {
     let u = axis.any_orthonormal_vector();
     let v = axis.cross(u);
@@ -2989,6 +3167,75 @@ fn draw_selection(
             tree.global_transform(n),
         ) {
             draw_shape(painter, projector, &global, shape.shape(), shape_stroke);
+            any = true;
+        }
+    }
+    for &n in &nodes {
+        let Some(global) = tree.global_transform(n) else {
+            continue;
+        };
+        // An audio zone: its shape, and the depth over which it fades in (dimmed).
+        if let Some(zone) = tree.component::<ab_engine::audio::AudioZone>(n) {
+            let color = theme::PLAY.gamma_multiply(if active { 0.9 } else { 0.5 });
+            let faded = Stroke::new(1.0_f32, color.gamma_multiply(0.35));
+            match zone.shape {
+                ab_engine::audio::ZoneShape::Box { half_extents } => {
+                    let h = Vec3::from(half_extents);
+                    draw_box(
+                        painter,
+                        projector,
+                        &box_corners(&global, -h, h),
+                        Stroke::new(1.5_f32, color),
+                    );
+                    let inner = (h - Vec3::splat(zone.fade_distance)).max(Vec3::ZERO);
+                    if zone.fade_distance > 0.0 && inner.min_element() > 0.0 {
+                        draw_box(
+                            painter,
+                            projector,
+                            &box_corners(&global, -inner, inner),
+                            faded,
+                        );
+                    }
+                }
+                ab_engine::audio::ZoneShape::Sphere { radius } => {
+                    let center = Vec3::from(global.translation);
+                    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                        painter.add(egui::Shape::line(
+                            ring(projector, center, axis, radius),
+                            Stroke::new(1.5_f32, color),
+                        ));
+                        let inner = radius - zone.fade_distance;
+                        if zone.fade_distance > 0.0 && inner > 0.0 {
+                            painter.add(egui::Shape::line(
+                                ring(projector, center, axis, inner),
+                                faded,
+                            ));
+                        }
+                    }
+                }
+            }
+            any = true;
+        }
+        // A 3D sound: where it is at full volume, and where it falls silent.
+        if let Some(attenuation) = tree
+            .component::<ab_engine::audio::AudioPlayer>(n)
+            .and_then(|p| p.positional.clone())
+        {
+            let center = Vec3::from(global.translation);
+            for (radius, alpha) in [
+                (attenuation.min_distance, 0.8),
+                (attenuation.max_distance, 0.4),
+            ] {
+                if radius > 0.0 {
+                    let stroke = Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(alpha));
+                    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                        painter.add(egui::Shape::line(
+                            ring(projector, center, axis, radius),
+                            stroke,
+                        ));
+                    }
+                }
+            }
             any = true;
         }
     }
@@ -3393,6 +3640,34 @@ mod tests {
         assert!((snap_scale_factor(&snap, 1.0, 1.26) - 1.3).abs() < 1e-5);
         // A mirrored axis (negative scale) stays mirrored: factor > 0.
         assert!((snap_scale_factor(&snap, -1.0, 1.26) - 1.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_still_scene_is_not_redrawn_until_something_moves() {
+        let still = FrameStats::default();
+        let moving = FrameStats {
+            animated: true,
+            ..Default::default()
+        };
+        assert!(!keeps_animating(Mode::Edit, true, false, &still));
+        assert!(keeps_animating(Mode::Edit, true, false, &moving));
+        assert!(
+            !keeps_animating(Mode::Edit, false, false, &moving),
+            "effects preview off: time stands still"
+        );
+        assert!(keeps_animating(Mode::Edit, false, true, &still), "dragging");
+        assert!(keeps_animating(
+            Mode::Play { paused: false },
+            false,
+            false,
+            &still
+        ));
+        assert!(!keeps_animating(
+            Mode::Play { paused: true },
+            true,
+            false,
+            &moving
+        ));
     }
 
     #[test]
